@@ -1,4 +1,4 @@
-.PHONY: install fmt fmt-check lint test benchmark build check tauri-dev
+.PHONY: install fmt fmt-check lint test benchmark build roadmap-check check tauri-dev
 
 install:
 	npm ci
@@ -24,7 +24,11 @@ build:
 	npm run build
 	cargo check --workspace --locked
 
-check: lint test benchmark build
+roadmap-check:
+	python3 scripts/roadmap.py --validate-only
+	python3 -m unittest discover -s tests -v
+
+check: lint test benchmark build roadmap-check
 
 tauri-dev:
 	npm run tauri dev

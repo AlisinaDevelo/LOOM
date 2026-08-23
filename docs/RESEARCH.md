@@ -124,3 +124,6 @@ and the evaluation procedure instead.
 - Do not make always-on capture a prerequisite for the first release.
 - Treat every connector and extractor as a permissioned, versioned boundary.
 - Re-run this market review at each major release; vendor pages and platform behavior change.
+- Re-test adoption, willingness to pay, support burden, connector maintenance, and optional-service
+  cost before mobile, cross-platform, relay, or professional expansion. A documented stop decision
+  is a successful research result when demand or economics do not justify the risk.

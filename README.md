@@ -63,6 +63,25 @@ cargo run --locked -p loom-cli -- benchmark \
 At the current pre-alpha baseline, the shared checkout passes npm run check and cargo test
 --workspace --locked. These are local checks, not a release or compatibility guarantee.
 
+## Five-year execution program
+
+LOOM's public roadmap spans 20 rolling quarters from 2026-08-23 through 2031-08-23. The tracked
+[manifest](roadmap/roadmap.json) contains 154 active issues across 13 product phases, with concrete
+outcomes, measurable acceptance criteria, labels, quarterly placement, phase parents, and explicit
+prerequisites. Four overlapping planning items are retained only as sanitized consolidation
+records; no implementation is claimed for them.
+
+Validate the complete graph offline:
+
+```text
+make roadmap-check
+```
+
+Maintainers can compare the manifest with GitHub without writing by running
+`python3 scripts/roadmap.py --repository AlisinaDevelo/LOOM`. The reconciliation tool adopts both
+the original LOOM markers and legacy Forge sync markers, but always renders public v2 issue bodies
+without private routing metadata.
+
 ## Documentation
 
 - [Architecture](docs/ARCHITECTURE.md)
@@ -74,6 +93,7 @@ At the current pre-alpha baseline, the shared checkout passes npm run check and 
 - [Product direction](docs/PRODUCT.md)
 - [Research direction](docs/RESEARCH.md)
 - [Roadmap](docs/ROADMAP.md)
+- [Machine-readable roadmap](roadmap/roadmap.json)
 - [Contributing](CONTRIBUTING.md)
 - [Security policy](SECURITY.md)
 
