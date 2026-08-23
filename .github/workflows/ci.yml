@@ -37,7 +37,7 @@ jobs:
           --queries benchmarks/retrieval/v0/queries.jsonl
 
   rust-msrv:
-    name: Rust 1.88 minimum version
+    name: Rust 1.88 core minimum version
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -46,8 +46,8 @@ jobs:
           persist-credentials: false
       - name: Install declared minimum Rust
         run: rustup toolchain install 1.88.0 --profile minimal
-      - name: Check workspace at MSRV
-        run: cargo +1.88.0 check --workspace --all-targets --locked
+      - name: Check portable core and CLI at MSRV
+        run: cargo +1.88.0 check -p loom-core -p loom-cli --all-targets --locked
 
   rust-advisories:
     name: Rust security advisories
@@ -94,8 +94,12 @@ jobs:
           cache: npm
       - name: Install Rust components
         run: rustup toolchain install stable --profile minimal --component clippy
+      - name: Install declared minimum Rust
+        run: rustup toolchain install 1.88.0 --profile minimal
       - run: npm ci
       - run: cargo clippy --locked -p loom --all-targets -- -D warnings
+      - name: Check full workspace at MSRV on macOS
+        run: cargo +1.88.0 check --workspace --all-targets --locked
       - run: cargo test --workspace --locked
       - run: npm run build
       - run: npm run tauri build -- --debug --no-bundle
