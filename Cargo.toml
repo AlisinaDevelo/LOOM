@@ -1,0 +1,31 @@
+[workspace]
+members = ["crates/loom-cli", "crates/loom-core", "src-tauri"]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MPL-2.0"
+authors = ["AlisinaDevelo"]
+repository = "https://github.com/AlisinaDevelo/LOOM"
+rust-version = "1.88"
+
+[workspace.dependencies]
+blake3 = "1.8.7"
+chrono = { version = "0.4.45", default-features = false, features = ["clock", "serde"] }
+clap = { version = "4.6.6", features = ["derive"] }
+libc = "0.2"
+rusqlite = { version = "0.40.2", default-features = false, features = ["bundled", "cache"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tempfile = "3"
+thiserror = "2.0.20"
+uuid = { version = "1.25.0", features = ["serde", "v4"] }
+walkdir = "2.5.0"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+dbg_macro = "deny"
+todo = "deny"

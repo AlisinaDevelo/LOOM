@@ -1,0 +1,120 @@
+# Architecture
+
+LOOM is a pre-alpha desktop and CLI application. The current architecture keeps a small,
+source-backed retrieval path stable while leaving semantic retrieval and additional extractors as
+separate, rebuildable layers.
+
+## Current flow
+
+```text
+explicit file or directory selection
+        |
+        v
+backend-owned selection -> bounded traversal (no symlink following)
+        |
+        v
+no-follow, contained stable read -> line-ending normalization -> BLAKE3 hash
+        |
+        v
+artifact version -> passages with character/line anchors
+        |
+        +--> SQLite canonical tables
+        |
+        +--> SQLite FTS5 lexical index
+                    |
+                    v
+              source-backed search hit
+              (path, hash, excerpt, anchor)
+```
+
+The source file remains the authority for opening the original. LOOM stores extracted passage text
+and metadata in the local database so searches can run without rereading every source file. The
+current file ingestion path does not upload, copy, or synchronize source content to a service.
+
+## Components
+
+### loom-core
+
+The Rust core owns ingestion, passage segmentation, the SQLite schema, FTS5 queries, statistics, and
+evidence-bearing search results. The current extractor is loom.text version 0.1.0.
+
+Ingestion accepts an explicitly selected regular file or directory, supports UTF-8 .txt, .md, and
+.markdown, does not follow symlinks, limits a file to 8 MiB, and limits one traversal to 20,000
+files. Reads use a no-follow descriptor on Unix, canonical root containment, file identity, size,
+modification-time, and post-read checks. Files that change during a read are retried and reported if
+a stable read cannot be obtained. A complete directory rescan marks disappeared, unsupported, or
+unreadable prior sources missing so they no longer search. Text is normalized to LF before passage
+offsets are computed. Passages target 1,000 characters with 120 characters of overlap.
+
+### loom-cli
+
+The CLI indexes a selected path, searches the configured database, reports statistics, and runs the
+retrieval smoke benchmark. Its default database is .loom/library.sqlite3; callers can provide
+another path.
+
+### Tauri shell and UI
+
+The Tauri layer opens the application-data SQLite database and exposes the narrow commands
+index_selected_folder, search, library_stats, and open_artifact. Folder selection happens inside the
+Rust command through the native dialog; the webview does not provide a path. Opening requires the
+artifact ID, version ID, and content hash returned by search, then rereads and verifies current
+source bytes before handing the path to the host. The React UI can search, inspect structured
+source-backed evidence, and request that verified open operation. Tauri capability configuration is
+a security boundary and must be reviewed with command changes. See the
+[Tauri capabilities documentation](https://v2.tauri.app/security/capabilities/).
+
+### Benchmark fixture
+
+benchmarks/retrieval/v0/ is a synthetic, rights-clean smoke fixture. It is intentionally separate
+from user data and is not a claim about production retrieval quality.
+
+## Persistence
+
+SQLite is the canonical store. The current schema is version 2 and contains source roots, logical
+artifacts, locators, content versions, passages, and reserved relationships. Each passage has a JSON
+text anchor plus scalar character and line offsets.
+
+SQLite FTS5 is an external-content virtual table over passages. Insert, update, and delete triggers
+keep the lexical index synchronized with canonical passage rows. Search uses sanitized FTS5 terms
+and phrases and BM25 ranking, then projects matches into structured source-text segments and exact
+character/line anchors. Highlight state is data, not an in-band source-text marker. See the
+[SQLite FTS5 reference](https://www.sqlite.org/fts5.html).
+
+The connection uses foreign keys, a five-second busy timeout, WAL journaling, NORMAL synchronous
+mode, in-memory temporary storage, and SQLite trusted-schema hardening. These are operational
+choices for the local database, not a promise of crash-proof or encrypted storage. SQLite documents
+the WAL trade-offs in its [WAL reference](https://www.sqlite.org/wal.html).
+
+The current schema is version 2. Opening refuses a missing, malformed, or unknown version marker
+instead of rewriting it. Pre-alpha version 1 databases are explicitly rejected because their
+content-version uniqueness contract did not include extractor identity; no public migration path
+has been promised. A content observation is keyed by source artifact, byte hash, extractor, and
+extractor version so changed extraction logic cannot silently reuse old passages.
+
+## Invariants
+
+- Indexing starts only from a path explicitly supplied by the user or the UI picker.
+- A ready content version is identified by its artifact, content hash, extractor identity, and
+  extractor version; only an unchanged projection is reused.
+- The hash is BLAKE3 over the source bytes read from disk.
+- Passage anchors refer to normalized text and never split a Unicode scalar boundary.
+- A search result resolves through an active artifact locator and retains its source hash and
+  anchor.
+- Opening a result succeeds only while the active version and current source hash still match the
+  result; changed bytes return an explicit stale-source error.
+- Query text is treated as user input; FTS5 operators are not accepted as an escape hatch into a
+  different query language.
+
+## Boundaries and planned extensions
+
+The current SQLite records are the authority for source identity, text, versions, and evidence. An
+eventual semantic index may add vectors or other derived representations, but it must be rebuildable
+from canonical records and must not replace the source-backed result contract. PDF/OCR extraction,
+browser capture, external model providers, cloud sync, and managed copies are not implemented in
+this slice.
+
+## References
+
+- [SQLite FTS5](https://www.sqlite.org/fts5.html)
+- [SQLite Write-Ahead Logging](https://www.sqlite.org/wal.html)
+- [Tauri capabilities](https://v2.tauri.app/security/capabilities/)

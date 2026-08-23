@@ -1,0 +1,2 @@
+A saved webpage record preserves the canonical URL, capture timestamp, original title, and
+sanitizer version. Snapshot completeness is best-effort and is always shown to the user.

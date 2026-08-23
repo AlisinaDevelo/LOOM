@@ -1,0 +1,41 @@
+name: Retrieval failure
+description: Report a known-item query that missed or ranked the wrong source
+title: "[Retrieval] "
+labels: ["type:bug", "area:retrieval"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use a synthetic or redistributable fixture. Never upload private corpus material.
+  - type: textarea
+    id: known_item
+    attributes:
+      label: Expected source and evidence
+      description: Name the expected artifact and page/line/region using a safe fixture.
+    validations:
+      required: true
+  - type: textarea
+    id: query
+    attributes:
+      label: Query and filters
+      description: Provide a sanitized equivalent if the real query is sensitive.
+    validations:
+      required: true
+  - type: textarea
+    id: result
+    attributes:
+      label: Actual result
+      description: State whether this was missing-index, wrong-source, or evidence-viewer failure.
+    validations:
+      required: true
+  - type: dropdown
+    id: media
+    attributes:
+      label: Source type
+      options: [Text, Markdown, PDF, Screenshot/image, Saved webpage, Other]
+    validations:
+      required: true
+  - type: textarea
+    id: fixture
+    attributes:
+      label: Reproducible fixture or test proposal

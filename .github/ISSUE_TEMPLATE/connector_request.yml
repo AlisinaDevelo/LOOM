@@ -1,0 +1,36 @@
+name: Connector request
+description: Propose an explicit-source importer or capture connector
+title: "[Connector] "
+labels: ["type:feature", "area:connector"]
+body:
+  - type: input
+    id: source
+    attributes:
+      label: Source product or format
+    validations:
+      required: true
+  - type: textarea
+    id: job
+    attributes:
+      label: Known-item recovery job
+    validations:
+      required: true
+  - type: textarea
+    id: fidelity
+    attributes:
+      label: Identity and provenance to preserve
+      description: IDs, paths/URLs, versions, timestamps, page/region anchors, and source links.
+    validations:
+      required: true
+  - type: textarea
+    id: permissions
+    attributes:
+      label: Required permissions and network behavior
+    validations:
+      required: true
+  - type: textarea
+    id: lifecycle
+    attributes:
+      label: Sync, conflict, retention, and deletion behavior
+    validations:
+      required: true

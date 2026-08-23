@@ -1,0 +1,49 @@
+{
+  "name": "loom",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Recover the exact source object, locally.",
+  "repository": "https://github.com/AlisinaDevelo/LOOM",
+  "license": "MPL-2.0",
+  "engines": {
+    "node": ">=24.0.0"
+  },
+  "scripts": {
+    "dev": "vite",
+    "build": "npm run typecheck && vite build",
+    "lint": "npm run lint:code && npm run lint:markdown",
+    "lint:code": "eslint . --max-warnings=0",
+    "lint:markdown": "markdownlint-cli2 '**/*.md' '#node_modules' '#target' '#.forge'",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit",
+    "preview": "vite preview",
+    "check": "npm run lint && npm run test && npm run build",
+    "tauri": "tauri"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "^2.11.1",
+    "react": "^19.2.8",
+    "react-dom": "^19.2.8"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "@tauri-apps/cli": "^2.11.4",
+    "@testing-library/jest-dom": "^7.0.1",
+    "@testing-library/react": "^16.3.2",
+    "@types/react": "^19.2.18",
+    "@types/react-dom": "^19.2.4",
+    "@vitejs/plugin-react": "^6.1.0",
+    "eslint": "^10.9.0",
+    "eslint-plugin-react-hooks": "^7.1.1",
+    "eslint-plugin-react-refresh": "^0.5.4",
+    "globals": "^17.11.0",
+    "jsdom": "^30.0.1",
+    "markdownlint-cli2": "0.23.2",
+    "typescript": "~6.0.3",
+    "typescript-eslint": "^8.67.0",
+    "vite": "^8.2.2",
+    "vitest": "^4.1.11"
+  }
+}

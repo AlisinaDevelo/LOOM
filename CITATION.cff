@@ -1,0 +1,17 @@
+cff-version: 1.2.0
+message: "If you use LOOM, please cite the repository."
+title: "LOOM: Evidence-first local retrieval"
+type: software
+authors:
+  - family-names: Karimi
+    given-names: Alisina
+repository-code: "https://github.com/AlisinaDevelo/LOOM"
+license: "MPL-2.0"
+version: "0.1.0"
+abstract: "Pre-alpha local retrieval for selected text and Markdown files with source-backed evidence."
+keywords:
+  - local-first
+  - information-retrieval
+  - provenance
+  - SQLite
+  - FTS5

@@ -1,0 +1,24 @@
+[package]
+name = "loom-cli"
+description = "Local CLI and retrieval evaluation harness for LOOM"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "loom"
+path = "src/main.rs"
+
+[dependencies]
+blake3.workspace = true
+clap.workspace = true
+loom-core = { path = "../loom-core" }
+serde.workspace = true
+serde_json.workspace = true
+tempfile.workspace = true
+
+[lints]
+workspace = true

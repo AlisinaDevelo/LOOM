@@ -1,0 +1,58 @@
+{
+  "schema_version": 2,
+  "name": "loom-retrieval-v0",
+  "license": "CC0-1.0",
+  "media_types": ["text/markdown", "text/plain"],
+  "query_count": 3,
+  "fixtures": [
+    {
+      "path": "corpus/capture-contract.txt",
+      "content_hash": "blake3:b00fa710cc98f7999762c1e9f634b1604e1aa03220459619128c6b112a4f17c2",
+      "extractor_id": "loom.text",
+      "extractor_version": "0.1.0",
+      "passages": [
+        {
+          "ordinal": 0,
+          "text_hash": "blake3:b00fa710cc98f7999762c1e9f634b1604e1aa03220459619128c6b112a4f17c2",
+          "anchor": { "kind": "text", "char_start": 0, "char_end": 180, "line_start": 1, "line_end": 3 }
+        }
+      ]
+    },
+    {
+      "path": "corpus/field-notes.md",
+      "content_hash": "blake3:1d60ff45bc26972683d248dc2af513eb36d08b8e795c4de580edd24512b07844",
+      "extractor_id": "loom.text",
+      "extractor_version": "0.1.0",
+      "passages": [
+        {
+          "ordinal": 0,
+          "text_hash": "blake3:1d60ff45bc26972683d248dc2af513eb36d08b8e795c4de580edd24512b07844",
+          "anchor": { "kind": "text", "char_start": 0, "char_end": 161, "line_start": 1, "line_end": 5 }
+        }
+      ]
+    },
+    {
+      "path": "corpus/isolation.md",
+      "content_hash": "blake3:165bc9ca1af88946e9f3e9858e66b455fe156b9eb528ce1d746645bc3b66ec56",
+      "extractor_id": "loom.text",
+      "extractor_version": "0.1.0",
+      "passages": [
+        {
+          "ordinal": 0,
+          "text_hash": "blake3:165bc9ca1af88946e9f3e9858e66b455fe156b9eb528ce1d746645bc3b66ec56",
+          "anchor": { "kind": "text", "char_start": 0, "char_end": 192, "line_start": 1, "line_end": 5 }
+        }
+      ]
+    }
+  ],
+  "reported_metrics": [
+    "exact_source_recall_at_1",
+    "exact_source_recall_at_5",
+    "anchor_precision",
+    "false_positive_rate",
+    "index_completeness",
+    "median_latency_ms",
+    "p95_latency_ms"
+  ],
+  "notes": "Synthetic smoke corpus authored for LOOM; not a product-quality benchmark."
+}

@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Report a security vulnerability privately
+    url: https://github.com/AlisinaDevelo/LOOM/security/advisories/new
+    about: Do not post sensitive source material, local paths, or exploit details in a public issue.

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-index-selected-folder"
+description = "Enables the index_selected_folder command without any pre-configured scope."
+commands.allow = ["index_selected_folder"]
+
+[[permission]]
+identifier = "deny-index-selected-folder"
+description = "Denies the index_selected_folder command without any pre-configured scope."
+commands.deny = ["index_selected_folder"]

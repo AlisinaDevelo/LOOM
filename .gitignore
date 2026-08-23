@@ -1,0 +1,49 @@
+# Dependency and build output
+node_modules/
+dist/
+coverage/
+target/
+src-tauri/target/
+src-tauri/gen/schemas/
+
+# LOOM local libraries and rebuildable projections
+.loom/
+*.sqlite
+*.sqlite3
+*.sqlite-wal
+*.sqlite-shm
+*.db
+models/
+model-cache/
+ocr-scratch/
+index-generations/
+
+# Forge orchestration state is local; public issues contain the sanitized roadmap.
+.forge/
+
+# Environment and local configuration
+.env
+.env.*
+!.env.example
+*.local
+
+# Logs and temporary files
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+.tmp/
+tmp/
+
+# Editors and operating systems
+.vscode/*
+!.vscode/extensions.json
+.idea/
+.DS_Store
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?

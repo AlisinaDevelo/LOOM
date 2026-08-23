@@ -1,0 +1,13 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Minimum local permissions for LOOM's main evidence-retrieval window",
+  "windows": ["main"],
+  "permissions": [
+    "core:default",
+    "allow-index-selected-folder",
+    "allow-search",
+    "allow-library-stats",
+    "allow-open-artifact"
+  ]
+}

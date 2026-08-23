@@ -1,0 +1,37 @@
+name: Research or benchmark proposal
+description: Propose a falsifiable retrieval, HCI, privacy, or systems study
+title: "[Research] "
+labels: ["type:research"]
+body:
+  - type: textarea
+    id: hypothesis
+    attributes:
+      label: Hypothesis
+    validations:
+      required: true
+  - type: textarea
+    id: corpus
+    attributes:
+      label: Dataset, consent, and license
+      description: State why LOOM has the right to distribute or process every fixture.
+    validations:
+      required: true
+  - type: textarea
+    id: metrics
+    attributes:
+      label: Metrics and slices
+      description: Include exact-source/anchor metrics, latency/cost, and failure categories.
+    validations:
+      required: true
+  - type: textarea
+    id: gate
+    attributes:
+      label: Preregistered decision gate
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction plan
+    validations:
+      required: true

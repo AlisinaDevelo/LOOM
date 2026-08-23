@@ -1,0 +1,101 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  rust-core:
+    name: Rust core and retrieval
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - name: Install Rust components
+        run: rustup toolchain install stable --profile minimal --component rustfmt,clippy
+      - name: Format
+        run: cargo fmt --all --check
+      - name: Clippy
+        run: cargo clippy --locked -p loom-core -p loom-cli --all-targets -- -D warnings
+      - name: Test
+        run: cargo test --locked -p loom-core -p loom-cli
+      - name: Retrieval smoke benchmark
+        run: >-
+          cargo run --locked -q -p loom-cli -- benchmark
+          --corpus benchmarks/retrieval/v0/corpus
+          --queries benchmarks/retrieval/v0/queries.jsonl
+
+  rust-msrv:
+    name: Rust 1.88 minimum version
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - name: Install declared minimum Rust
+        run: rustup toolchain install 1.88.0 --profile minimal
+      - name: Check workspace at MSRV
+        run: cargo +1.88.0 check --workspace --all-targets --locked
+
+  rust-advisories:
+    name: Rust security advisories
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      checks: write
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - uses: rustsec/audit-check@69366f33c96575abad1ee0dba8212993eecbe998 # v2.0.0
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+  frontend:
+    name: Frontend
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
+        with:
+          node-version: "24"
+          cache: npm
+      - run: npm ci
+      - run: npm audit --audit-level=high
+      - run: npm run check
+
+  tauri-macos:
+    name: Tauri macOS integration
+    runs-on: macos-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
+        with:
+          node-version: "24"
+          cache: npm
+      - name: Install Rust components
+        run: rustup toolchain install stable --profile minimal --component clippy
+      - run: npm ci
+      - run: cargo clippy --locked -p loom --all-targets -- -D warnings
+      - run: cargo test --workspace --locked
+      - run: npm run build
+      - run: npm run tauri build -- --debug --no-bundle

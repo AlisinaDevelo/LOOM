@@ -1,0 +1,45 @@
+name: Bug report
+description: Report a reproducible application or indexing defect
+title: "[Bug] "
+labels: ["type:bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Do not attach private documents, screenshots, source paths, query history, or secrets.
+  - type: textarea
+    id: behavior
+    attributes:
+      label: What happened?
+      description: Describe the behavior without including sensitive corpus contents.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Minimal reproduction
+      description: Prefer a synthetic or redistributable fixture.
+      placeholder: |
+        1. Index...
+        2. Search...
+        3. Observe...
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: LOOM version or commit
+    validations:
+      required: true
+  - type: dropdown
+    id: platform
+    attributes:
+      label: Platform
+      options: [macOS Apple Silicon, macOS Intel, Linux, Windows, Other]
+    validations:
+      required: true
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Redacted diagnostics
+      description: Include only logs you have inspected and redacted.

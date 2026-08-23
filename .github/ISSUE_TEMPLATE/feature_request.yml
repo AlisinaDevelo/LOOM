@@ -1,0 +1,36 @@
+name: Feature request
+description: Propose a focused improvement to exact-source recovery
+title: "[Feature] "
+labels: ["type:feature"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Recovery problem
+      description: What exact thing cannot be recovered today, and for whom?
+    validations:
+      required: true
+  - type: textarea
+    id: outcome
+    attributes:
+      label: Desired evidence-backed outcome
+      description: Describe the source object, evidence anchor, and open/export action.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+    validations:
+      required: true
+  - type: checkboxes
+    id: boundaries
+    attributes:
+      label: Product boundaries
+      options:
+        - label: This does not require silent always-on capture.
+          required: true
+        - label: This does not require generated claims without source anchors.
+          required: true
+        - label: New permissions, network access, and retained copies are explicit.
+          required: true

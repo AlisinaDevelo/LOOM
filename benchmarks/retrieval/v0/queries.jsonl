@@ -1,0 +1,3 @@
+{"id":"q001","query":"\"retry anomalies\"","source_type":"local_text","expected_file":"isolation.md","expected_anchor":{"kind":"text","char_start":60,"char_end":75,"line_start":3,"line_end":3,"contains":"retry anomalies"}}
+{"id":"q002","query":"\"chartreuse cable\"","source_type":"local_text","expected_file":"field-notes.md","expected_anchor":{"kind":"text","char_start":26,"char_end":42,"line_start":3,"line_end":3,"contains":"chartreuse cable"}}
+{"id":"q003","query":"\"canonical URL\"","source_type":"local_text","expected_file":"capture-contract.txt","expected_anchor":{"kind":"text","char_start":37,"char_end":50,"line_start":1,"line_end":1,"contains":"canonical URL"}}
