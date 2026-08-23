@@ -28,6 +28,7 @@ FORGE_MARKER_RE = re.compile(r"<!-- forge-task:v1 id=(\d{4})(?:\s+[^>]*)? -->")
 MARKER_PREFIX = "<!-- loom-roadmap:v2 id="
 MANAGED_LABEL_PREFIXES = ("type:", "priority:", "horizon:", "area:", "phase:", "status:")
 API_VERSION = "2022-11-28"
+WRITE_DELAY_SECONDS = 1.1
 
 
 BASE_LABELS: dict[str, tuple[str, str]] = {
@@ -317,7 +318,7 @@ def run_gh(method: str, path: str, payload: dict[str, Any] | None = None, *, pag
     if payload is not None:
         command.extend(["--input", "-"])
         stdin = json.dumps(payload)
-    for attempt in range(6):
+    for attempt in range(10):
         result = subprocess.run(command, input=stdin, text=True, capture_output=True, check=False)
         if result.returncode == 0:
             parsed = json.loads(result.stdout) if result.stdout.strip() else None
@@ -328,9 +329,11 @@ def run_gh(method: str, path: str, payload: dict[str, Any] | None = None, *, pag
             return parsed
         lowered = result.stderr.lower()
         retryable = "secondary rate" in lowered or "http 403" in lowered or "http 429" in lowered
-        if not retryable or attempt == 5:
+        if not retryable or attempt == 9:
             raise RuntimeError(f"gh api {method} {path} failed: {result.stderr.strip()}")
-        time.sleep(min(2 ** attempt, 30))
+        delay = min(10 * (attempt + 1), 60)
+        print(f"GitHub rate limited {method} {path}; retrying in {delay}s", file=sys.stderr, flush=True)
+        time.sleep(delay)
     raise RuntimeError(f"gh api {method} {path} exhausted retries")
 
 
@@ -567,47 +570,52 @@ def progress(action: str, current: int, total: int) -> None:
         print(f"{action}: {current}/{total}", flush=True)
 
 
+def write_gh(method: str, path: str, payload: dict[str, Any] | None = None) -> Any:
+    result = run_gh(method, path, payload)
+    time.sleep(WRITE_DELAY_SECONDS)
+    return result
+
+
 def apply_labels_and_milestones(repository: str, plan: dict[str, Any]) -> None:
     for item in plan["mutations"]["create_labels"]:
-        run_gh("POST", f"repos/{repository}/labels", item)
+        write_gh("POST", f"repos/{repository}/labels", item)
     for item in plan["mutations"]["update_labels"]:
-        run_gh("PATCH", f"repos/{repository}/labels/{item['current_name']}", item["payload"])
+        write_gh("PATCH", f"repos/{repository}/labels/{item['current_name']}", item["payload"])
     for item in plan["_create_milestones"]:
-        run_gh("POST", f"repos/{repository}/milestones", {
+        write_gh("POST", f"repos/{repository}/milestones", {
             "title": item["title"],
             "description": f"{item['focus']} Exit gate: {item['exit_criteria']}",
             "due_on": f"{item['due_on']}T23:59:59Z",
             "state": "open",
         })
     for item in plan["mutations"]["update_milestones"]:
-        run_gh("PATCH", f"repos/{repository}/milestones/{item['number']}", item["payload"])
+        write_gh("PATCH", f"repos/{repository}/milestones/{item['number']}", item["payload"])
 
 
 def apply_issues(repository: str, manifest: dict[str, Any], snapshot: Snapshot, plan: dict[str, Any]) -> None:
     milestone_by_title = {item["title"]: item for item in snapshot.milestones}
     milestones = {item["key"]: item for item in manifest["milestones"]}
     by_id = {item["id"]: item for item in manifest["issues"]}
+    updates = plan["mutations"]["update_issues"]
+    for index, item in enumerate(updates, start=1):
+        write_gh("PATCH", f"repos/{repository}/issues/{item['number']}", item["payload"])
+        progress("update issues", index, len(updates))
+    retired = plan["mutations"]["retire_issues"]
+    for index, item in enumerate(retired, start=1):
+        write_gh("PATCH", f"repos/{repository}/issues/{item['number']}", item["payload"])
+        progress("retire consolidated issues", index, len(retired))
+    # Creation is deliberately last: adoption and sanitization of existing
+    # public records is the first recovery priority after a partial publish.
     creates = plan["mutations"]["create_issues"]
     for index, task_id in enumerate(creates, start=1):
         desired = by_id[task_id]
         milestone_spec = milestones[desired["quarter"]]
         milestone = milestone_by_title[milestone_spec["title"]]
-        run_gh("POST", f"repos/{repository}/issues", {
+        write_gh("POST", f"repos/{repository}/issues", {
             "title": desired["title"], "body": public_body(desired, milestone_spec),
             "milestone": milestone["number"], "labels": desired["labels"],
         })
         progress("create issues", index, len(creates))
-        time.sleep(0.08)
-    updates = plan["mutations"]["update_issues"]
-    for index, item in enumerate(updates, start=1):
-        run_gh("PATCH", f"repos/{repository}/issues/{item['number']}", item["payload"])
-        progress("update issues", index, len(updates))
-        time.sleep(0.08)
-    retired = plan["mutations"]["retire_issues"]
-    for index, item in enumerate(retired, start=1):
-        run_gh("PATCH", f"repos/{repository}/issues/{item['number']}", item["payload"])
-        progress("retire consolidated issues", index, len(retired))
-        time.sleep(0.08)
 
 
 def apply_relationships(repository: str, snapshot: Snapshot, plan: dict[str, Any]) -> None:
@@ -623,15 +631,14 @@ def apply_relationships(repository: str, snapshot: Snapshot, plan: dict[str, Any
             source_issue = issue_by_task[source]
             target_issue = issue_by_task[target]
             if action == "remove parent edges":
-                run_gh("DELETE", f"repos/{repository}/issues/{source_issue['number']}/sub_issue", {"sub_issue_id": target_issue["id"]})
+                write_gh("DELETE", f"repos/{repository}/issues/{source_issue['number']}/sub_issue", {"sub_issue_id": target_issue["id"]})
             elif action == "add parent edges":
-                run_gh("POST", f"repos/{repository}/issues/{source_issue['number']}/sub_issues", {"sub_issue_id": target_issue["id"], "replace_parent": False})
+                write_gh("POST", f"repos/{repository}/issues/{source_issue['number']}/sub_issues", {"sub_issue_id": target_issue["id"], "replace_parent": False})
             elif action == "remove dependency edges":
-                run_gh("DELETE", f"repos/{repository}/issues/{source_issue['number']}/dependencies/blocked_by/{target_issue['id']}")
+                write_gh("DELETE", f"repos/{repository}/issues/{source_issue['number']}/dependencies/blocked_by/{target_issue['id']}")
             else:
-                run_gh("POST", f"repos/{repository}/issues/{source_issue['number']}/dependencies/blocked_by", {"issue_id": target_issue["id"]})
+                write_gh("POST", f"repos/{repository}/issues/{source_issue['number']}/dependencies/blocked_by", {"issue_id": target_issue["id"]})
             progress(action, index, len(edges))
-            time.sleep(0.08)
 
 
 def verify_live(manifest: dict[str, Any], snapshot: Snapshot, plan: dict[str, Any]) -> dict[str, Any]:
