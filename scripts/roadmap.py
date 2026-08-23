@@ -29,6 +29,7 @@ MARKER_PREFIX = "<!-- loom-roadmap:v2 id="
 MANAGED_LABEL_PREFIXES = ("type:", "priority:", "horizon:", "area:", "phase:", "status:")
 API_VERSION = "2022-11-28"
 WRITE_DELAY_SECONDS = 1.1
+RELATIONSHIP_READ_DELAY_SECONDS = 0.1
 
 
 BASE_LABELS: dict[str, tuple[str, str]] = {
@@ -337,7 +338,7 @@ def run_gh(method: str, path: str, payload: dict[str, Any] | None = None, *, pag
     raise RuntimeError(f"gh api {method} {path} exhausted retries")
 
 
-def index_managed_issues(issues: list[dict[str, Any]], known_ids: set[str]) -> dict[str, dict[str, Any]]:
+def index_managed_issues(issues: list[dict[str, Any]], known_ids: set[str], trusted_author: str) -> dict[str, dict[str, Any]]:
     result: dict[str, dict[str, Any]] = {}
     for issue in issues:
         body = issue.get("body") or ""
@@ -347,6 +348,9 @@ def index_managed_issues(issues: list[dict[str, Any]], known_ids: set[str]) -> d
         found_ids = {match.group(1) for match in (active, retired, forge) if match}
         if not found_ids:
             continue
+        author = str((issue.get("user") or {}).get("login", ""))
+        if "pull_request" in issue or author.casefold() != trusted_author.casefold():
+            raise ValueError(f"issue or pull request #{issue['number']} has a roadmap marker from untrusted author {author!r}")
         if len(found_ids) != 1:
             raise ValueError(f"issue #{issue['number']} contains conflicting roadmap markers {sorted(found_ids)}")
         task_id = found_ids.pop()
@@ -363,7 +367,8 @@ def load_snapshot(repository: str, manifest: dict[str, Any], *, relationships: b
     milestones = run_gh("GET", f"repos/{repository}/milestones?state=all&per_page=100", paginate=True)
     issues = run_gh("GET", f"repos/{repository}/issues?state=all&per_page=100", paginate=True)
     known_ids = {issue["id"] for issue in manifest["issues"]} | {issue["id"] for issue in manifest["retired_issues"]}
-    issue_by_task = index_managed_issues(issues, known_ids)
+    trusted_author = repository.split("/", 1)[0]
+    issue_by_task = index_managed_issues(issues, known_ids, trusted_author)
     snapshot = Snapshot(labels, milestones, issues, issue_by_task)
     if not relationships:
         return snapshot
@@ -374,8 +379,10 @@ def load_snapshot(repository: str, manifest: dict[str, Any], *, relationships: b
         if issue.get("parent") is None:
             children = run_gh("GET", f"repos/{repository}/issues/{live['number']}/sub_issues?per_page=100", paginate=True)
             snapshot.subissues[issue["id"]] = {child["id"] for child in children}
+            time.sleep(RELATIONSHIP_READ_DELAY_SECONDS)
         blockers = run_gh("GET", f"repos/{repository}/issues/{live['number']}/dependencies/blocked_by?per_page=100", paginate=True)
         snapshot.blocked_by[issue["id"]] = {blocker["id"] for blocker in blockers}
+        time.sleep(RELATIONSHIP_READ_DELAY_SECONDS)
     return snapshot
 
 
@@ -644,6 +651,8 @@ def apply_relationships(repository: str, snapshot: Snapshot, plan: dict[str, Any
 def verify_live(manifest: dict[str, Any], snapshot: Snapshot, plan: dict[str, Any]) -> dict[str, Any]:
     if mutation_total(plan) != 0:
         raise ValueError(f"live roadmap still needs mutations: {mutation_counts(plan)}")
+    if plan["warnings"]["unexpected_closed"]:
+        raise ValueError(f"live roadmap has unexpected closed issues: {plan['warnings']['unexpected_closed']}")
     active_ids = {issue["id"] for issue in manifest["issues"]}
     retired_ids = {issue["id"] for issue in manifest["retired_issues"]}
     if set(snapshot.issue_by_task) != active_ids | retired_ids:
@@ -657,10 +666,8 @@ def verify_live(manifest: dict[str, Any], snapshot: Snapshot, plan: dict[str, An
     actual_dependencies = sum(len(blockers & managed_numeric) for blockers in snapshot.blocked_by.values())
     if actual_parent != desired_parent or actual_dependencies != desired_dependencies:
         raise ValueError("live native relationship counts do not match the manifest")
-    unsafe_patterns = ("forge-task:v1", "gpt-", "assigned:", "routing metadata", ".forge/")
     for issue in snapshot.issues:
-        body = (issue.get("body") or "").lower()
-        if any(pattern in body for pattern in unsafe_patterns):
+        if contains_unsafe_public_metadata(issue.get("body") or ""):
             raise ValueError(f"public issue or pull request #{issue['number']} still contains private task metadata")
     closed = sum(issue.get("state") == "closed" for issue in snapshot.issue_by_task.values())
     return {
@@ -670,6 +677,15 @@ def verify_live(manifest: dict[str, Any], snapshot: Snapshot, plan: dict[str, An
         "parent_edges": actual_parent, "dependency_edges": actual_dependencies,
         "closed_issues": closed, "mutation_count": 0,
     }
+
+
+def contains_unsafe_public_metadata(body: str) -> bool:
+    unsafe_patterns = (
+        "forge-task:v1", "gpt-", "assigned:", "agent:", "model:",
+        "assigned agent", "assigned model", "routing metadata", ".forge/",
+    )
+    lowered = body.lower()
+    return any(pattern in lowered for pattern in unsafe_patterns)
 
 
 def main() -> int:
