@@ -72,6 +72,12 @@ source bytes and remain subject to the limits above:
 - tests for malformed and adversarial inputs;
 - a reviewable failure mode when derived data cannot be mapped back to its source.
 
+The browser-capture specification is recorded in
+[ADR 0009](adr/0009-browser-capture-protocol.md) and
+[the protocol contract](protocol/browser-capture-v1.md). It adds pairing, authenticated
+envelopes, replay/downgrade rejection, explicit user-gesture tokens, field exclusions, redirect
+limits, and visible best-effort snapshot states before an extension is implemented.
+
 ## References
 
 - [Tauri capabilities](https://v2.tauri.app/security/capabilities/)

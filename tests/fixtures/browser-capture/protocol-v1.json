@@ -1,0 +1,120 @@
+{
+  "schema_version": 1,
+  "protocol": {
+    "major": 1,
+    "minor": 0
+  },
+  "limits": {
+    "max_frame_bytes": 262144,
+    "max_selected_text_bytes": 65536,
+    "max_snapshot_bytes": 8388608,
+    "max_redirects": 8,
+    "max_redirect_url_bytes": 2048,
+    "max_title_bytes": 512,
+    "max_url_bytes": 16384,
+    "max_requests_per_minute": 4
+  },
+  "required_capture_fields": [
+    "protocol",
+    "type",
+    "request_id",
+    "session",
+    "intent",
+    "source",
+    "snapshot",
+    "auth"
+  ],
+  "forbidden_fields": [
+    "cookies",
+    "authorization",
+    "request_body",
+    "password",
+    "hidden_form_values",
+    "autofill",
+    "local_storage",
+    "session_storage",
+    "service_worker_cache",
+    "browser_history",
+    "tab_list",
+    "page_scripts",
+    "remote_resources",
+    "event_handlers"
+  ],
+  "capture_request": {
+    "protocol": {
+      "major": 1,
+      "minor": 0
+    },
+    "type": "capture.request",
+    "request_id": "11111111-1111-4111-8111-111111111111",
+    "session": {
+      "id": "session-synthetic-1",
+      "counter": 7,
+      "issued_at": "2027-08-23T12:34:56Z",
+      "expires_at": "2027-08-23T12:39:56Z"
+    },
+    "intent": {
+      "kind": "user_gesture",
+      "token": "intent-synthetic-7",
+      "issued_at": "2027-08-23T12:34:55Z"
+    },
+    "source": {
+      "live_url": "https://example.test/article",
+      "final_url": "https://example.test/article",
+      "title": "Synthetic article",
+      "selected_text": "A user-selected passage.",
+      "captured_at": "2027-08-23T12:34:56Z",
+      "redirects": [],
+      "scope": "selection"
+    },
+    "snapshot": {
+      "state": "complete",
+      "content_hash": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+      "parser_id": "loom.web",
+      "parser_version": "0.1.0",
+      "bytes": 2048,
+      "failure_code": null
+    },
+    "auth": {
+      "key_id": "pairing-key-test-only",
+      "algorithm": "HMAC-SHA256",
+      "mac": "8738c9f5b382a0fca96a9e2fa75db87aec72e201db24cf78bf6f5700e3ae51ef"
+    }
+  },
+  "snapshot_examples": {
+    "complete": {
+      "state": "complete",
+      "content_hash": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+      "parser_id": "loom.web",
+      "parser_version": "0.1.0",
+      "bytes": 2048,
+      "failure_code": null
+    },
+    "partial": {
+      "state": "partial",
+      "content_hash": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+      "parser_id": "loom.web",
+      "parser_version": "0.1.0",
+      "bytes": 128,
+      "failure_code": "cross_origin_redirect"
+    },
+    "failed": {
+      "state": "failed",
+      "content_hash": null,
+      "parser_id": null,
+      "parser_version": null,
+      "bytes": 0,
+      "failure_code": "paywall_or_parser_unavailable"
+    },
+    "not_requested": {
+      "state": "not_requested",
+      "content_hash": null,
+      "parser_id": null,
+      "parser_version": null,
+      "bytes": 0,
+      "failure_code": null
+    }
+  },
+  "hmac_test_key_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+  "expected_mac": "8738c9f5b382a0fca96a9e2fa75db87aec72e201db24cf78bf6f5700e3ae51ef"
+}
