@@ -24,6 +24,8 @@ extension. The first implementation will:
   tokens;
 - accept only an allowlisted metadata/selection/sanitized-snapshot field set with bounded sizes;
 - retain the live URL, final URL, capture time, hash, parser identity, and snapshot state separately;
+- carry sanitized HTML in separately authenticated, ordered payload frames so the native-messaging
+  envelope remains bounded while the final content hash is verified before persistence;
 - report complete, partial, failed, or not-requested snapshot outcomes without claiming archive
   completeness; and
 - reject malformed, replayed, downgraded, unapproved, redirected, or oversized requests before

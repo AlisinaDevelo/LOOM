@@ -56,6 +56,7 @@ service attack. There is no supported remote service in this slice.
 |Persisted scope drift|Exact locators, status inspection, explicit re-selection, and revocation hide active artifacts|Direct-distribution build lacks security-scoped bookmarks|
 |Tauri command overreach|Narrow command set; backend-owned selection; no arbitrary path command; hash-bound open|Capabilities and host permissions need release hardening|
 |Dependency compromise|Locked dependency resolution and ordinary build review|No reproducible-build or signed-release guarantee yet|
+|Browser connector over-collection|`activeTab` plus explicit command only; no host permissions, history listeners, or network path; sanitized attributes are discarded|A consented Chrome/Firefox permission session and paired native host remain unverified|
 
 ## Security requirements for extensions
 

@@ -1,0 +1,30 @@
+{
+  "manifest_version": 3,
+  "name": "LOOM — explicit save",
+  "version": "0.1.0",
+  "description": "Save the current webpage to a paired local LOOM library after a visible command.",
+  "permissions": [
+    "activeTab",
+    "commands",
+    "nativeMessaging",
+    "scripting",
+    "storage"
+  ],
+  "host_permissions": [],
+  "background": {
+    "service_worker": "src/background.js",
+    "type": "module"
+  },
+  "action": {
+    "default_title": "Save current page to LOOM"
+  },
+  "commands": {
+    "save-page": {
+      "suggested_key": {
+        "default": "Ctrl+Shift+L",
+        "mac": "Command+Shift+L"
+      },
+      "description": "Save the current page to LOOM after a visible command"
+    }
+  }
+}
