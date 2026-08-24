@@ -987,7 +987,7 @@
     {
       "id": "0211",
       "title": "Define OCR confidence and region-anchor semantics",
-      "status": "backlog",
+      "status": "done",
       "quarter": "Q04",
       "phase": "v0.2 Needle",
       "workstream": "ingestion-evidence",
