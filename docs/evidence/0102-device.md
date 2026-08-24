@@ -11,7 +11,8 @@ reproduction is rerun against the merged `main` SHA and the resulting evidence i
 - Native toolchain: `rustc 1.96.0` / Cargo 1.96.0, Node v26.7.0, npm 11.19.0
 - Declared MSRV toolchain: `rustc 1.88.0` (`6b00bc3880198600130e1cf62b8f8a93494488cc`),
   Cargo 1.88.0
-- Source under test: `feature/issue-11-device-evidence` (merge SHA to be recorded after review)
+- Source under test: `65e1989a35c2bb153563a233c127c4e00e5b8b87`
+  (`feature/issue-11-device-evidence`; merge SHA to be recorded after review)
 - Fixture: `benchmarks/retrieval/v0/manifest.json`
 
 ## Acceptance-criterion evidence map
