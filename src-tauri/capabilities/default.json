@@ -6,6 +6,7 @@
   "permissions": [
     "core:default",
     "allow-index-selected-folder",
+    "allow-reconcile-approved-roots",
     "allow-search",
     "allow-library-stats",
     "allow-open-artifact"

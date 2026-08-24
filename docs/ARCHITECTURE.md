@@ -94,6 +94,13 @@ and extractor version so changed extraction logic cannot silently reuse old pass
 unit advances a fingerprint-bound checkpoint in the same transaction as canonical writes, allowing
 an interrupted scan to resume without making a partially committed artifact searchable.
 
+Approved-root observation is deliberately conservative. The coalescer accepts only absolute,
+in-scope hints, debounces duplicate create/modify/remove/rename events, and turns overflow or large
+batches into a full rescan. The desktop startup command rechecks every enabled persisted root by
+content hash; event hints never become source truth, and an unavailable root is reported without
+widening permissions. Native watcher integration can replace the hint source without changing this
+reconciliation boundary.
+
 ## Invariants
 
 - Indexing starts only from a path explicitly supplied by the user or the UI picker.

@@ -41,6 +41,21 @@ pub struct IndexCheckpoint {
     pub last_error: Option<String>,
 }
 
+/// A bounded summary of a persisted-root observation pass.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ObservationReport {
+    pub roots_scanned: u64,
+    pub roots_failed: u64,
+    pub events_received: u64,
+    pub paths_coalesced: u64,
+    pub full_rescans: u64,
+    pub indexed: u64,
+    pub unchanged: u64,
+    pub skipped: u64,
+    pub bytes_read: u64,
+    pub failures: Vec<IndexFailure>,
+}
+
 /// Canonical library counts. Derived-index files are intentionally excluded.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LibraryStats {

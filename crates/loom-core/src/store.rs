@@ -12,10 +12,11 @@ use uuid::Uuid;
 use crate::{
     domain::{
         ArtifactObservation, EvidenceAnchor, IndexCheckpoint, IndexFailure, IndexReport,
-        LibraryStats, PassageObservation, SearchHit, SearchRequest,
+        LibraryStats, ObservationReport, PassageObservation, SearchHit, SearchRequest,
     },
     error::{io_error, LoomError, Result},
     ingest::{self, PassageDraft, StableDocument, EXTRACTOR_ID, EXTRACTOR_VERSION},
+    observe::{self, ObservationEvent},
     search::{collision_free_markers, compile_query, project_fts_evidence},
 };
 
@@ -81,6 +82,60 @@ impl Library {
     /// Indexes one explicitly selected regular file or directory.
     pub fn index_path(&self, selected_path: impl AsRef<Path>) -> Result<IndexReport> {
         self.index_path_with_fault(selected_path, None)
+    }
+
+    /// Reconciles an in-scope event batch against the approved root's current bytes.
+    ///
+    /// Events are hints only: even a non-overflow batch triggers a content-hash root scan. This
+    /// deliberately favors correctness over trusting a lossy or reordered watcher stream.
+    pub fn reconcile_events(
+        &self,
+        selected_root: impl AsRef<Path>,
+        events: &[ObservationEvent],
+        max_events: usize,
+    ) -> Result<ObservationReport> {
+        let selected_path = canonical_selected_root(selected_root.as_ref())?;
+        let selected_uri = utf8_path(&selected_path)?;
+        if !self.is_approved_root(&selected_uri)? {
+            return Err(LoomError::InvalidPath(format!(
+                "root is not an enabled approved source: {selected_uri}"
+            )));
+        }
+        let plan = observe::coalesce_events(&selected_path, events, max_events)?;
+        if plan.events_received == 0 {
+            return Ok(ObservationReport::default());
+        }
+        let index = self.index_path(&selected_path)?;
+        Ok(observation_from_index(
+            &index,
+            plan.events_received,
+            plan.paths_coalesced,
+        ))
+    }
+
+    /// Reconciles every enabled root persisted by an earlier explicit selection.
+    ///
+    /// This bounded startup/polling pass is the restart-safe observation fallback until a native
+    /// event adapter is selected. Missing or revoked roots become explicit failures and cannot
+    /// widen the scan to an arbitrary directory.
+    pub fn reconcile_approved_roots(&self) -> Result<ObservationReport> {
+        let roots = self.approved_root_locators()?;
+        let mut report = ObservationReport::default();
+        for root in roots {
+            report.roots_scanned += 1;
+            match self.index_path(&root) {
+                Ok(index) => merge_observation_index(&mut report, &index),
+                Err(error) => {
+                    report.roots_failed += 1;
+                    report.full_rescans += 1;
+                    report.failures.push(IndexFailure {
+                        source: root,
+                        reason: error.to_string(),
+                    });
+                }
+            }
+        }
+        Ok(report)
     }
 
     /// Returns the durable checkpoint for a selected file or directory, when one exists.
@@ -685,6 +740,28 @@ impl Library {
         Ok(IndexJobProgress { job_id, next_unit })
     }
 
+    fn is_approved_root(&self, locator: &str) -> Result<bool> {
+        let connection = self.lock()?;
+        connection
+            .query_row(
+                "SELECT EXISTS(
+                    SELECT 1 FROM source_roots WHERE locator = ?1 AND enabled = 1
+                )",
+                [locator],
+                |row| row.get(0),
+            )
+            .map_err(Into::into)
+    }
+
+    fn approved_root_locators(&self) -> Result<Vec<String>> {
+        let connection = self.lock()?;
+        let mut statement = connection
+            .prepare("SELECT locator FROM source_roots WHERE enabled = 1 ORDER BY locator")?;
+        let rows = statement.query_map([], |row| row.get(0))?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(Into::into)
+    }
+
     fn mark_locator_missing_and_advance(
         &self,
         root_id: &str,
@@ -864,6 +941,44 @@ impl Library {
     fn lock(&self) -> Result<MutexGuard<'_, Connection>> {
         self.connection.lock().map_err(|_| LoomError::LockPoisoned)
     }
+}
+
+fn canonical_selected_root(requested_path: &Path) -> Result<PathBuf> {
+    let metadata =
+        fs::symlink_metadata(requested_path).map_err(|source| io_error(requested_path, source))?;
+    if metadata.file_type().is_symlink() {
+        return Err(LoomError::InvalidPath(format!(
+            "symbolic links are not followed: {}",
+            requested_path.display()
+        )));
+    }
+    requested_path
+        .canonicalize()
+        .map_err(|source| io_error(requested_path, source))
+}
+
+fn observation_from_index(
+    index: &IndexReport,
+    events_received: u64,
+    paths_coalesced: u64,
+) -> ObservationReport {
+    let mut report = ObservationReport {
+        roots_scanned: 1,
+        events_received,
+        paths_coalesced,
+        ..ObservationReport::default()
+    };
+    merge_observation_index(&mut report, index);
+    report
+}
+
+fn merge_observation_index(report: &mut ObservationReport, index: &IndexReport) {
+    report.full_rescans += 1;
+    report.indexed += index.indexed;
+    report.unchanged += index.unchanged;
+    report.skipped += index.skipped;
+    report.bytes_read += index.bytes_read;
+    report.failures.extend(index.failures.iter().cloned());
 }
 
 struct IndexJobProgress {

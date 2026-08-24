@@ -81,7 +81,8 @@ function App() {
 
   useEffect(() => {
     let active = true;
-    void invoke<LibraryStats>("library_stats")
+    void invoke("reconcile_approved_roots")
+      .then(() => invoke<LibraryStats>("library_stats"))
       .then((value) => {
         if (active) setStats(value);
       })

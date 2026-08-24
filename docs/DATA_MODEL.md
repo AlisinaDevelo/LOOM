@@ -104,6 +104,20 @@ unit count match. Completion records `state = completed` and the next run starts
 retries of unchanged bytes reuse the existing content version. The row is intentionally diagnostic
 and rebuildable; canonical artifact, version, passage, and hash records remain authoritative.
 
+## Observation hints and reconciliation
+
+Observation events are bounded hints with an explicit `created`, `modified`, `removed`, `renamed`,
+or `overflow` kind. The coalescer rejects relative paths, paths outside the enabled root, and
+symlink resolutions that escape it. Duplicate changes collapse deterministically; rename records
+both the previous removal and the new path, while overflow or an oversized batch requests a full
+rescan. The reconciler then scans the enabled root and rechecks content hashes, so an event stream
+cannot create, delete, or rename canonical evidence by assertion alone.
+
+Enabled source roots are persisted in `source_roots`. On desktop startup the bounded observation
+command reconciles those roots again; missing or revoked roots return explicit failures and never
+fall back to a broader directory. A native event adapter may optimize the hint source later, but
+the content-hash scan remains the correctness boundary.
+
 ## References
 
 - [SQLite FTS5](https://www.sqlite.org/fts5.html)

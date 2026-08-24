@@ -63,6 +63,7 @@ describe("desktop truth path", () => {
 
   it("exposes an accessible empty state and keyboard-search form", async () => {
     invokeMock.mockImplementation(async (command) => {
+      if (command === "reconcile_approved_roots") return {};
       if (command === "library_stats") return emptyStats;
       throw new Error(`unexpected command: ${command}`);
     });
@@ -80,6 +81,7 @@ describe("desktop truth path", () => {
 
   it("runs the primary keyboard retrieval flow and opens the bound original", async () => {
     invokeMock.mockImplementation(async (command) => {
+      if (command === "reconcile_approved_roots") return {};
       if (command === "library_stats") return readyStats;
       if (command === "search") return [hit];
       if (command === "open_artifact") return undefined;
@@ -115,6 +117,7 @@ describe("desktop truth path", () => {
       resolveSearch = resolve;
     });
     invokeMock.mockImplementation(async (command) => {
+      if (command === "reconcile_approved_roots") return {};
       if (command === "library_stats") return emptyStats;
       if (command === "search") return pendingSearch;
       throw new Error(`unexpected command: ${command}`);
@@ -133,6 +136,7 @@ describe("desktop truth path", () => {
 
   it("shows partial indexing failures without hiding the usable library", async () => {
     invokeMock.mockImplementation(async (command) => {
+      if (command === "reconcile_approved_roots") return {};
       if (command === "library_stats") return readyStats;
       if (command === "index_selected_folder") {
         return {
@@ -157,6 +161,7 @@ describe("desktop truth path", () => {
 
   it("states when a valid search has no evidence instead of inventing an answer", async () => {
     invokeMock.mockImplementation(async (command) => {
+      if (command === "reconcile_approved_roots") return {};
       if (command === "library_stats") return emptyStats;
       if (command === "search") return [];
       throw new Error(`unexpected command: ${command}`);
