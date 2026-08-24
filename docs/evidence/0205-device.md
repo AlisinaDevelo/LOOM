@@ -60,3 +60,19 @@ glob language. Confidence is an evidence-anchor contract: image OCR reports its
 stored confidence, while text/PDF anchors are treated as deterministic 1.0.
 The hybrid result path remains experimental and subject to the independent 0204
 false-positive gate.
+
+## Final merged-main reproduction
+
+PR 194 was merged to main as b9998f0229fa1e86323c7e9bec3d086c0ac08e5b. The
+complete device harness was rerun against that exact merged tree:
+
+- Verification directory: /tmp/loom-0205-main-device.12S9MK
+- Summary SHA-256: e6386e48e5ef39d2fb9510aa7d83be99c8ecb57d33d69a8ec0a6edfd48e205ef
+- Commands SHA-256: 951a8f0bcc51d2b425c01cd7551dc3aed08f2907cc83126da452276f7c77ea72
+- Log manifest SHA-256: 0f1dee6204de06ebdd81726c0f22a5f007c862ce1bdddf4b8b1d6d54f3362bf0
+
+The merged-main run passed rustfmt, warnings-denied Clippy, workspace tests,
+Rust 1.88 checks/tests, npm checks, retrieval benchmark, semantic contract,
+security, Tauri debug build, and mixed-corpus recovery. No screenshot was
+needed; any future desktop capture must be cropped to the relevant evidence
+panel only.
