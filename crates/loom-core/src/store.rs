@@ -17,7 +17,9 @@ use crate::{
         ArtifactObservation, EvidenceAnchor, EvidenceView, FtsHealthReport, FtsRepairReport,
         IndexCancellationToken, IndexCheckpoint, IndexFailure, IndexReport, LibraryStats,
         ObservationReport, OcrPurgeReport, OcrStatus, PassageObservation, ResolveEvidenceRequest,
-        SearchHit, SearchRequest, SourceRootInfo, SourceRootStatus,
+        SearchHit, SearchRequest, SemanticCandidate, SemanticDropReport, SemanticIndexConfig,
+        SemanticIndexManifest, SemanticIndexStatus, SemanticProviderMeasurement,
+        SemanticRebuildReport, SourceRootInfo, SourceRootStatus,
     },
     error::{io_error, LoomError, Result},
     ingest::{
@@ -27,6 +29,9 @@ use crate::{
     observe::{self, ObservationEvent},
     ocr::IMAGE_OCR_EXTRACTOR_ID,
     search::{collision_free_markers, compile_query, project_fts_evidence},
+    semantic::{
+        cosine_similarity, decode_vector, encode_vector, measure_providers, HashEmbeddingProvider,
+    },
 };
 
 const SCHEMA_VERSION: i64 = 5;
@@ -52,6 +57,7 @@ const CURRENT_SCHEMA_TABLES: &[&str] = &[
 ];
 
 type VersionProjection = (String, String, String, String, Option<i64>, String, String);
+type SemanticMetaRow = (String, String, i64, String, String, String, i64, i64, i64);
 
 /// Resource boundaries applied to every ingestion request.
 #[derive(Debug, Clone, Copy)]
@@ -106,6 +112,7 @@ impl Library {
     fn from_connection(mut connection: Connection, limits: LibraryLimits) -> Result<Self> {
         configure(&connection)?;
         migrate(&mut connection)?;
+        ensure_semantic_schema(&connection)?;
         let ocr_enabled = load_ocr_enabled(&connection)?;
         Ok(Self {
             connection: Mutex::new(connection),
@@ -1305,6 +1312,370 @@ impl Library {
         Ok(FtsRepairReport { before, after })
     }
 
+    /// Rebuilds the disposable semantic vectors from active canonical passages.
+    ///
+    /// The operation deletes and recreates only derivative rows. Every vector is bound to the
+    /// passage text hash and the provider manifest, so incompatible records cannot be mixed into a
+    /// later search. Canonical artifacts, versions, passages, and anchors are never modified.
+    pub fn semantic_rebuild(&self) -> Result<SemanticRebuildReport> {
+        let provider = HashEmbeddingProvider::default();
+        let config = provider.config().clone();
+        let mut connection = self.lock()?;
+        let transaction = connection.transaction()?;
+        let passages = {
+            let mut statement = transaction.prepare(
+                "SELECT p.id, p.text, p.text_hash
+                 FROM passages p
+                 JOIN artifact_versions v ON v.id = p.artifact_version_id
+                 JOIN artifacts a ON a.id = v.artifact_id AND a.active_version_id = v.id
+                 WHERE a.state = 'active'
+                 ORDER BY p.id",
+            )?;
+            let rows = statement.query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        let mut source_hasher = blake3::Hasher::new();
+        for (passage_id, _, passage_hash) in &passages {
+            source_hasher.update(passage_id.as_bytes());
+            source_hasher.update(&[0]);
+            source_hasher.update(passage_hash.as_bytes());
+            source_hasher.update(&[0]);
+        }
+        let source_digest = format!("blake3:{}", source_hasher.finalize().to_hex());
+
+        transaction.execute("DELETE FROM semantic_embeddings", [])?;
+        transaction.execute("DELETE FROM semantic_index_meta", [])?;
+        let mut insert = transaction.prepare(
+            "INSERT INTO semantic_embeddings(
+                passage_id, passage_hash, provider_id, model_id, dimension,
+                normalization, index_revision, vector_blob, created_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+        )?;
+        let now = Utc::now().to_rfc3339();
+        let mut vector_bytes = 0_u64;
+        for (passage_id, text, passage_hash) in &passages {
+            let vector = provider.embed(text);
+            let encoded = encode_vector(&vector);
+            vector_bytes = vector_bytes
+                .checked_add(encoded.len() as u64)
+                .ok_or_else(|| {
+                    LoomError::SemanticIndexIncompatible("vector byte count overflow".into())
+                })?;
+            insert.execute(params![
+                passage_id,
+                passage_hash,
+                config.provider_id,
+                config.model_id,
+                sql_i64(u64::from(config.dimension), "semantic dimension")?,
+                config.normalization,
+                config.index_revision,
+                encoded,
+                now,
+            ])?;
+        }
+        drop(insert);
+        let passage_count = passages.len() as u64;
+        transaction.execute(
+            "INSERT INTO semantic_index_meta(
+                slot, provider_id, model_id, dimension, normalization, index_revision,
+                source_digest, canonical_passages, indexed_passages, vector_bytes, built_at
+             ) VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7, ?8, ?9)",
+            params![
+                config.provider_id,
+                config.model_id,
+                sql_i64(u64::from(config.dimension), "semantic dimension")?,
+                config.normalization,
+                config.index_revision,
+                source_digest,
+                sql_i64(passage_count, "semantic passage count")?,
+                sql_i64(vector_bytes, "semantic vector bytes")?,
+                now,
+            ],
+        )?;
+        transaction.commit()?;
+        Ok(SemanticRebuildReport {
+            manifest: SemanticIndexManifest {
+                config,
+                source_digest,
+                canonical_passages: passage_count,
+                indexed_passages: passage_count,
+                vector_bytes,
+            },
+            rebuilt_passages: passage_count,
+        })
+    }
+
+    /// Measures the local provider candidates against the current active passage corpus.
+    ///
+    /// This is an architecture measurement, not a retrieval-quality claim. It reports vector
+    /// footprint and elapsed embedding time for the deterministic token, character n-gram, and
+    /// token-count baselines on this device.
+    pub fn semantic_provider_benchmark(&self) -> Result<Vec<SemanticProviderMeasurement>> {
+        let connection = self.lock()?;
+        let mut statement = connection.prepare(
+            "SELECT p.text
+             FROM passages p
+             JOIN artifact_versions v ON v.id = p.artifact_version_id
+             JOIN artifacts a ON a.id = v.artifact_id AND a.active_version_id = v.id
+             WHERE a.state = 'active'
+             ORDER BY p.id",
+        )?;
+        let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
+        let passages = rows.collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(measure_providers(
+            &passages,
+            SemanticIndexConfig::default().dimension,
+        ))
+    }
+
+    /// Reports whether the semantic derivative matches current active canonical passages.
+    pub fn semantic_status(&self) -> Result<SemanticIndexStatus> {
+        let connection = self.lock()?;
+        let (canonical_passages, canonical_digest) = canonical_semantic_source(&connection)?;
+        let config = SemanticIndexConfig::default();
+        let meta: Option<SemanticMetaRow> = connection
+            .query_row(
+                "SELECT provider_id, model_id, dimension, normalization, index_revision,
+                        source_digest, canonical_passages, indexed_passages, vector_bytes
+                 FROM semantic_index_meta WHERE slot = 1",
+                [],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                        row.get(6)?,
+                        row.get(7)?,
+                        row.get(8)?,
+                    ))
+                },
+            )
+            .optional()?;
+        let indexed_passages = count(&connection, "semantic_embeddings")?;
+        let vector_bytes = connection.query_row(
+            "SELECT COALESCE(SUM(length(vector_blob)), 0) FROM semantic_embeddings",
+            [],
+            |row| row.get::<_, i64>(0),
+        )?;
+        let invalid_vectors: i64 = connection.query_row(
+            "SELECT COUNT(*) FROM semantic_embeddings
+             WHERE provider_id <> ?1 OR model_id <> ?2 OR dimension <> ?3
+                OR normalization <> ?4 OR index_revision <> ?5
+                OR length(vector_blob) <> ?6",
+            params![
+                config.provider_id,
+                config.model_id,
+                sql_i64(u64::from(config.dimension), "semantic dimension")?,
+                config.normalization,
+                config.index_revision,
+                sql_i64(u64::from(config.dimension) * 4, "semantic vector size")?,
+            ],
+            |row| row.get(0),
+        )?;
+        let invalid_bindings: i64 = connection.query_row(
+            "SELECT COUNT(*) FROM semantic_embeddings e
+             JOIN passages p ON p.id = e.passage_id
+             WHERE e.passage_hash <> p.text_hash",
+            [],
+            |row| row.get(0),
+        )?;
+
+        let Some((
+            provider_id,
+            model_id,
+            dimension,
+            normalization,
+            index_revision,
+            source_digest,
+            stored_canonical,
+            stored_indexed,
+            stored_vector_bytes,
+        )) = meta
+        else {
+            return Ok(SemanticIndexStatus {
+                healthy: false,
+                canonical_passages,
+                indexed_passages,
+                canonical_digest,
+                vector_bytes: nonnegative_u64(vector_bytes),
+                manifest: None,
+                reason: Some("semantic index has not been built".into()),
+            });
+        };
+        let stored_config = SemanticIndexConfig {
+            provider_id,
+            model_id,
+            dimension: u32::try_from(dimension).map_err(|_| {
+                LoomError::SemanticIndexIncompatible("manifest dimension is invalid".into())
+            })?,
+            normalization,
+            index_revision,
+        };
+        let manifest = SemanticIndexManifest {
+            config: stored_config.clone(),
+            source_digest: source_digest.clone(),
+            canonical_passages: nonnegative_u64(stored_canonical),
+            indexed_passages: nonnegative_u64(stored_indexed),
+            vector_bytes: nonnegative_u64(stored_vector_bytes),
+        };
+        let mut reasons = Vec::new();
+        if stored_config != config {
+            reasons.push("provider manifest does not match the current provider".into());
+        }
+        if source_digest != canonical_digest {
+            reasons.push("canonical passage digest changed; rebuild required".into());
+        }
+        if nonnegative_u64(stored_canonical) != canonical_passages {
+            reasons.push("manifest canonical passage count is inconsistent".into());
+        }
+        if nonnegative_u64(stored_indexed) != indexed_passages {
+            reasons.push("manifest indexed passage count is inconsistent".into());
+        }
+        if invalid_vectors > 0 {
+            reasons.push(format!("{invalid_vectors} vector records are incompatible"));
+        }
+        if invalid_bindings > 0 {
+            reasons.push(format!(
+                "{invalid_bindings} vector records have stale passage hashes"
+            ));
+        }
+        if nonnegative_u64(stored_vector_bytes) != nonnegative_u64(vector_bytes) {
+            reasons.push("manifest vector byte count is inconsistent".into());
+        }
+        Ok(SemanticIndexStatus {
+            healthy: reasons.is_empty(),
+            canonical_passages,
+            indexed_passages,
+            canonical_digest,
+            vector_bytes: nonnegative_u64(vector_bytes),
+            manifest: Some(manifest),
+            reason: (!reasons.is_empty()).then(|| reasons.join("; ")),
+        })
+    }
+
+    /// Removes the semantic derivative while leaving every canonical row untouched.
+    pub fn semantic_drop(&self) -> Result<SemanticDropReport> {
+        let mut connection = self.lock()?;
+        let transaction = connection.transaction()?;
+        let embeddings_deleted = transaction.execute("DELETE FROM semantic_embeddings", [])? as u64;
+        let manifest_deleted = transaction.execute("DELETE FROM semantic_index_meta", [])? > 0;
+        transaction.commit()?;
+        Ok(SemanticDropReport {
+            embeddings_deleted,
+            manifest_deleted,
+        })
+    }
+
+    /// Searches the rebuilt semantic derivative and returns only evidence-bound candidates.
+    pub fn semantic_search(&self, query: &str, limit: u32) -> Result<Vec<SemanticCandidate>> {
+        let status = self.semantic_status()?;
+        if !status.healthy {
+            return Err(LoomError::SemanticIndexUnavailable(
+                status
+                    .reason
+                    .unwrap_or_else(|| "semantic index is not ready".into()),
+            ));
+        }
+        let manifest = status.manifest.ok_or_else(|| {
+            LoomError::SemanticIndexUnavailable("semantic index has not been built".into())
+        })?;
+        let provider = HashEmbeddingProvider::default();
+        let query_vector = provider.embed(query);
+        let connection = self.lock()?;
+        let mut statement = connection.prepare(
+            "SELECT e.passage_id, e.passage_hash, e.vector_blob, e.model_id, e.index_revision,
+                    a.id, v.id, a.title, a.media_type, l.locator, v.content_hash, p.text,
+                    p.locator_json
+             FROM semantic_embeddings e
+             JOIN passages p ON p.id = e.passage_id
+             JOIN artifact_versions v ON v.id = p.artifact_version_id
+             JOIN artifacts a ON a.id = v.artifact_id AND a.active_version_id = v.id
+             JOIN artifact_locators l ON l.artifact_id = a.id AND l.active = 1 AND l.kind = 'file'
+             WHERE a.state = 'active'
+             ORDER BY e.passage_id",
+        )?;
+        let rows = statement.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, Vec<u8>>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?,
+                row.get::<_, String>(5)?,
+                row.get::<_, String>(6)?,
+                row.get::<_, String>(7)?,
+                row.get::<_, String>(8)?,
+                row.get::<_, String>(9)?,
+                row.get::<_, String>(10)?,
+                row.get::<_, String>(11)?,
+                row.get::<_, String>(12)?,
+            ))
+        })?;
+        let rows = rows.collect::<rusqlite::Result<Vec<_>>>()?;
+        let mut candidates = Vec::with_capacity(rows.len());
+        for (
+            passage_id,
+            passage_hash,
+            vector_blob,
+            model_id,
+            index_revision,
+            artifact_id,
+            version_id,
+            title,
+            media_type,
+            source_uri,
+            content_hash,
+            passage_text,
+            locator_json,
+        ) in rows
+        {
+            let vector =
+                decode_vector(&vector_blob, manifest.config.dimension).ok_or_else(|| {
+                    LoomError::SemanticIndexIncompatible(format!(
+                        "vector for passage {passage_id} has an invalid dimension"
+                    ))
+                })?;
+            let score = cosine_similarity(&query_vector, &vector).unwrap_or(0.0);
+            let anchor = serde_json::from_str(&locator_json)?;
+            candidates.push(SemanticCandidate {
+                rank: 0,
+                score,
+                artifact_id,
+                version_id,
+                passage_id,
+                title,
+                media_type,
+                source_uri,
+                content_hash,
+                passage_hash,
+                passage_text,
+                anchor,
+                model_id,
+                index_revision,
+            });
+        }
+        candidates.sort_by(|left, right| {
+            right
+                .score
+                .total_cmp(&left.score)
+                .then_with(|| left.passage_id.cmp(&right.passage_id))
+        });
+        candidates.truncate(limit.clamp(1, 100) as usize);
+        for (index, candidate) in candidates.iter_mut().enumerate() {
+            candidate.rank = index as u32 + 1;
+        }
+        Ok(candidates)
+    }
+
     /// Returns canonical record counts and source byte totals.
     pub fn stats(&self) -> Result<LibraryStats> {
         let connection = self.lock()?;
@@ -1434,6 +1805,69 @@ fn configure(connection: &Connection) -> Result<()> {
          PRAGMA temp_store = MEMORY;",
     )?;
     Ok(())
+}
+
+fn ensure_semantic_schema(connection: &Connection) -> Result<()> {
+    connection.execute_batch(
+        "CREATE TABLE IF NOT EXISTS semantic_index_meta(
+            slot INTEGER PRIMARY KEY CHECK(slot = 1),
+            provider_id TEXT NOT NULL,
+            model_id TEXT NOT NULL,
+            dimension INTEGER NOT NULL CHECK(dimension > 0),
+            normalization TEXT NOT NULL,
+            index_revision TEXT NOT NULL,
+            source_digest TEXT NOT NULL,
+            canonical_passages INTEGER NOT NULL CHECK(canonical_passages >= 0),
+            indexed_passages INTEGER NOT NULL CHECK(indexed_passages >= 0),
+            vector_bytes INTEGER NOT NULL CHECK(vector_bytes >= 0),
+            built_at TEXT NOT NULL
+         ) STRICT;
+
+         CREATE TABLE IF NOT EXISTS semantic_embeddings(
+            passage_id TEXT PRIMARY KEY REFERENCES passages(id) ON DELETE CASCADE,
+            passage_hash TEXT NOT NULL,
+            provider_id TEXT NOT NULL,
+            model_id TEXT NOT NULL,
+            dimension INTEGER NOT NULL CHECK(dimension > 0),
+            normalization TEXT NOT NULL,
+            index_revision TEXT NOT NULL,
+            vector_blob BLOB NOT NULL,
+            created_at TEXT NOT NULL
+         ) STRICT;
+
+         CREATE INDEX IF NOT EXISTS semantic_embeddings_revision
+           ON semantic_embeddings(index_revision, passage_id);",
+    )?;
+    Ok(())
+}
+
+fn canonical_semantic_source(connection: &Connection) -> Result<(u64, String)> {
+    let mut statement = connection.prepare(
+        "SELECT p.id, p.text_hash
+         FROM passages p
+         JOIN artifact_versions v ON v.id = p.artifact_version_id
+         JOIN artifacts a ON a.id = v.artifact_id AND a.active_version_id = v.id
+         WHERE a.state = 'active'
+         ORDER BY p.id",
+    )?;
+    let rows = statement.query_map([], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+    })?;
+    let mut count = 0_u64;
+    let mut hasher = blake3::Hasher::new();
+    for row in rows {
+        let (passage_id, passage_hash) = row?;
+        hasher.update(passage_id.as_bytes());
+        hasher.update(&[0]);
+        hasher.update(passage_hash.as_bytes());
+        hasher.update(&[0]);
+        count = count.saturating_add(1);
+    }
+    Ok((count, format!("blake3:{}", hasher.finalize().to_hex())))
+}
+
+fn nonnegative_u64(value: i64) -> u64 {
+    value.max(0) as u64
 }
 
 fn migrate(connection: &mut Connection) -> Result<()> {

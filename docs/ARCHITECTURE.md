@@ -1,7 +1,7 @@
 # Architecture
 
 LOOM is a pre-alpha desktop and CLI application. The current architecture keeps a small,
-source-backed retrieval path stable while leaving semantic retrieval and additional extractors as
+source-backed retrieval path stable while keeping semantic retrieval and additional extractors as
 separate, rebuildable layers.
 
 ## Current flow
@@ -33,6 +33,14 @@ current file ingestion path does not upload, copy, or synchronize source content
 Image OCR is a local macOS Vision call; only derived text, fixed-point region geometry, and
 provider/model metadata enter the canonical database.
 
+The semantic path is intentionally explicit. semantic-rebuild hashes active canonical passage
+text into a deterministic 128-dimensional, L2-normalized local vector; semantic-status checks the
+provider manifest, source digest, passage coverage, vector dimensions, and byte totals;
+semantic-search returns only candidates joined to active canonical artifacts and anchors. The index
+is a disposable projection, not a second authority. semantic-drop removes it without changing
+artifacts, versions, passages, hashes, or anchors. A stale or incompatible projection returns an
+explicit unavailable error until it is rebuilt.
+
 ## Components
 
 ### loom-core
@@ -53,8 +61,9 @@ offsets are computed. Passages target 1,000 characters with 120 characters of ov
 ### loom-cli
 
 The CLI indexes a selected path, searches the configured database, reports statistics, inspects a
-stored extraction, checks or repairs the derived FTS5 projection, and runs the retrieval smoke
-benchmark. Its default database is .loom/library.sqlite3; callers can provide another path.
+stored extraction, checks or repairs the derived FTS5 projection, runs the retrieval smoke
+benchmark, and exposes the explicit semantic status/rebuild/benchmark/drop/search commands. Its
+default database is .loom/library.sqlite3; callers can provide another path.
 
 ### Tauri shell and UI
 
@@ -122,6 +131,15 @@ expected vocabulary digest, canonical passage digest, and indexed-document cover
 disposable projection. `repair_fts` runs the FTS5 `rebuild` command inside one transaction and
 returns the before/after health reports; it never updates canonical source rows.
 
+The semantic derivative uses semantic_index_meta for one versioned manifest and
+semantic_embeddings for one vector per active passage. Each vector stores the passage hash,
+provider/model identity, dimension, normalization, revision, and encoded bytes. The canonical
+source digest is the ordered BLAKE3 digest of active passage IDs and passage hashes. Rebuild deletes
+and recreates only these derived rows in one transaction, so a failed rebuild cannot leave a
+partially published manifest. The current provider is a deterministic BLAKE3 token-and-bigram
+hash baseline chosen for reproducibility; a future neural provider must preserve this metadata
+boundary and add a measured licensing/model-size decision.
+
 PDF ingestion uses the pure-Rust `pdf-extract` provider over source bytes already admitted by the
 stable-read boundary. Each page becomes a local `pdf_page` anchor with page number, character and
 line span; parser/page warnings and page count are stored on the immutable artifact version.
@@ -161,10 +179,10 @@ reconciliation boundary.
 
 ## Boundaries and planned extensions
 
-The current SQLite records are the authority for source identity, text, versions, and evidence. An
-eventual semantic index may add vectors or other derived representations, but it must be rebuildable
-from canonical records and must not replace the source-backed result contract. Browser capture,
-external model providers, cloud sync, and managed copies are not implemented in this slice.
+The current SQLite records are the authority for source identity, text, versions, and evidence. The
+semantic index adds only a disposable, versioned vector projection and must be rebuildable from
+canonical records; it must not replace the source-backed result contract. Browser capture, external
+model providers, cloud sync, and managed copies are not implemented in this slice.
 
 ## References
 

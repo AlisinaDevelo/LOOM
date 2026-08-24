@@ -294,6 +294,97 @@ pub struct EvidenceView {
     pub extraction_metadata: serde_json::Value,
 }
 
+/// Versioned configuration for a derived semantic embedding provider.
+///
+/// This metadata is part of the derivative contract, never canonical source identity. A provider
+/// change must produce a new index revision or be rejected rather than mixing incompatible vectors.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SemanticIndexConfig {
+    pub provider_id: String,
+    pub model_id: String,
+    pub dimension: u32,
+    pub normalization: String,
+    pub index_revision: String,
+}
+
+impl Default for SemanticIndexConfig {
+    fn default() -> Self {
+        Self {
+            provider_id: "loom.hash-embedding".into(),
+            model_id: "hashed-tokens-v1".into(),
+            dimension: 128,
+            normalization: "l2".into(),
+            index_revision: "semantic-v1".into(),
+        }
+    }
+}
+
+/// A rebuild manifest for the disposable semantic index.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SemanticIndexManifest {
+    pub config: SemanticIndexConfig,
+    pub source_digest: String,
+    pub canonical_passages: u64,
+    pub indexed_passages: u64,
+    pub vector_bytes: u64,
+}
+
+/// Health and compatibility state for the semantic derivative.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SemanticIndexStatus {
+    pub healthy: bool,
+    pub canonical_passages: u64,
+    pub indexed_passages: u64,
+    pub canonical_digest: String,
+    pub vector_bytes: u64,
+    pub manifest: Option<SemanticIndexManifest>,
+    pub reason: Option<String>,
+}
+
+/// Counts retained after explicitly retiring the semantic derivative.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SemanticDropReport {
+    pub embeddings_deleted: u64,
+    pub manifest_deleted: bool,
+}
+
+/// Evidence-bound candidate returned by semantic retrieval.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SemanticCandidate {
+    pub rank: u32,
+    pub score: f64,
+    pub artifact_id: String,
+    pub version_id: String,
+    pub passage_id: String,
+    pub title: String,
+    pub media_type: String,
+    pub source_uri: String,
+    pub content_hash: String,
+    pub passage_hash: String,
+    pub passage_text: String,
+    pub anchor: EvidenceAnchor,
+    pub model_id: String,
+    pub index_revision: String,
+}
+
+/// Summary returned after rebuilding the disposable semantic derivative.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SemanticRebuildReport {
+    pub manifest: SemanticIndexManifest,
+    pub rebuilt_passages: u64,
+}
+
+/// Device measurement for one local provider candidate.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SemanticProviderMeasurement {
+    pub provider_id: String,
+    pub model_id: String,
+    pub dimension: u32,
+    pub sample_count: u64,
+    pub vector_bytes: u64,
+    pub elapsed_micros: u64,
+}
+
 /// One ranked, source-backed search result.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SearchHit {

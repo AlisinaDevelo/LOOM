@@ -15,6 +15,8 @@ version matrix and migration policy are maintained in [SCHEMA_COMPATIBILITY.md](
 |passages|Normalized text and exact anchors|artifact version, ordinal, text, text hash, JSON locator, character/line/pixel offsets|
 |relationships|Reserved source-to-source relationships|source/target artifacts, optional evidence passage, method, confidence|
 |index_jobs|Durable progress for one root scan|discovery fingerprint, total/next unit, state, error, timestamps|
+|semantic_index_meta|One disposable semantic-index manifest|provider/model, dimension, normalization, revision, canonical digest/counts, vector bytes|
+|semantic_embeddings|Rebuildable vector per active passage|passage hash, provider/model, dimension, revision, encoded vector bytes|
 
 The current extractor creates file locators. The schema also names URL and managed-copy locator
 kinds for future work; they are not part of the current supported input path.
@@ -75,6 +77,23 @@ instructions. See the [SQLite FTS5 reference](https://www.sqlite.org/fts5.html).
 digest, actual vocabulary digest, and the SQLite FTS5 integrity result. `repair_fts` reports the
 before/after health objects after a transactional rebuild. Neither operation changes passages,
 versions, anchors, or source identity.
+
+## Semantic derivative
+
+The semantic tables are derived and optional. semantic_index_meta records the one active provider
+manifest and an ordered BLAKE3 digest of active passage IDs plus passage hashes. Each row in
+semantic_embeddings binds one encoded vector to the same passage hash and to the provider/model,
+dimension, normalization, and index revision. The current provider is the deterministic local
+loom.hash-embedding baseline; its 128 little-endian f32 values are L2-normalized. The provider
+benchmark also measures character n-gram and token-count candidates, but does not claim semantic
+quality.
+
+semantic-rebuild deletes and recreates only the two derivative tables from active canonical
+passages. semantic-status reports stale, incomplete, incompatible, or unbuilt state, and
+semantic-search refuses to search unless the manifest is healthy. Candidates include an artifact
+ID, version ID, passage ID, source hash, passage hash, and structured text/page/region anchor, so a
+semantic score cannot become unsupported evidence. semantic-drop is a lossless derivative purge;
+canonical rows and lexical retrieval remain intact.
 
 ## Search result contract
 

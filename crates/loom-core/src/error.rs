@@ -46,6 +46,12 @@ pub enum LoomError {
     #[error("could not project exact search evidence: {0}")]
     EvidenceProjection(String),
 
+    #[error("semantic index unavailable: {0}")]
+    SemanticIndexUnavailable(String),
+
+    #[error("semantic index is incompatible: {0}")]
+    SemanticIndexIncompatible(String),
+
     #[error("artifact not found: {0}")]
     ArtifactNotFound(String),
 
