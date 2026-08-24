@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-set-ocr-enabled"
+description = "Enables the set_ocr_enabled command without any pre-configured scope."
+commands.allow = ["set_ocr_enabled"]
+
+[[permission]]
+identifier = "deny-set-ocr-enabled"
+description = "Denies the set_ocr_enabled command without any pre-configured scope."
+commands.deny = ["set_ocr_enabled"]

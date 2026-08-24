@@ -7,10 +7,11 @@ remembers: a screenshot, document, page, bookmark, or file. Its unit of value is
 recovery with visible evidence and provenance, not a plausible generated answer.
 
 The initial implementation is deliberately narrower than that long-term promise. It currently
-indexes explicitly selected text and Markdown files, stores canonical records in SQLite, assigns
-BLAKE3 content hashes, splits normalized text into passages with character and line anchors, and
-searches with SQLite FTS5. Screenshot, PDF, browser, OCR, and cross-object provenance work described
-below is planned work, not current support.
+indexes explicitly selected text, Markdown, bounded text-based PDF files, and images with local
+macOS Vision OCR, stores canonical records in SQLite, assigns BLAKE3 content hashes, and searches
+with SQLite FTS5. Image results retain provider/model metadata and oriented pixel-region anchors;
+browser capture and cross-object provenance work described below is planned work, not current
+support.
 
 ### User story
 

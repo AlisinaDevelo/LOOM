@@ -23,7 +23,7 @@ struct Arguments {
 
 #[derive(Debug, Subcommand)]
 enum Command {
-    /// Index an explicitly selected text file or directory.
+    /// Index an explicitly selected text, Markdown, or PDF file or directory.
     Index { path: PathBuf },
     /// Search active passages and print evidence-backed hits.
     Search {
@@ -33,6 +33,34 @@ enum Command {
     },
     /// Print canonical library counts.
     Stats,
+    /// Print the canonical extraction identity, warnings, and anchors for one indexed source.
+    Inspect { path: PathBuf },
+    /// Compare canonical passages with the derived FTS5 projection.
+    FtsHealth,
+    /// Repair the derived FTS5 projection and print before/after evidence.
+    FtsRepair,
+    /// Print local OCR policy and derived-record counts.
+    OcrStatus,
+    /// Enable local image OCR for subsequent indexing runs.
+    OcrEnable,
+    /// Disable local image OCR and purge all derived OCR records.
+    OcrDisable,
+    /// Purge derived OCR records without changing the enable policy.
+    OcrPurge,
+    /// Print the disposable semantic-index manifest and health state.
+    SemanticStatus,
+    /// Rebuild the versioned local semantic derivative from canonical passages.
+    SemanticRebuild,
+    /// Measure local provider candidates on the active passage corpus.
+    SemanticBenchmark,
+    /// Delete semantic vectors and their manifest without changing canonical records.
+    SemanticDrop,
+    /// Search the rebuilt semantic derivative and print evidence-bound candidates.
+    SemanticSearch {
+        query: String,
+        #[arg(long, default_value_t = 10)]
+        limit: u32,
+    },
     /// Evaluate exact-artifact recovery on a rights-clean JSONL query set.
     Benchmark {
         #[arg(long)]
@@ -46,7 +74,17 @@ enum Command {
 struct BenchmarkManifest {
     schema_version: u32,
     query_count: usize,
+    thresholds: BenchmarkThresholds,
     fixtures: Vec<BenchmarkFixture>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct BenchmarkThresholds {
+    exact_source_recall_at_1: f64,
+    exact_source_recall_at_5: f64,
+    anchor_precision: f64,
+    false_positive_rate: f64,
+    index_completeness: f64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -70,6 +108,14 @@ struct BenchmarkQuery {
     id: String,
     query: String,
     source_type: String,
+    expected_file: String,
+    expected_anchor: BenchmarkAnchor,
+    #[serde(default)]
+    acceptable_alternatives: Vec<BenchmarkAlternative>,
+}
+
+#[derive(Debug, Deserialize)]
+struct BenchmarkAlternative {
     expected_file: String,
     expected_anchor: BenchmarkAnchor,
 }
@@ -129,6 +175,7 @@ struct BenchmarkIndexMetrics {
 #[derive(Debug, Serialize)]
 struct BenchmarkReport {
     schema_version: u32,
+    thresholds: BenchmarkThresholds,
     index: BenchmarkIndexMetrics,
     overall: BenchmarkMetrics,
     by_source_type: BTreeMap<String, BenchmarkMetrics>,
@@ -157,6 +204,81 @@ fn main() -> Result<(), Box<dyn Error>> {
         Command::Stats => {
             let library = Library::open(arguments.database)?;
             println!("{}", serde_json::to_string_pretty(&library.stats()?)?);
+        }
+        Command::Inspect { path } => {
+            let library = Library::open(arguments.database)?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&library.inspect_source(path)?)?
+            );
+        }
+        Command::FtsHealth => {
+            let library = Library::open(arguments.database)?;
+            println!("{}", serde_json::to_string_pretty(&library.fts_health()?)?);
+        }
+        Command::FtsRepair => {
+            let library = Library::open(arguments.database)?;
+            println!("{}", serde_json::to_string_pretty(&library.repair_fts()?)?);
+        }
+        Command::OcrStatus => {
+            let library = Library::open(arguments.database)?;
+            println!("{}", serde_json::to_string_pretty(&library.ocr_status()?)?);
+        }
+        Command::OcrEnable => {
+            let library = Library::open(arguments.database)?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&library.set_ocr_enabled(true)?)?
+            );
+        }
+        Command::OcrDisable => {
+            let library = Library::open(arguments.database)?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&library.set_ocr_enabled(false)?)?
+            );
+        }
+        Command::OcrPurge => {
+            let library = Library::open(arguments.database)?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&library.purge_ocr_records()?)?
+            );
+        }
+        Command::SemanticStatus => {
+            let library = Library::open(arguments.database)?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&library.semantic_status()?)?
+            );
+        }
+        Command::SemanticRebuild => {
+            let library = Library::open(arguments.database)?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&library.semantic_rebuild()?)?
+            );
+        }
+        Command::SemanticBenchmark => {
+            let library = Library::open(arguments.database)?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&library.semantic_provider_benchmark()?)?
+            );
+        }
+        Command::SemanticDrop => {
+            let library = Library::open(arguments.database)?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&library.semantic_drop()?)?
+            );
+        }
+        Command::SemanticSearch { query, limit } => {
+            let library = Library::open(arguments.database)?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&library.semantic_search(&query, limit)?)?
+            );
         }
         Command::Benchmark { corpus, queries } => run_benchmark(&corpus, &queries)?,
     }
@@ -197,19 +319,25 @@ fn run_benchmark(corpus: &Path, queries: &Path) -> Result<(), Box<dyn Error>> {
         let latency = started.elapsed().as_secs_f64() * 1_000.0;
         let matches: Vec<bool> = hits
             .iter()
-            .map(|hit| fixture_path_matches(&corpus, &hit.source_uri, &query.expected_file))
+            .map(|hit| matching_expectation(&corpus, &hit.source_uri, &query).is_some())
             .collect();
         let top_one = matches.first() == Some(&true);
-        let expected_hit = hits
-            .iter()
-            .zip(&matches)
-            .find_map(|(hit, is_match)| is_match.then_some(hit));
-        let top_five = expected_hit.is_some();
-        let expected_source = fixture_sources
-            .get(&query.expected_file)
-            .ok_or_else(|| format!("query {} references an unmanifested fixture", query.id))?;
-        let anchor_correct = expected_hit
-            .is_some_and(|hit| anchor_matches(&query.expected_anchor, hit, expected_source));
+        let (top_five, anchor_correct) = {
+            let expected_hit = hits
+                .iter()
+                .find(|hit| matching_expectation(&corpus, &hit.source_uri, &query).is_some());
+            let top_five = expected_hit.is_some();
+            let anchor_correct = expected_hit.is_some_and(|hit| {
+                let (expected_file, expected_anchor) =
+                    matching_expectation(&corpus, &hit.source_uri, &query)
+                        .expect("the expected hit must have a matching expectation");
+                let expected_source = fixture_sources
+                    .get(expected_file)
+                    .expect("validated benchmark expectations must have source text");
+                anchor_matches(expected_anchor, hit, expected_source)
+            });
+            (top_five, anchor_correct)
+        };
         let returned = hits.len();
         let false_positives = matches.iter().filter(|is_match| !**is_match).count();
 
@@ -217,7 +345,7 @@ fn run_benchmark(corpus: &Path, queries: &Path) -> Result<(), Box<dyn Error>> {
             &mut overall,
             top_one,
             top_five,
-            expected_hit.is_some(),
+            top_five,
             anchor_correct,
             returned,
             false_positives,
@@ -227,7 +355,7 @@ fn run_benchmark(corpus: &Path, queries: &Path) -> Result<(), Box<dyn Error>> {
             categories.entry(query.source_type.clone()).or_default(),
             top_one,
             top_five,
-            expected_hit.is_some(),
+            top_five,
             anchor_correct,
             returned,
             false_positives,
@@ -264,12 +392,12 @@ fn run_benchmark(corpus: &Path, queries: &Path) -> Result<(), Box<dyn Error>> {
     } else {
         (index.indexed + index.unchanged) as f64 / supported as f64
     };
-    let passed = overall.top_one == overall.queries
-        && overall.top_five == overall.queries
-        && overall.anchor_correct == overall.queries
+    let overall_metrics = finalize_metrics(overall);
+    let passed = benchmark_passes(&manifest.thresholds, &overall_metrics, completeness)
         && index.failures.is_empty();
     let report = BenchmarkReport {
         schema_version: 2,
+        thresholds: manifest.thresholds,
         index: BenchmarkIndexMetrics {
             discovered: index.discovered,
             indexed: index.indexed,
@@ -277,7 +405,7 @@ fn run_benchmark(corpus: &Path, queries: &Path) -> Result<(), Box<dyn Error>> {
             failures: index.failures.len(),
             completeness,
         },
-        overall: finalize_metrics(overall),
+        overall: overall_metrics,
         by_source_type: categories
             .into_iter()
             .map(|(source_type, accumulator)| (source_type, finalize_metrics(accumulator)))
@@ -324,6 +452,35 @@ fn validate_manifest_inputs(
             manifest.schema_version
         )
         .into());
+    }
+    let threshold_values = [
+        (
+            "exact_source_recall_at_1",
+            manifest.thresholds.exact_source_recall_at_1,
+        ),
+        (
+            "exact_source_recall_at_5",
+            manifest.thresholds.exact_source_recall_at_5,
+        ),
+        ("anchor_precision", manifest.thresholds.anchor_precision),
+        (
+            "false_positive_rate",
+            manifest.thresholds.false_positive_rate,
+        ),
+        ("index_completeness", manifest.thresholds.index_completeness),
+    ];
+    if threshold_values
+        .iter()
+        .any(|(_, value)| !value.is_finite() || !(0.0..=1.0).contains(value))
+    {
+        let invalid = threshold_values
+            .iter()
+            .find(|(_, value)| !value.is_finite() || !(0.0..=1.0).contains(value))
+            .map(|(name, value)| format!("{name}={value}"))
+            .unwrap_or_else(|| "unknown".into());
+        return Err(
+            format!("benchmark threshold must be finite and within 0..=1: {invalid}").into(),
+        );
     }
     if manifest.query_count != queries.len() {
         return Err(format!(
@@ -384,6 +541,31 @@ fn validate_manifest_inputs(
                 query.id
             )
             .into());
+        }
+        let mut expected_files = BTreeSet::from([query.expected_file.as_str()]);
+        for alternative in &query.acceptable_alternatives {
+            if !expected_files.insert(alternative.expected_file.as_str()) {
+                return Err(format!(
+                    "query {} repeats an acceptable alternative fixture: {}",
+                    query.id, alternative.expected_file
+                )
+                .into());
+            }
+            let source = fixture_sources
+                .get(&alternative.expected_file)
+                .ok_or_else(|| {
+                    format!(
+                        "query {} references alternative fixture absent from manifest: {}",
+                        query.id, alternative.expected_file
+                    )
+                })?;
+            if !expected_source_anchor_matches(&alternative.expected_anchor, source) {
+                return Err(format!(
+                    "query {} alternative anchor does not resolve to its declared source text",
+                    query.id
+                )
+                .into());
+            }
         }
     }
     Ok(fixture_sources)
@@ -496,6 +678,39 @@ fn fixture_path_matches(corpus: &Path, source_uri: &str, expected_file: &str) ->
         .is_ok_and(|relative| relative == Path::new(expected_file))
 }
 
+fn matching_expectation<'a>(
+    corpus: &Path,
+    source_uri: &str,
+    query: &'a BenchmarkQuery,
+) -> Option<(&'a str, &'a BenchmarkAnchor)> {
+    if fixture_path_matches(corpus, source_uri, &query.expected_file) {
+        return Some((&query.expected_file, &query.expected_anchor));
+    }
+    query
+        .acceptable_alternatives
+        .iter()
+        .find(|alternative| fixture_path_matches(corpus, source_uri, &alternative.expected_file))
+        .map(|alternative| {
+            (
+                alternative.expected_file.as_str(),
+                &alternative.expected_anchor,
+            )
+        })
+}
+
+fn benchmark_passes(
+    thresholds: &BenchmarkThresholds,
+    metrics: &BenchmarkMetrics,
+    completeness: f64,
+) -> bool {
+    const EPSILON: f64 = 1e-12;
+    metrics.exact_source_recall_at_1 + EPSILON >= thresholds.exact_source_recall_at_1
+        && metrics.exact_source_recall_at_5 + EPSILON >= thresholds.exact_source_recall_at_5
+        && metrics.anchor_precision + EPSILON >= thresholds.anchor_precision
+        && metrics.false_positive_rate <= thresholds.false_positive_rate + EPSILON
+        && completeness + EPSILON >= thresholds.index_completeness
+}
+
 fn median(sorted_values: &[f64]) -> f64 {
     if sorted_values.is_empty() {
         return 0.0;
@@ -544,6 +759,7 @@ fn anchor_matches(
                 && expected_source_anchor_matches(expected, expected_source)
                 && phrase_is_highlighted(hit, contains)
         }
+        _ => false,
     }
 }
 
@@ -613,8 +829,9 @@ mod tests {
     use loom_core::{EvidenceAnchor, EvidenceExcerpt, EvidenceSegment, SearchHit};
 
     use super::{
-        expected_source_anchor_matches, fixture_path_matches, median, percentile,
-        phrase_is_highlighted, BenchmarkAnchor,
+        benchmark_passes, expected_source_anchor_matches, fixture_path_matches,
+        matching_expectation, median, percentile, phrase_is_highlighted, BenchmarkAlternative,
+        BenchmarkAnchor, BenchmarkQuery, BenchmarkThresholds,
     };
 
     #[test]
@@ -703,5 +920,73 @@ mod tests {
         };
         assert!(phrase_is_highlighted(&hit, "exact phrase"));
         assert!(!phrase_is_highlighted(&hit, "exact phrase missing"));
+    }
+
+    #[test]
+    fn matching_expectation_accepts_declared_alternative_sources() {
+        let query = BenchmarkQuery {
+            id: "q".into(),
+            query: "term".into(),
+            source_type: "local_text".into(),
+            expected_file: "primary.md".into(),
+            expected_anchor: BenchmarkAnchor::Text {
+                char_start: 0,
+                char_end: 4,
+                line_start: 1,
+                line_end: 1,
+                contains: "term".into(),
+            },
+            acceptable_alternatives: vec![BenchmarkAlternative {
+                expected_file: "alternate.md".into(),
+                expected_anchor: BenchmarkAnchor::Text {
+                    char_start: 2,
+                    char_end: 6,
+                    line_start: 1,
+                    line_end: 1,
+                    contains: "term".into(),
+                },
+            }],
+        };
+        let corpus = PathBuf::from("/fixtures");
+        let (file, _) = matching_expectation(&corpus, "/fixtures/alternate.md", &query).unwrap();
+        assert_eq!(file, "alternate.md");
+        assert!(matching_expectation(&corpus, "/fixtures/unrelated.md", &query).is_none());
+    }
+
+    #[test]
+    fn benchmark_thresholds_reject_regressions_and_incomplete_indexes() {
+        let thresholds = BenchmarkThresholds {
+            exact_source_recall_at_1: 1.0,
+            exact_source_recall_at_5: 1.0,
+            anchor_precision: 1.0,
+            false_positive_rate: 0.0,
+            index_completeness: 1.0,
+        };
+        let passing = super::BenchmarkMetrics {
+            queries: 3,
+            exact_source_recall_at_1: 1.0,
+            exact_source_recall_at_5: 1.0,
+            anchor_precision: 1.0,
+            false_positive_rate: 0.0,
+            median_latency_ms: 1.0,
+            p95_latency_ms: 2.0,
+        };
+        assert!(benchmark_passes(&thresholds, &passing, 1.0));
+
+        let false_positive_regression = super::BenchmarkMetrics {
+            queries: passing.queries,
+            exact_source_recall_at_1: passing.exact_source_recall_at_1,
+            exact_source_recall_at_5: passing.exact_source_recall_at_5,
+            anchor_precision: passing.anchor_precision,
+            false_positive_rate: 0.01,
+            median_latency_ms: passing.median_latency_ms,
+            p95_latency_ms: passing.p95_latency_ms,
+        };
+        assert!(!benchmark_passes(
+            &thresholds,
+            &false_positive_regression,
+            1.0
+        ));
+        assert!(!benchmark_passes(&thresholds, &passing, 0.99));
     }
 }

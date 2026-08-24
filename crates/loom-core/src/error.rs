@@ -22,6 +22,21 @@ pub enum LoomError {
     #[error("unsupported source: {0}")]
     UnsupportedSource(String),
 
+    #[error("PDF extraction failed: {0}")]
+    PdfExtraction(String),
+
+    #[error("image extraction failed: {0}")]
+    ImageExtraction(String),
+
+    #[error("OCR extraction failed: {0}")]
+    OcrExtraction(String),
+
+    #[error("image OCR is disabled")]
+    OcrDisabled,
+
+    #[error("OCR is unavailable: {0}")]
+    OcrUnavailable(String),
+
     #[error("source changed while it was being read: {0}")]
     SourceChanged(String),
 
@@ -31,6 +46,12 @@ pub enum LoomError {
     #[error("could not project exact search evidence: {0}")]
     EvidenceProjection(String),
 
+    #[error("semantic index unavailable: {0}")]
+    SemanticIndexUnavailable(String),
+
+    #[error("semantic index is incompatible: {0}")]
+    SemanticIndexIncompatible(String),
+
     #[error("artifact not found: {0}")]
     ArtifactNotFound(String),
 
@@ -39,6 +60,9 @@ pub enum LoomError {
 
     #[error("unsupported or invalid library schema version: {0}")]
     UnsupportedSchemaVersion(String),
+
+    #[error("index job interrupted: {0}")]
+    IndexInterrupted(String),
 
     #[error("library lock is unavailable")]
     LockPoisoned,
