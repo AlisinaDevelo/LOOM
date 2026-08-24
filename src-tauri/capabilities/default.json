@@ -6,8 +6,16 @@
   "permissions": [
     "core:default",
     "allow-index-selected-folder",
+    "allow-cancel-indexing",
+    "allow-reconcile-approved-roots",
+    "allow-list-source-roots",
+    "allow-revoke-source-root",
     "allow-search",
     "allow-library-stats",
-    "allow-open-artifact"
+    "allow-ocr-status",
+    "allow-set-ocr-enabled",
+    "allow-purge-ocr-records",
+    "allow-open-artifact",
+    "allow-resolve-evidence"
   ]
 }

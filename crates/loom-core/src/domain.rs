@@ -1,3 +1,8 @@
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
+
 use serde::{Deserialize, Serialize};
 
 /// A versioned locator that lets the UI return to the evidence behind a result.
@@ -11,6 +16,33 @@ pub enum EvidenceAnchor {
         line_start: u64,
         line_end: u64,
     },
+    /// Character and line offsets within one extracted PDF page.
+    PdfPage {
+        page: u32,
+        char_start: u64,
+        char_end: u64,
+        line_start: u64,
+        line_end: u64,
+    },
+    /// Character and line offsets for one OCR region in an image's oriented pixel space.
+    ///
+    /// Coordinates are integer pixels after the EXIF orientation transform. Fixed-point fields
+    /// keep the canonical evidence record deterministic across FFI and database round-trips.
+    ImageRegion {
+        char_start: u64,
+        char_end: u64,
+        line_start: u64,
+        line_end: u64,
+        x: u32,
+        y: u32,
+        width: u32,
+        height: u32,
+        image_width: u32,
+        image_height: u32,
+        orientation: u8,
+        scale_milli: u32,
+        confidence_milli: u32,
+    },
 }
 
 /// One source that could not be indexed.
@@ -23,12 +55,122 @@ pub struct IndexFailure {
 /// A bounded summary of an explicit indexing operation.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IndexReport {
+    /// Stable durable identifier for this indexing run. A resumed run keeps the same ID.
+    pub run_id: String,
     pub discovered: u64,
+    /// Units processed in this invocation, including unchanged, skipped, and failed units.
+    pub attempted: u64,
+    pub indexed: u64,
+    pub unchanged: u64,
+    pub skipped: u64,
+    pub failed: u64,
+    /// Units left unprocessed because cancellation was requested at a safe boundary.
+    pub cancelled: u64,
+    pub bytes_read: u64,
+    pub failures: Vec<IndexFailure>,
+}
+
+/// Cooperative cancellation shared by an indexing worker and its local UI/controller.
+///
+/// Cancellation is observed between bounded ingestion units. The current unit is allowed to
+/// finish its SQLite transaction so canonical artifacts and the durable checkpoint never expose
+/// a partially committed version.
+#[derive(Debug, Clone)]
+pub struct IndexCancellationToken(Arc<AtomicBool>);
+
+impl IndexCancellationToken {
+    pub fn new() -> Self {
+        Self(Arc::new(AtomicBool::new(false)))
+    }
+
+    pub fn cancel(&self) {
+        self.0.store(true, Ordering::Release);
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        self.0.load(Ordering::Acquire)
+    }
+}
+
+impl Default for IndexCancellationToken {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Consistency evidence for the canonical passage rows and derived FTS5 projection.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FtsHealthReport {
+    pub canonical_passages: u64,
+    pub indexed_passages: u64,
+    /// BLAKE3 over ordered canonical passage row IDs and text hashes.
+    pub canonical_digest: String,
+    /// BLAKE3 over the tokenizer vocabulary expected from canonical passage text.
+    pub expected_derivative_digest: String,
+    /// BLAKE3 over the vocabulary currently present in the FTS5 projection.
+    pub derivative_digest: String,
+    pub integrity_ok: bool,
+    pub integrity_error: Option<String>,
+    pub healthy: bool,
+}
+
+/// Before/after evidence for one transactional FTS5 repair.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FtsRepairReport {
+    pub before: FtsHealthReport,
+    pub after: FtsHealthReport,
+}
+
+/// Durable progress for the most recent indexing job for an explicitly selected root.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IndexCheckpoint {
+    pub job_id: String,
+    pub state: String,
+    pub next_unit: u64,
+    pub total_units: u64,
+    pub last_error: Option<String>,
+}
+
+/// A bounded summary of a persisted-root observation pass.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ObservationReport {
+    pub roots_scanned: u64,
+    pub roots_failed: u64,
+    pub events_received: u64,
+    pub paths_coalesced: u64,
+    pub full_rescans: u64,
     pub indexed: u64,
     pub unchanged: u64,
     pub skipped: u64,
     pub bytes_read: u64,
     pub failures: Vec<IndexFailure>,
+}
+
+/// Availability of a persisted, explicitly selected source root.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SourceRootStatus {
+    Available,
+    Missing,
+    Denied,
+    WrongType,
+    Unsafe,
+    Revoked,
+    Unavailable,
+}
+
+/// A persisted source scope exposed to the desktop UI.
+///
+/// LOOM's current direct-distribution build uses an explicit re-selection path instead of
+/// pretending to hold a security-scoped bookmark. Ingestion opens source bytes read-only, and the
+/// scope record contains no write capability.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SourceRootInfo {
+    pub locator: String,
+    pub kind: String,
+    pub enabled: bool,
+    pub read_only: bool,
+    pub status: SourceRootStatus,
 }
 
 /// Canonical library counts. Derived-index files are intentionally excluded.
@@ -59,7 +201,26 @@ pub struct ArtifactObservation {
     pub content_hash: String,
     pub extractor_id: String,
     pub extractor_version: String,
+    pub page_count: Option<u32>,
+    pub parse_warnings: Vec<String>,
+    pub extraction_metadata: serde_json::Value,
     pub passages: Vec<PassageObservation>,
+}
+
+/// Whether local image OCR is enabled and how many derived records currently exist.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OcrStatus {
+    pub enabled: bool,
+    pub derived_versions: u64,
+    pub derived_passages: u64,
+}
+
+/// Counts retained after deleting derived OCR records.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OcrPurgeReport {
+    pub artifacts_affected: u64,
+    pub versions_deleted: u64,
+    pub passages_deleted: u64,
 }
 
 /// A user search request crossing the Tauri IPC boundary.
@@ -85,6 +246,19 @@ pub struct OpenArtifactRequest {
     pub content_hash: String,
 }
 
+/// The source version and passage a caller is asking LOOM to show as evidence.
+///
+/// The passage identifier is deliberately bound to the same artifact/version/hash tuple used
+/// for opening the original. A viewer must never silently substitute a newer file or an unrelated
+/// passage when the source has moved, changed, or been re-indexed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResolveEvidenceRequest {
+    pub artifact_id: String,
+    pub version_id: String,
+    pub passage_id: String,
+    pub content_hash: String,
+}
+
 /// One source-derived segment in a structured evidence excerpt.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EvidenceSegment {
@@ -96,6 +270,119 @@ pub struct EvidenceSegment {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EvidenceExcerpt {
     pub segments: Vec<EvidenceSegment>,
+}
+
+/// Canonical source-backed state for the evidence viewer.
+///
+/// `passage_text` is returned from SQLite after the active version/hash/passage tuple has been
+/// verified. The UI may style it, but it cannot claim that an unverified client-side excerpt is
+/// the source evidence. `anchor` is the stored page or image-region locator for that passage.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EvidenceView {
+    pub artifact_id: String,
+    pub version_id: String,
+    pub passage_id: String,
+    pub title: String,
+    pub media_type: String,
+    pub source_uri: String,
+    pub content_hash: String,
+    pub passage_text: String,
+    pub anchor: EvidenceAnchor,
+    pub page_count: Option<u32>,
+    pub extractor_id: String,
+    pub extractor_version: String,
+    pub extraction_metadata: serde_json::Value,
+}
+
+/// Versioned configuration for a derived semantic embedding provider.
+///
+/// This metadata is part of the derivative contract, never canonical source identity. A provider
+/// change must produce a new index revision or be rejected rather than mixing incompatible vectors.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SemanticIndexConfig {
+    pub provider_id: String,
+    pub model_id: String,
+    pub dimension: u32,
+    pub normalization: String,
+    pub index_revision: String,
+}
+
+impl Default for SemanticIndexConfig {
+    fn default() -> Self {
+        Self {
+            provider_id: "loom.hash-embedding".into(),
+            model_id: "hashed-tokens-v1".into(),
+            dimension: 128,
+            normalization: "l2".into(),
+            index_revision: "semantic-v1".into(),
+        }
+    }
+}
+
+/// A rebuild manifest for the disposable semantic index.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SemanticIndexManifest {
+    pub config: SemanticIndexConfig,
+    pub source_digest: String,
+    pub canonical_passages: u64,
+    pub indexed_passages: u64,
+    pub vector_bytes: u64,
+}
+
+/// Health and compatibility state for the semantic derivative.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SemanticIndexStatus {
+    pub healthy: bool,
+    pub canonical_passages: u64,
+    pub indexed_passages: u64,
+    pub canonical_digest: String,
+    pub vector_bytes: u64,
+    pub manifest: Option<SemanticIndexManifest>,
+    pub reason: Option<String>,
+}
+
+/// Counts retained after explicitly retiring the semantic derivative.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SemanticDropReport {
+    pub embeddings_deleted: u64,
+    pub manifest_deleted: bool,
+}
+
+/// Evidence-bound candidate returned by semantic retrieval.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SemanticCandidate {
+    pub rank: u32,
+    pub score: f64,
+    pub artifact_id: String,
+    pub version_id: String,
+    pub passage_id: String,
+    pub title: String,
+    pub media_type: String,
+    pub source_uri: String,
+    pub content_hash: String,
+    pub passage_hash: String,
+    pub passage_text: String,
+    pub anchor: EvidenceAnchor,
+    pub model_id: String,
+    pub index_revision: String,
+}
+
+/// Summary returned after rebuilding the disposable semantic derivative.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SemanticRebuildReport {
+    pub manifest: SemanticIndexManifest,
+    pub rebuilt_passages: u64,
+}
+
+/// Device measurement for one local provider candidate.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SemanticProviderMeasurement {
+    pub provider_id: String,
+    pub model_id: String,
+    pub dimension: u32,
+    pub sample_count: u64,
+    pub vector_bytes: u64,
+    pub elapsed_micros: u64,
 }
 
 /// One ranked, source-backed search result.

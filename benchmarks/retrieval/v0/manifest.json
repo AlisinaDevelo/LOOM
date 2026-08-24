@@ -4,6 +4,13 @@
   "license": "CC0-1.0",
   "media_types": ["text/markdown", "text/plain"],
   "query_count": 3,
+  "thresholds": {
+    "exact_source_recall_at_1": 1.0,
+    "exact_source_recall_at_5": 1.0,
+    "anchor_precision": 1.0,
+    "false_positive_rate": 0.0,
+    "index_completeness": 1.0
+  },
   "fixtures": [
     {
       "path": "corpus/capture-contract.txt",

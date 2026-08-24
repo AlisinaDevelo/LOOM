@@ -15,6 +15,10 @@ For a selected file or directory, the current path may store:
 - a BLAKE3 content hash;
 - normalized passage text and exact character/line anchors;
 - extractor identity and version;
+- for images, derived OCR text, pixel-region anchors, provider/model identity, confidence, EXIF
+  orientation, and fixed-point display scale;
+- for an explicitly rebuilt semantic derivative, passage hashes, provider/model identity, vector
+  dimensions/revision, and encoded local vectors;
 - local timestamps and indexing statistics.
 
 Search queries are used in memory for the current search operation and are not a field in the
@@ -35,13 +39,27 @@ or content to the selected external application.
 
 - The user chooses the file or folder through the CLI or a backend-owned native desktop picker; the
   desktop webview cannot submit an arbitrary path to the index command.
+- The desktop persists only the exact canonical locator selected by the user. It exposes the saved
+  scope as read-only, reports available/missing/denied/moved/revoked states, and offers explicit
+  re-selection; it never falls back to the home directory or another broader path.
 - Directory traversal does not follow symlinks; stable reads enforce canonical root containment and
   verify descriptor/path identity before and after reading.
-- Only UTF-8 .txt, .md, and .markdown files are accepted in this slice.
+- Only UTF-8 .txt/.md/.markdown, bounded text-based PDFs, and common PNG/JPEG/GIF/WebP images are
+  accepted in this slice. Image OCR is local macOS Vision processing; it is disabled/purged as a
+  user-visible policy and never uploads source bytes.
 - No automatic cloud upload or third-party model processing occurs in the current path.
-- There is no user-facing purge, retention, encryption, or source-revocation workflow yet.
+- Semantic commands run the current deterministic provider locally and never download a model or
+  send passage text to a network service. The vector tables are derived and can be dropped without
+  deleting canonical source records.
+- Revoking a saved scope disables future reconciliation and hides its active artifacts from search;
+  canonical historical rows remain until a future retention/purge policy is implemented.
+- The desktop stop control requests cooperative cancellation at a bounded indexing-unit boundary;
+  it does not upload, discard, or roll back a complete source version already committed locally.
 - A complete rescan hides removed or unreadable sources from search, but does not erase their stored
   historical passage text.
+- Disabling OCR or invoking the OCR purge removes derived `loom.ocr` versions/passages but retains
+  the original image locator and source bytes. Re-indexing after re-enabling recreates the derived
+  records.
 
 Do not select confidential or regulated material unless you understand the local storage,
 operating-system, backup, and deletion implications. Treat the database and its WAL files as
@@ -54,5 +72,8 @@ multi-device sync must define collection scope, consent, retention, deletion, en
 control, and failure behavior before it is enabled. A derived representation must not silently
 expand the collection or become the only way to recover source evidence.
 
-The design is informed by the [NIST Privacy Framework](https://www.nist.gov/privacy-framework) and
-the [Tauri capabilities model](https://v2.tauri.app/security/capabilities/).
+The current direct-distribution build uses explicit re-selection rather than claiming a
+security-scoped bookmark. A future sandboxed/notarized build must replace or supplement that path
+with persistent security-scoped bookmarks and test stale bookmark recovery. The design is informed
+by the [NIST Privacy Framework](https://www.nist.gov/privacy-framework) and the
+[Tauri capabilities model](https://v2.tauri.app/security/capabilities/).

@@ -4,8 +4,8 @@ Program window: **2026-08-23 through 2031-08-23**.
 
 LOOM is planned as an evidence-first, local-first recovery system: recover the original source
 object, show why it matched, and make uncertainty visible. The current implementation is a
-pre-alpha text/Markdown slice. PDF, OCR, browser capture, semantic retrieval, sync, mobile,
-cross-platform, and professional workflows below are plans, not supported behavior.
+pre-alpha text/Markdown/PDF-text/image-OCR slice on macOS. Browser capture, semantic retrieval,
+sync, mobile, cross-platform, and professional workflows below are plans, not supported behavior.
 
 The managed program contains **20 rolling quarterly milestones**, **154 active outcome-oriented
 issues**, **13 product-phase epics**, **141 native parent/sub-issue links**, and **314 prerequisite
@@ -27,6 +27,10 @@ Every active managed issue has:
 - a phase parent and explicit prerequisites where applicable;
 - required closure evidence: the tests, fixtures, measurements, review artifacts, or consented
   study evidence actually produced.
+
+The v0.1 activation and recovery decision contract is [ACTIVATION_GATE.md](ACTIVATION_GATE.md).
+Its numeric thresholds are hypotheses until the rights-clean fixture and privacy-safe participant
+worksheet produce measurements; a narrow or stop decision is valid.
 
 An issue is not complete because work was attempted. It is complete when its acceptance evidence
 exists. A quarter may continue, narrow, reorder, or stop later work; long-horizon items are options,

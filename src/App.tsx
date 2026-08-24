@@ -1,8 +1,8 @@
-import { FormEvent, useEffect, useMemo, useState } from "react";
+import { FormEvent, useCallback, useEffect, useMemo, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 
 import "./App.css";
-import { compactPath } from "./evidence";
+import { compactPath, projectImageRegion, type ImageRegionAnchor } from "./evidence";
 
 type LibraryStats = {
   source_roots: number;
@@ -13,12 +13,30 @@ type LibraryStats = {
 };
 
 type IndexReport = {
+  run_id: string;
   discovered: number;
+  attempted: number;
   indexed: number;
   unchanged: number;
   skipped: number;
+  failed: number;
+  cancelled: number;
   bytes_read: number;
   failures: Array<{ source: string; reason: string }>;
+};
+
+type ObservationReport = {
+  failures?: Array<{ source: string; reason: string }>;
+};
+
+type SourceRootStatus = "available" | "missing" | "denied" | "wrong_type" | "unsafe" | "revoked" | "unavailable";
+
+type SourceRootInfo = {
+  locator: string;
+  kind: string;
+  enabled: boolean;
+  read_only: boolean;
+  status: SourceRootStatus;
 };
 
 type SearchHit = {
@@ -35,13 +53,52 @@ type SearchHit = {
     segments: Array<{ text: string; highlighted: boolean }>;
   };
   anchor: {
-    kind: "text";
+    kind: "text" | "pdf_page" | "image_region";
     char_start: number;
     char_end: number;
     line_start: number;
     line_end: number;
+    page?: number;
+    x?: number;
+    y?: number;
+    width?: number;
+    height?: number;
+    image_width?: number;
+    image_height?: number;
+    orientation?: number;
+    scale_milli?: number;
+    confidence_milli?: number;
   };
   match_reason: string;
+};
+
+type EvidenceView = {
+  artifact_id: string;
+  version_id: string;
+  passage_id: string;
+  title: string;
+  media_type: string;
+  source_uri: string;
+  content_hash: string;
+  passage_text: string;
+  anchor: SearchHit["anchor"];
+  page_count?: number;
+  extractor_id: string;
+  extractor_version: string;
+  extraction_metadata: Record<string, unknown>;
+};
+
+type EvidenceState = {
+  hit: SearchHit;
+  status: "loading" | "ready" | "error";
+  view?: EvidenceView;
+  error?: string;
+};
+
+type OcrStatus = {
+  enabled: boolean;
+  derived_versions: number;
+  derived_passages: number;
 };
 
 const emptyStats: LibraryStats = {
@@ -62,28 +119,194 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+function sourceRootStatusLabel(status: SourceRootStatus): string {
+  return {
+    available: "available",
+    missing: "missing — re-select",
+    denied: "denied — re-select",
+    wrong_type: "moved — re-select",
+    unsafe: "unsafe — re-select",
+    revoked: "revoked",
+    unavailable: "unavailable — re-select",
+  }[status];
+}
+
+type EvidenceViewerProps = {
+  state: EvidenceState;
+  zoom: number;
+  rotation: number;
+  onZoomChange: (zoom: number) => void;
+  onRotationChange: (rotation: number) => void;
+  onClose: () => void;
+  onOpenOriginal: (hit: SearchHit) => void;
+};
+
+function EvidenceViewer({
+  state,
+  zoom,
+  rotation,
+  onZoomChange,
+  onRotationChange,
+  onClose,
+  onOpenOriginal,
+}: EvidenceViewerProps) {
+  const view = state.view;
+  if (state.status === "loading") {
+    return (
+      <section className="evidence-viewer" aria-label="Evidence viewer">
+        <div className="evidence-viewer-heading">
+          <div><p className="eyebrow">Verified evidence</p><h2>Checking the source…</h2></div>
+          <button type="button" className="viewer-close" onClick={onClose}>Close</button>
+        </div>
+        <p className="evidence-loading">Re-checking the active version, content hash, and passage anchor.</p>
+      </section>
+    );
+  }
+  if (state.status === "error" || !view) {
+    return (
+      <section className="evidence-viewer evidence-viewer-error" aria-label="Evidence viewer">
+        <div className="evidence-viewer-heading">
+          <div><p className="eyebrow">Evidence unavailable</p><h2>Source needs attention.</h2></div>
+          <button type="button" className="viewer-close" onClick={onClose}>Close</button>
+        </div>
+        <p role="alert">{state.error ?? "The source could not be verified."}</p>
+        <p className="evidence-loading">Re-index the selected folder, then retry this evidence result.</p>
+      </section>
+    );
+  }
+
+  const anchor = view.anchor;
+  const isImage = anchor.kind === "image_region";
+  const imageProjection = isImage
+    ? projectImageRegion({
+        x: anchor.x ?? 0,
+        y: anchor.y ?? 0,
+        width: anchor.width ?? 0,
+        height: anchor.height ?? 0,
+        image_width: anchor.image_width ?? 1,
+        image_height: anchor.image_height ?? 1,
+      } satisfies ImageRegionAnchor, zoom, rotation, window.devicePixelRatio || 1)
+    : null;
+  const location = anchor.kind === "pdf_page"
+    ? `PDF page ${anchor.page ?? "?"}`
+    : anchor.kind === "image_region"
+      ? `Image region ${anchor.x ?? 0},${anchor.y ?? 0} · ${anchor.width ?? 0}×${anchor.height ?? 0}px`
+      : `Text lines ${anchor.line_start}–${anchor.line_end}`;
+
+  return (
+    <section className="evidence-viewer" aria-label="Evidence viewer">
+      <div className="evidence-viewer-heading">
+        <div>
+          <p className="eyebrow">Verified evidence</p>
+          <h2>{view.title}</h2>
+          <p className="evidence-location">{location} · {view.extractor_id} {view.extractor_version}</p>
+        </div>
+        <div className="viewer-actions">
+          {isImage && <>
+            <button type="button" className="viewer-control" onClick={() => onZoomChange(zoom - 0.25)} aria-label="Zoom out">−</button>
+            <span className="viewer-zoom">{Math.round(zoom * 100)}%</span>
+            <button type="button" className="viewer-control" onClick={() => onZoomChange(zoom + 0.25)} aria-label="Zoom in">＋</button>
+            <button type="button" className="viewer-control" onClick={() => onRotationChange(rotation + 90)} aria-label="Rotate evidence">↻</button>
+          </>}
+          <button type="button" className="viewer-close" onClick={onClose}>Close</button>
+        </div>
+      </div>
+
+      {isImage && imageProjection ? (
+        <div
+          className="evidence-stage image-stage"
+          data-testid="image-evidence-stage"
+          data-rotation={imageProjection.rotation}
+          data-zoom={imageProjection.scale}
+          style={{ aspectRatio: `${imageProjection.canvasWidth} / ${imageProjection.canvasHeight}` }}
+        >
+          <div
+            className="image-evidence-map"
+            style={{ aspectRatio: `${imageProjection.canvasWidth} / ${imageProjection.canvasHeight}` }}
+            aria-label={`Image evidence canvas at ${imageProjection.rotation} degrees`}
+          >
+            <div
+              className="image-evidence-region"
+              style={{
+                left: `${imageProjection.leftPercent}%`,
+                top: `${imageProjection.topPercent}%`,
+                width: `${imageProjection.widthPercent}%`,
+                height: `${imageProjection.heightPercent}%`,
+              }}
+            />
+            <span className="image-evidence-caption">OCR region · confidence {((anchor.confidence_milli ?? 0) / 10).toFixed(1)}%</span>
+          </div>
+        </div>
+      ) : (
+        <div className={`evidence-stage ${anchor.kind === "pdf_page" ? "pdf-stage" : "text-stage"}`}>
+          {anchor.kind === "pdf_page" && <div className="pdf-page-label">Page {anchor.page ?? "?"} of {view.page_count ?? "?"}</div>}
+          <blockquote className="verified-passage"><mark>{view.passage_text}</mark></blockquote>
+          {anchor.kind === "pdf_page" && <div className="pdf-anchor-line" aria-hidden="true" />}
+        </div>
+      )}
+
+      <div className="evidence-viewer-footer">
+        <div>
+          <span className="evidence-footer-label">Verified source</span>
+          <code title={view.content_hash}>{view.content_hash.slice(0, 28)}…</code>
+          <p title={view.source_uri}>{compactPath(view.source_uri)}</p>
+        </div>
+        <button type="button" className="open-button" onClick={() => onOpenOriginal(state.hit)}>
+          Open original <span aria-hidden="true">↗</span>
+        </button>
+      </div>
+    </section>
+  );
+}
+
 function App() {
   const [stats, setStats] = useState<LibraryStats>(emptyStats);
   const [query, setQuery] = useState("");
   const [hits, setHits] = useState<SearchHit[]>([]);
+  const [ocrStatus, setOcrStatus] = useState<OcrStatus>({
+    enabled: true,
+    derived_versions: 0,
+    derived_passages: 0,
+  });
   const [searched, setSearched] = useState(false);
-  const [busy, setBusy] = useState<"index" | "search" | null>(null);
+  const [busy, setBusy] = useState<"index" | "search" | "scope" | "ocr" | "evidence" | null>(null);
+  const [sourceRoots, setSourceRoots] = useState<SourceRootInfo[]>([]);
+  const [evidenceState, setEvidenceState] = useState<EvidenceState | null>(null);
+  const [evidenceZoom, setEvidenceZoom] = useState(1);
+  const [evidenceRotation, setEvidenceRotation] = useState(0);
   const [notice, setNotice] = useState("Ready. LOOM does not upload your library.");
   const [error, setError] = useState<string | null>(null);
 
-  const refreshStats = async () => {
+  const refreshStats = useCallback(async () => {
     try {
       setStats(await invoke<LibraryStats>("library_stats"));
     } catch (caught) {
       setError(errorMessage(caught));
     }
-  };
+  }, []);
+
+  const refreshSourceRoots = useCallback(async () => {
+    try {
+      setSourceRoots(await invoke<SourceRootInfo[]>("list_source_roots"));
+    } catch (caught) {
+      setError(errorMessage(caught));
+    }
+  }, []);
+
+  const refreshLibrary = useCallback(async () => {
+    await Promise.all([refreshStats(), refreshSourceRoots()]);
+  }, [refreshSourceRoots, refreshStats]);
 
   useEffect(() => {
     let active = true;
-    void invoke<LibraryStats>("library_stats")
-      .then((value) => {
-        if (active) setStats(value);
+    void invoke<ObservationReport>("reconcile_approved_roots")
+      .then((report) => {
+        const failures = report?.failures ?? [];
+        if (active && failures.length) {
+          setNotice(`${failures.length} saved folder${failures.length === 1 ? " needs" : "s need"} attention.`);
+          setError(failures.map((item) => `${item.source}: ${item.reason}`).join("\n"));
+        }
+        return refreshLibrary();
       })
       .catch((caught: unknown) => {
         if (active) setError(errorMessage(caught));
@@ -91,7 +314,7 @@ function App() {
     return () => {
       active = false;
     };
-  }, []);
+  }, [refreshLibrary]);
 
   const addSource = async () => {
     setError(null);
@@ -104,16 +327,81 @@ function App() {
         return;
       }
       const failed = report.failures.length;
-      setNotice(
-        `Indexed ${report.indexed}; ${report.unchanged} unchanged; ${report.skipped} unsupported${failed ? `; ${failed} failed` : ""}.`,
-      );
+      setNotice(report.cancelled
+        ? `Cancelled run ${report.run_id.slice(0, 8)}… after ${report.attempted} unit${report.attempted === 1 ? "" : "s"}; ${report.cancelled} remain resumable.`
+        : `Indexed ${report.indexed}; ${report.unchanged} unchanged; ${report.skipped} unsupported${failed ? `; ${failed} failed` : ""}.`);
       if (failed) {
         setError(report.failures.map((item) => `${item.source}: ${item.reason}`).join("\n"));
       }
-      await refreshStats();
+      await refreshLibrary();
     } catch (caught) {
       setError(errorMessage(caught));
       setNotice("Indexing stopped safely.");
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const cancelIndexing = async () => {
+    setError(null);
+    setNotice("Cancellation requested; LOOM will stop after the current bounded unit…");
+    try {
+      const accepted = await invoke<boolean>("cancel_indexing");
+      if (!accepted) setNotice("No indexing run is active.");
+    } catch (caught) {
+      setError(errorMessage(caught));
+      setNotice("Cancellation could not be requested.");
+    }
+  };
+
+  const revokeSource = async (root: SourceRootInfo) => {
+    setError(null);
+    setBusy("scope");
+    setNotice(`Revoking ${compactPath(root.locator)}…`);
+    try {
+      await invoke("revoke_source_root", { locator: root.locator });
+      await refreshLibrary();
+      setNotice("Folder revoked. Its indexed evidence is hidden until you explicitly re-select it.");
+    } catch (caught) {
+      setError(errorMessage(caught));
+      setNotice("Folder revocation stopped safely.");
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const toggleOcr = async () => {
+    setError(null);
+    setBusy("ocr");
+    const next = !ocrStatus.enabled;
+    setNotice(next ? "Enabling local image OCR…" : "Disabling OCR and purging derived records…");
+    try {
+      await invoke("set_ocr_enabled", { enabled: next });
+      const status = await invoke<OcrStatus>("ocr_status");
+      setOcrStatus(status);
+      setNotice(next ? "Local image OCR is enabled." : "OCR is disabled; derived OCR records were purged.");
+      await refreshStats();
+    } catch (caught) {
+      setError(errorMessage(caught));
+      setNotice("OCR policy change stopped safely.");
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const purgeOcr = async () => {
+    setError(null);
+    setBusy("ocr");
+    setNotice("Purging derived OCR records…");
+    try {
+      await invoke("purge_ocr_records");
+      const status = await invoke<OcrStatus>("ocr_status");
+      setOcrStatus(status);
+      setNotice("Derived OCR records purged; original images remain untouched.");
+      await refreshStats();
+    } catch (caught) {
+      setError(errorMessage(caught));
+      setNotice("OCR purge stopped safely.");
     } finally {
       setBusy(null);
     }
@@ -132,6 +420,7 @@ function App() {
         request: { text: query, limit: 30 },
       });
       setHits(results);
+      setEvidenceState(null);
       setNotice(
         results.length
           ? `Found ${results.length} source-backed result${results.length === 1 ? "" : "s"}.`
@@ -158,6 +447,31 @@ function App() {
       });
     } catch (caught) {
       setError(errorMessage(caught));
+    }
+  };
+
+  const resolveEvidence = async (hit: SearchHit) => {
+    setError(null);
+    setBusy("evidence");
+    setEvidenceState({ hit, status: "loading" });
+    setEvidenceZoom(1);
+    setEvidenceRotation(0);
+    try {
+      const view = await invoke<EvidenceView>("resolve_evidence", {
+        request: {
+          artifact_id: hit.artifact_id,
+          version_id: hit.version_id,
+          passage_id: hit.passage_id,
+          content_hash: hit.content_hash,
+        },
+      });
+      setEvidenceState({ hit, status: "ready", view });
+    } catch (caught) {
+      const message = errorMessage(caught);
+      setEvidenceState({ hit, status: "error", error: message });
+      setError(message);
+    } finally {
+      setBusy(null);
     }
   };
 
@@ -196,11 +510,65 @@ function App() {
             <div><dt>Versions</dt><dd>{stats.versions}</dd></div>
             <div><dt>Indexed</dt><dd>{formatBytes(stats.indexed_bytes)}</dd></div>
           </dl>
-          <button className="add-source" type="button" onClick={addSource} disabled={busy !== null}>
-            <span aria-hidden="true">＋</span>
-            {busy === "index" ? "Indexing…" : "Add a folder"}
+          <button
+            className={busy === "index" ? "add-source cancel-source" : "add-source"}
+            type="button"
+            onClick={busy === "index" ? cancelIndexing : addSource}
+            disabled={busy !== null && busy !== "index"}
+          >
+            <span aria-hidden="true">{busy === "index" ? "×" : "＋"}</span>
+            {busy === "index" ? "Stop indexing" : "Add a folder"}
           </button>
-          <p className="scope-note">Text and Markdown only in this pre-alpha slice.</p>
+          <p className="scope-note">Text, Markdown, bounded PDF text, and local image OCR are supported.</p>
+          <section className="ocr-controls" aria-labelledby="ocr-heading">
+            <div className="section-label" id="ocr-heading">Image OCR</div>
+            <div className="ocr-control-row">
+              <span>{ocrStatus.enabled ? "enabled" : "disabled"}</span>
+              <button type="button" className="scope-action" onClick={toggleOcr} disabled={busy !== null}>
+                {ocrStatus.enabled ? "Disable & purge" : "Enable"}
+              </button>
+            </div>
+            <p className="scope-note">Runs on-device through macOS Vision. Disabling removes derived text and keeps original images.</p>
+            <button type="button" className="scope-action" onClick={purgeOcr} disabled={busy !== null}>
+              Purge derived OCR now
+            </button>
+          </section>
+          <section className="scope-list" aria-labelledby="scope-heading">
+            <div className="section-label" id="scope-heading">Saved scopes</div>
+            {sourceRoots.length === 0 ? (
+              <p className="scope-empty">No folders saved yet.</p>
+            ) : (
+              <ul>
+                {sourceRoots.map((root) => (
+                  <li key={root.locator} className={`scope-row scope-${root.status}`}>
+                    <div className="scope-row-main">
+                      <span className="scope-path" title={root.locator}>{compactPath(root.locator, 31)}</span>
+                      <span className="scope-status">{sourceRootStatusLabel(root.status)}</span>
+                    </div>
+                    <div className="scope-actions">
+                      {root.status !== "available" && root.status !== "revoked" && (
+                        <button type="button" className="scope-action" onClick={addSource} disabled={busy !== null}>
+                          Re-select
+                        </button>
+                      )}
+                      {root.enabled && (
+                        <button
+                          type="button"
+                          className="scope-action scope-revoke"
+                          onClick={() => revokeSource(root)}
+                          disabled={busy !== null}
+                          aria-label={`Revoke ${root.locator}`}
+                        >
+                          Revoke
+                        </button>
+                      )}
+                    </div>
+                  </li>
+                ))}
+              </ul>
+            )}
+            <p className="scope-note">Saved paths persist locally and are read-only. Missing or denied folders never broaden access; re-select a folder explicitly to grant it again.</p>
+          </section>
         </section>
 
         <div className="privacy-note">
@@ -271,6 +639,17 @@ function App() {
               <h2>Recovered sources</h2>
               <span>{hits.length} matches · ranked with FTS5 BM25</span>
             </div>
+            {evidenceState && (
+              <EvidenceViewer
+                state={evidenceState}
+                zoom={evidenceZoom}
+                rotation={evidenceRotation}
+                onZoomChange={(next) => setEvidenceZoom(Math.max(0.5, Math.min(2, next)))}
+                onRotationChange={(next) => setEvidenceRotation(((next % 360) + 360) % 360)}
+                onClose={() => setEvidenceState(null)}
+                onOpenOriginal={openArtifact}
+              />
+            )}
             <ol>
               {hits.map((hit) => (
                 <li key={hit.passage_id} className="result-card">
@@ -280,12 +659,19 @@ function App() {
                   <div className="result-body">
                     <div className="result-title-row">
                       <div>
-                        <span className="media-badge">{hit.media_type === "text/markdown" ? "MD" : "TXT"}</span>
+                        <span className="media-badge">
+                          {hit.media_type === "application/pdf" ? "PDF" : hit.media_type.startsWith("image/") ? "IMG" : hit.media_type === "text/markdown" ? "MD" : "TXT"}
+                        </span>
                         <h3>{hit.title}</h3>
                       </div>
-                      <button type="button" className="open-button" onClick={() => openArtifact(hit)}>
-                        Open original <span aria-hidden="true">↗</span>
-                      </button>
+                      <div className="result-actions">
+                        <button type="button" className="evidence-button" onClick={() => resolveEvidence(hit)} disabled={busy !== null}>
+                          {busy === "evidence" && evidenceState?.hit.passage_id === hit.passage_id ? "Checking evidence" : "View evidence"}
+                        </button>
+                        <button type="button" className="open-button" onClick={() => openArtifact(hit)} disabled={busy !== null}>
+                          Open original <span aria-hidden="true">↗</span>
+                        </button>
+                      </div>
                     </div>
                     <p className="source-path" title={hit.source_uri}>{compactPath(hit.source_uri)}</p>
                     <blockquote>
@@ -296,7 +682,11 @@ function App() {
                       )}
                     </blockquote>
                     <div className="evidence-row">
-                      <span>lines {hit.anchor.line_start}–{hit.anchor.line_end}</span>
+                      <span>
+                        {hit.anchor.kind === "pdf_page" ? `page ${hit.anchor.page} · ` : ""}
+                        {hit.anchor.kind === "image_region" ? `region ${hit.anchor.x},${hit.anchor.y} · ` : ""}
+                        lines {hit.anchor.line_start}–{hit.anchor.line_end}
+                      </span>
                       <span>score {hit.score.toFixed(4)}</span>
                       <span title={hit.content_hash}>{hit.content_hash.slice(0, 21)}…</span>
                       <span className="evidence-ok">evidence attached</span>
