@@ -1,9 +1,9 @@
 # LOOM 0103 device evidence
 
 This artifact records the bounded text/Markdown ingestion verification for issue
-[#12](https://github.com/AlisinaDevelo/LOOM/issues/12). The implementation is stacked on the
-canonical-store work in PR [#163](https://github.com/AlisinaDevelo/LOOM/pull/163); issue #12 stays
-open until review, merge, and a repeat against the merged `main` SHA.
+[#12](https://github.com/AlisinaDevelo/LOOM/issues/12). The original implementation run remains
+retained for history; the current merged-main reproduction is recorded below. Issue #12 remains
+open until independent review and a protected-main policy are available.
 
 ## Device and toolchain
 
@@ -70,27 +70,33 @@ tauri-build.log         sha256:f3a42079bb6324c4bf6a678cc6f4cb7ed51f41080b2524686
 ## Limitations and closure gate
 
 This evidence covers explicit local UTF-8 text and Markdown only. PDF/OCR, browser capture,
-passive capture, and unavailable hardware were not substituted or claimed. Review, protected-main
-merge, the same reproduction against the merged SHA, and final issue-linked evidence remain
-required before #12 can close.
+passive capture, and unavailable hardware were not substituted or claimed. The post-merge
+reproduction below satisfies the code and target-device evidence portion; independent review and a
+protected-main policy remain required before #12 can close.
 
 ## Merged-main reproduction
 
-The same target-device harness was rerun against protected `main` at
-`6b97dc0e493a0fd63810ae1294cde7f2d558d273` after the issue-12 implementation
-merged. The evidence directory is `/tmp/loom-merged-main-device.RiWdYT`.
+The same target-device harness was rerun against runtime-tested merged `main` commit
+`eee1236710b98375e86b12187d545ed451ee2b7c` on the Mac specified above. The final main tip
+`9dea7801b2881eac9220daf0dfd0e0ff097b27a6` adds only documentation and roadmap metadata after
+that runtime-tested commit; no bounded-ingestion source changed.
 
-- Device: MacBook Pro 17,1, Apple M1, 8 GB; macOS 26.6.2 (25G83), arm64
-- Native Rust/Cargo: 1.96.0; declared MSRV Rust/Cargo: 1.88.0
-- Node v26.7.0; npm 11.19.0
-- Format, clippy, workspace tests, MSRV check/tests, npm check, retrieval benchmark,
-  Tauri debug build, and mixed corpus — pass
-- Mixed corpus: initial `discovered=4`, `indexed=2`, `skipped=1`, one bounded
-  oversized-source failure; outside-root symlink remained unreachable; recovery
-  reindex reported `indexed=1`, `unchanged=2`, `skipped=1`, no failures; final
-  stats were 3 artifacts, 3 versions, 3 passages, 250 indexed bytes
-- Summary SHA-256: `f802d4596498c683b58870dd344117ca66ffb375ca8ebcf100a01ee12de44136`
-- Log manifest SHA-256: `7224bdaffdd0bccb9ace38f0a52278dfbae02b3409a378cd0d118a8e85f408f7`
+- Verification directory: `/tmp/loom-0110-main-device.QLkKl1`
+- Harness summary SHA-256: `45bc997dcb26b8bc6cbd63a09fa17aed6c5d4ae968ef349be473b0b034e94e70`
+- Commands SHA-256: `d840925fb008af9101dc3121870b79960c1b6924451df17a7851f2f6132bb209`
+- Log manifest: `/tmp/loom-0110-main-device.QLkKl1/log-sha256.txt`
+- Log manifest SHA-256: `ed539c48e8c9b648f0ae341ddf37f02107d5aacff5d5e2a19ae0d28612c57d64`
 
-This is the merged-main reproduction record; the issue may close only after this
-artifact is linked in its discussion and the repository review policy is satisfied.
+The full local pipe passed: format, warnings-denied Clippy, workspace tests, Rust 1.88 MSRV
+check/tests, `npm ci`, `npm run check`, retrieval benchmark, semantic contract, local security
+scan, Tauri debug build, and mixed-corpus failure/recovery. The unreadable-source test exercised
+mode-000 failure, hidden search results, permission restoration, and recovery. The retrieval
+fixture indexed 3/3 sources with completeness 1.0, Recall@1/5 1.0, anchor precision 1.0,
+false-positive rate 0.0, median latency 0.185 ms, and p95 latency 0.518041 ms.
+
+The mixed corpus reported `discovered=4`, `indexed=2`, `skipped=1`, and one bounded-size failure
+on the first index; an outside-root symlink remained unreachable. Replacing the oversized file
+recovered it on the next index with `indexed=1`, `unchanged=2`, `skipped=1`, no failures, and final
+stats of 3 artifacts, 3 versions, 3 passages, and 250 indexed bytes. No hosted CI or unavailable
+hardware substituted for this target-device evidence. Any future desktop capture must be cropped
+to the relevant evidence panel.
