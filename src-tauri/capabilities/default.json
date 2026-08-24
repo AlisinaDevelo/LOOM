@@ -15,6 +15,7 @@
     "allow-ocr-status",
     "allow-set-ocr-enabled",
     "allow-purge-ocr-records",
-    "allow-open-artifact"
+    "allow-open-artifact",
+    "allow-resolve-evidence"
   ]
 }

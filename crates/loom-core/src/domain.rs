@@ -246,6 +246,19 @@ pub struct OpenArtifactRequest {
     pub content_hash: String,
 }
 
+/// The source version and passage a caller is asking LOOM to show as evidence.
+///
+/// The passage identifier is deliberately bound to the same artifact/version/hash tuple used
+/// for opening the original. A viewer must never silently substitute a newer file or an unrelated
+/// passage when the source has moved, changed, or been re-indexed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResolveEvidenceRequest {
+    pub artifact_id: String,
+    pub version_id: String,
+    pub passage_id: String,
+    pub content_hash: String,
+}
+
 /// One source-derived segment in a structured evidence excerpt.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EvidenceSegment {
@@ -257,6 +270,28 @@ pub struct EvidenceSegment {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EvidenceExcerpt {
     pub segments: Vec<EvidenceSegment>,
+}
+
+/// Canonical source-backed state for the evidence viewer.
+///
+/// `passage_text` is returned from SQLite after the active version/hash/passage tuple has been
+/// verified. The UI may style it, but it cannot claim that an unverified client-side excerpt is
+/// the source evidence. `anchor` is the stored page or image-region locator for that passage.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EvidenceView {
+    pub artifact_id: String,
+    pub version_id: String,
+    pub passage_id: String,
+    pub title: String,
+    pub media_type: String,
+    pub source_uri: String,
+    pub content_hash: String,
+    pub passage_text: String,
+    pub anchor: EvidenceAnchor,
+    pub page_count: Option<u32>,
+    pub extractor_id: String,
+    pub extractor_version: String,
+    pub extraction_metadata: serde_json::Value,
 }
 
 /// One ranked, source-backed search result.

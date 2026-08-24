@@ -1,6 +1,6 @@
 use std::fs;
 
-use loom_core::{EvidenceAnchor, Library, SearchRequest};
+use loom_core::{EvidenceAnchor, Library, ResolveEvidenceRequest, SearchRequest};
 use rusqlite::Connection;
 use tempfile::tempdir;
 
@@ -84,6 +84,25 @@ fn native_vision_ocr_records_provider_metadata_and_pixel_evidence() {
         .map(|segment| segment.text.as_str())
         .collect::<String>()
         .contains("LOOM"));
+
+    let evidence = library
+        .resolve_verified_evidence(&ResolveEvidenceRequest {
+            artifact_id: hit.artifact_id.clone(),
+            version_id: hit.version_id.clone(),
+            passage_id: hit.passage_id.clone(),
+            content_hash: hit.content_hash.clone(),
+        })
+        .unwrap();
+    assert_eq!(evidence.media_type, "image/png");
+    assert!(matches!(
+        evidence.anchor,
+        EvidenceAnchor::ImageRegion {
+            image_width: 1200,
+            image_height: 600,
+            ..
+        }
+    ));
+    assert!(evidence.passage_text.contains("LOOM OCR marker"));
 
     let repeated = library.index_path(&source).unwrap();
     assert_eq!(repeated.unchanged, 1);

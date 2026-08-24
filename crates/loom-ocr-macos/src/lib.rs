@@ -61,6 +61,7 @@ mod native {
         NormalizedBounds, OcrError, OcrRegion, OcrResult, MODEL_FAMILY, PROVIDER_ID,
         PROVIDER_VERSION,
     };
+    use objc2::rc::autoreleasepool;
     use objc2::AnyThread;
     use objc2_foundation::{NSArray, NSData, NSDictionary};
     use objc2_image_io::CGImagePropertyOrientation;
@@ -86,6 +87,10 @@ mod native {
     }
 
     pub fn recognize(bytes: &[u8], orientation_value: u8) -> Result<OcrResult, OcrError> {
+        autoreleasepool(|_| recognize_inner(bytes, orientation_value))
+    }
+
+    fn recognize_inner(bytes: &[u8], orientation_value: u8) -> Result<OcrResult, OcrError> {
         if bytes.is_empty() {
             return Err(OcrError::InvalidInput("image bytes are empty".into()));
         }

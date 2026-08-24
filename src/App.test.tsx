@@ -66,6 +66,28 @@ const pdfHit = {
   },
 };
 
+const imageHit = {
+  ...hit,
+  title: "screenshot.png",
+  media_type: "image/png",
+  anchor: {
+    kind: "image_region" as const,
+    char_start: 0,
+    char_end: 18,
+    line_start: 1,
+    line_end: 1,
+    x: 100,
+    y: 50,
+    width: 200,
+    height: 100,
+    image_width: 1200,
+    image_height: 600,
+    orientation: 1,
+    scale_milli: 1000,
+    confidence_milli: 990,
+  },
+};
+
 describe("desktop truth path", () => {
   afterEach(() => {
     cleanup();
@@ -144,6 +166,104 @@ describe("desktop truth path", () => {
     expect(await screen.findByRole("heading", { name: "Recovered sources" })).toBeInTheDocument();
     expect(screen.getByText("PDF")).toBeInTheDocument();
     expect(screen.getByText("page 2 · lines 1–1")).toBeInTheDocument();
+  });
+
+  it("resolves a PDF evidence view and keeps the verified page visible", async () => {
+    const evidenceView = {
+      artifact_id: pdfHit.artifact_id,
+      version_id: pdfHit.version_id,
+      passage_id: pdfHit.passage_id,
+      title: pdfHit.title,
+      media_type: pdfHit.media_type,
+      source_uri: pdfHit.source_uri,
+      content_hash: pdfHit.content_hash,
+      passage_text: "Second page marker",
+      anchor: pdfHit.anchor,
+      page_count: 3,
+      extractor_id: "loom.pdf",
+      extractor_version: "0.1.0",
+      extraction_metadata: {},
+    };
+    invokeMock.mockImplementation(async (command) => {
+      if (command === "reconcile_approved_roots") return {};
+      if (command === "list_source_roots") return [];
+      if (command === "library_stats") return readyStats;
+      if (command === "search") return [pdfHit];
+      if (command === "resolve_evidence") return evidenceView;
+      throw new Error(`unexpected command: ${command}`);
+    });
+
+    render(<App />);
+    const input = screen.getByRole("textbox", { name: "Search your local sources" });
+    fireEvent.change(input, { target: { value: "second page marker" } });
+    fireEvent.submit(screen.getByRole("search"));
+    fireEvent.click(await screen.findByRole("button", { name: "View evidence" }));
+
+    expect(await screen.findByRole("heading", { name: "paper.pdf" })).toBeInTheDocument();
+    expect(screen.getByText("PDF page 2 · loom.pdf 0.1.0")).toBeInTheDocument();
+    expect(screen.getByText("Page 2 of 3")).toBeInTheDocument();
+    expect(screen.getByText("Second page marker")).toBeInTheDocument();
+    await waitFor(() => {
+      expect(invokeMock).toHaveBeenCalledWith("resolve_evidence", {
+        request: {
+          artifact_id: pdfHit.artifact_id,
+          version_id: pdfHit.version_id,
+          passage_id: pdfHit.passage_id,
+          content_hash: pdfHit.content_hash,
+        },
+      });
+    });
+  });
+
+  it("renders an image region evidence map with rotation controls", async () => {
+    invokeMock.mockImplementation(async (command) => {
+      if (command === "reconcile_approved_roots") return {};
+      if (command === "list_source_roots") return [];
+      if (command === "library_stats") return readyStats;
+      if (command === "search") return [imageHit];
+      if (command === "resolve_evidence") return {
+        ...imageHit,
+        passage_text: "LOOM OCR marker 123",
+        extractor_id: "loom.ocr",
+        extractor_version: "0.1.0",
+        extraction_metadata: { provider_id: "macos.vision" },
+      };
+      throw new Error(`unexpected command: ${command}`);
+    });
+
+    render(<App />);
+    const input = screen.getByRole("textbox", { name: "Search your local sources" });
+    fireEvent.change(input, { target: { value: "LOOM OCR marker" } });
+    fireEvent.submit(screen.getByRole("search"));
+    fireEvent.click(await screen.findByRole("button", { name: "View evidence" }));
+
+    expect(await screen.findByRole("heading", { name: "screenshot.png" })).toBeInTheDocument();
+    expect(screen.getByText(/Image region 100,50 · 200×100px/)).toBeInTheDocument();
+    const stage = screen.getByTestId("image-evidence-stage");
+    expect(stage).toHaveAttribute("data-rotation", "0");
+    fireEvent.click(screen.getByRole("button", { name: "Rotate evidence" }));
+    expect(stage).toHaveAttribute("data-rotation", "90");
+  });
+
+  it("discloses stale evidence instead of showing an unverified passage", async () => {
+    invokeMock.mockImplementation(async (command) => {
+      if (command === "reconcile_approved_roots") return {};
+      if (command === "list_source_roots") return [];
+      if (command === "library_stats") return readyStats;
+      if (command === "search") return [hit];
+      if (command === "resolve_evidence") throw new Error("artifact is stale or unavailable: 11111111");
+      throw new Error(`unexpected command: ${command}`);
+    });
+
+    render(<App />);
+    const input = screen.getByRole("textbox", { name: "Search your local sources" });
+    fireEvent.change(input, { target: { value: "retry anomalies" } });
+    fireEvent.submit(screen.getByRole("search"));
+    fireEvent.click(await screen.findByRole("button", { name: "View evidence" }));
+
+    expect(await screen.findByRole("heading", { name: "Source needs attention." })).toBeInTheDocument();
+    expect(screen.getAllByRole("alert")[0]).toHaveTextContent("artifact is stale or unavailable");
+    expect(screen.getByText("Re-index the selected folder, then retry this evidence result.")).toBeInTheDocument();
   });
 
   it("announces the loading state and disables duplicate searches", async () => {

@@ -9,10 +9,11 @@ mod search;
 mod store;
 
 pub use domain::{
-    ArtifactObservation, EvidenceAnchor, EvidenceExcerpt, EvidenceSegment, FtsHealthReport,
-    FtsRepairReport, IndexCancellationToken, IndexCheckpoint, IndexFailure, IndexReport,
-    LibraryStats, ObservationReport, OcrPurgeReport, OcrStatus, OpenArtifactRequest,
-    PassageObservation, SearchHit, SearchRequest, SourceRootInfo, SourceRootStatus,
+    ArtifactObservation, EvidenceAnchor, EvidenceExcerpt, EvidenceSegment, EvidenceView,
+    FtsHealthReport, FtsRepairReport, IndexCancellationToken, IndexCheckpoint, IndexFailure,
+    IndexReport, LibraryStats, ObservationReport, OcrPurgeReport, OcrStatus, OpenArtifactRequest,
+    PassageObservation, ResolveEvidenceRequest, SearchHit, SearchRequest, SourceRootInfo,
+    SourceRootStatus,
 };
 pub use error::{LoomError, Result};
 pub use observe::{coalesce_events, ObservationEvent, ObservationEventKind, ObservationPlan};

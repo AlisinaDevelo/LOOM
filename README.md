@@ -30,6 +30,9 @@ path, content hash, excerpt, and exact text or pixel-region anchor with every re
 - Results include the original path, BLAKE3 content hash, structured excerpt, and exact
   character/line or image-region pixel anchor. Literal source characters cannot become highlight
   instructions.
+- `View evidence` re-verifies the active artifact/version/hash/passage tuple, then shows the
+  canonical PDF page, text passage, or OCR region in an in-app evidence panel. Image regions can
+  be rotated and zoomed; a stale or unavailable source is disclosed and never replaced silently.
 - A complete rescan hides deleted or unreadable sources. Opening a result verifies its artifact,
   version, and current BLAKE3 hash before handing the path to another application.
 - The CLI and Tauri desktop UI use the same Rust core and local database.

@@ -2,7 +2,8 @@ use std::sync::{Arc, Mutex};
 
 use loom_core::{
     IndexCancellationToken, IndexReport, Library, LibraryStats, ObservationReport, OcrPurgeReport,
-    OcrStatus, OpenArtifactRequest, SearchHit, SearchRequest, SourceRootInfo,
+    OcrStatus, OpenArtifactRequest, ResolveEvidenceRequest, SearchHit, SearchRequest,
+    SourceRootInfo,
 };
 use tauri::{Manager, State};
 use tauri_plugin_dialog::DialogExt;
@@ -163,6 +164,18 @@ async fn open_artifact(
     .map_err(|error| format!("source opener stopped: {error}"))?
 }
 
+#[tauri::command]
+async fn resolve_evidence(
+    state: State<'_, AppState>,
+    request: ResolveEvidenceRequest,
+) -> CommandResult<loom_core::EvidenceView> {
+    let library = Arc::clone(&state.library);
+    tauri::async_runtime::spawn_blocking(move || library.resolve_verified_evidence(&request))
+        .await
+        .map_err(|error| format!("evidence resolver stopped: {error}"))?
+        .map_err(|error| error.to_string())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -189,7 +202,8 @@ pub fn run() {
             ocr_status,
             set_ocr_enabled,
             purge_ocr_records,
-            open_artifact
+            open_artifact,
+            resolve_evidence
         ])
         .run(tauri::generate_context!())
         .expect("error while running LOOM");
@@ -226,6 +240,7 @@ mod tests {
             "allow-set-ocr-enabled",
             "allow-purge-ocr-records",
             "allow-open-artifact",
+            "allow-resolve-evidence",
         ] {
             assert!(
                 CAPABILITIES.contains(command),
