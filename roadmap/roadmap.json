@@ -1016,7 +1016,7 @@
     {
       "id": "0212",
       "title": "Specify semantic-index rebuild and retirement rules",
-      "status": "backlog",
+      "status": "done",
       "quarter": "Q04",
       "phase": "v0.2 Needle",
       "workstream": "semantic-retrieval",
