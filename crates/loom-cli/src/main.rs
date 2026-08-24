@@ -91,6 +91,10 @@ struct BenchmarkThresholds {
     anchor_precision: f64,
     false_positive_rate: f64,
     index_completeness: f64,
+    #[serde(default)]
+    mean_reciprocal_rank: f64,
+    #[serde(default)]
+    reformulation_success: f64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -118,6 +122,10 @@ struct BenchmarkQuery {
     expected_anchor: BenchmarkAnchor,
     #[serde(default)]
     acceptable_alternatives: Vec<BenchmarkAlternative>,
+    #[serde(default)]
+    reformulations: Vec<String>,
+    #[serde(default)]
+    negative: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -136,11 +144,37 @@ enum BenchmarkAnchor {
         line_end: u64,
         contains: String,
     },
+    PdfPage {
+        page: u32,
+        char_start: u64,
+        char_end: u64,
+        line_start: u64,
+        line_end: u64,
+        contains: String,
+    },
+    ImageRegion {
+        char_start: u64,
+        char_end: u64,
+        line_start: u64,
+        line_end: u64,
+        x: u32,
+        y: u32,
+        width: u32,
+        height: u32,
+        image_width: u32,
+        image_height: u32,
+        orientation: u8,
+        scale_milli: u32,
+        confidence_milli: u32,
+        contains: String,
+    },
 }
 
 #[derive(Debug, Serialize)]
 struct BenchmarkFailure {
     id: String,
+    source_type: String,
+    stage: String,
     kind: String,
     expected_file: String,
     returned: Vec<String>,
@@ -149,10 +183,16 @@ struct BenchmarkFailure {
 #[derive(Debug, Serialize)]
 struct BenchmarkMetrics {
     queries: usize,
+    positive_queries: usize,
+    negative_queries: usize,
     exact_source_recall_at_1: f64,
     exact_source_recall_at_5: f64,
+    mean_reciprocal_rank: f64,
     anchor_precision: f64,
     false_positive_rate: f64,
+    reformulation_queries: usize,
+    reformulation_success: f64,
+    negative_no_result_rate: f64,
     median_latency_ms: f64,
     p95_latency_ms: f64,
 }
@@ -160,12 +200,18 @@ struct BenchmarkMetrics {
 #[derive(Debug, Default)]
 struct BenchmarkAccumulator {
     queries: usize,
+    positive_queries: usize,
+    negative_queries: usize,
     top_one: usize,
     top_five: usize,
+    mrr_sum: f64,
     anchor_correct: usize,
     anchor_candidates: usize,
     returned: usize,
     false_positives: usize,
+    reformulation_queries: usize,
+    reformulation_successes: usize,
+    negative_no_result: usize,
     latencies: Vec<f64>,
 }
 
@@ -176,6 +222,10 @@ struct BenchmarkIndexMetrics {
     skipped: u64,
     failures: usize,
     completeness: f64,
+    index_elapsed_ms: f64,
+    source_bytes_read: u64,
+    database_bytes: u64,
+    database_bytes_per_source_byte: f64,
 }
 
 #[derive(Debug, Serialize)]
@@ -185,6 +235,7 @@ struct BenchmarkReport {
     index: BenchmarkIndexMetrics,
     overall: BenchmarkMetrics,
     by_source_type: BTreeMap<String, BenchmarkMetrics>,
+    failure_taxonomy_by_source_type: BTreeMap<String, BTreeMap<String, usize>>,
     failures: Vec<BenchmarkFailure>,
 }
 
@@ -309,8 +360,11 @@ fn run_benchmark(corpus: &Path, queries: &Path) -> Result<(), Box<dyn Error>> {
     let fixture_sources = validate_manifest_inputs(&manifest, &manifest_path, &corpus, &query_set)?;
 
     let temporary = tempfile::tempdir()?;
-    let library = Library::open(temporary.path().join("benchmark.sqlite3"))?;
+    let database_path = temporary.path().join("benchmark.sqlite3");
+    let library = Library::open(&database_path)?;
+    let index_started = Instant::now();
     let index = library.index_path(&corpus)?;
+    let index_elapsed_ms = index_started.elapsed().as_secs_f64() * 1_000.0;
     if !index.failures.is_empty() {
         return Err(format!(
             "benchmark corpus had indexing failures: {:?}",
@@ -319,9 +373,18 @@ fn run_benchmark(corpus: &Path, queries: &Path) -> Result<(), Box<dyn Error>> {
         .into());
     }
     validate_manifest_outputs(&manifest, &manifest_path, &corpus, &library, &index)?;
+    let database_bytes = database_size(&database_path);
+    let source_bytes_read = index.bytes_read;
+    let database_bytes_per_source_byte = if source_bytes_read == 0 {
+        0.0
+    } else {
+        database_bytes as f64 / source_bytes_read as f64
+    };
 
     let mut overall = BenchmarkAccumulator::default();
     let mut categories: BTreeMap<String, BenchmarkAccumulator> = BTreeMap::new();
+    let mut failure_taxonomy_by_source_type: BTreeMap<String, BTreeMap<String, usize>> =
+        BTreeMap::new();
     let mut failures = Vec::new();
     for query in query_set {
         let started = Instant::now();
@@ -330,69 +393,51 @@ fn run_benchmark(corpus: &Path, queries: &Path) -> Result<(), Box<dyn Error>> {
             limit: 5,
         })?;
         let latency = started.elapsed().as_secs_f64() * 1_000.0;
-        let matches: Vec<bool> = hits
-            .iter()
-            .map(|hit| matching_expectation(&corpus, &hit.source_uri, &query).is_some())
-            .collect();
-        let top_one = matches.first() == Some(&true);
-        let (top_five, anchor_correct) = {
-            let expected_hit = hits
-                .iter()
-                .find(|hit| matching_expectation(&corpus, &hit.source_uri, &query).is_some());
-            let top_five = expected_hit.is_some();
-            let anchor_correct = expected_hit.is_some_and(|hit| {
-                let (expected_file, expected_anchor) =
-                    matching_expectation(&corpus, &hit.source_uri, &query)
-                        .expect("the expected hit must have a matching expectation");
-                let expected_source = fixture_sources
-                    .get(expected_file)
-                    .expect("validated benchmark expectations must have source text");
-                anchor_matches(expected_anchor, hit, expected_source)
-            });
-            (top_five, anchor_correct)
+        let evaluation = evaluate_query(&corpus, &fixture_sources, &query, &hits);
+        let reformulation_success = if query.negative || query.reformulations.is_empty() {
+            None
+        } else {
+            let mut success = false;
+            let mut returned = Vec::new();
+            for reformulation in &query.reformulations {
+                let reformulated_hits = library.search(&SearchRequest {
+                    text: reformulation.clone(),
+                    limit: 5,
+                })?;
+                returned.extend(reformulated_hits.iter().map(|hit| hit.source_uri.clone()));
+                let reformulated =
+                    evaluate_query(&corpus, &fixture_sources, &query, &reformulated_hits);
+                success |= reformulated.top_five && reformulated.anchor_correct;
+            }
+            if !success {
+                record_failure(
+                    &mut failures,
+                    &mut failure_taxonomy_by_source_type,
+                    &query,
+                    "reformulation",
+                    "reformulation_failed",
+                    returned,
+                );
+            }
+            Some(success)
         };
-        let returned = hits.len();
-        let false_positives = matches.iter().filter(|is_match| !**is_match).count();
 
-        update_accumulator(
-            &mut overall,
-            top_one,
-            top_five,
-            top_five,
-            anchor_correct,
-            returned,
-            false_positives,
-            latency,
-        );
+        update_accumulator(&mut overall, &evaluation, reformulation_success, latency);
         update_accumulator(
             categories.entry(query.source_type.clone()).or_default(),
-            top_one,
-            top_five,
-            top_five,
-            anchor_correct,
-            returned,
-            false_positives,
+            &evaluation,
+            reformulation_success,
             latency,
         );
-
-        let failure_kind = if hits.is_empty() {
-            Some("no_results")
-        } else if !top_five {
-            Some("wrong_source")
-        } else if !top_one {
-            Some("wrong_source_at_rank_1")
-        } else if !anchor_correct {
-            Some("wrong_anchor")
-        } else {
-            None
-        };
-        if let Some(kind) = failure_kind {
-            failures.push(BenchmarkFailure {
-                id: query.id,
-                kind: kind.into(),
-                expected_file: query.expected_file,
-                returned: hits.into_iter().map(|hit| hit.source_uri).collect(),
-            });
+        if let Some(kind) = evaluation.failure_kind {
+            record_failure(
+                &mut failures,
+                &mut failure_taxonomy_by_source_type,
+                &query,
+                "primary",
+                kind,
+                hits.iter().map(|hit| hit.source_uri.clone()).collect(),
+            );
         }
     }
     if overall.queries == 0 {
@@ -409,7 +454,7 @@ fn run_benchmark(corpus: &Path, queries: &Path) -> Result<(), Box<dyn Error>> {
     let passed = benchmark_passes(&manifest.thresholds, &overall_metrics, completeness)
         && index.failures.is_empty();
     let report = BenchmarkReport {
-        schema_version: 2,
+        schema_version: manifest.schema_version,
         thresholds: manifest.thresholds,
         index: BenchmarkIndexMetrics {
             discovered: index.discovered,
@@ -417,12 +462,17 @@ fn run_benchmark(corpus: &Path, queries: &Path) -> Result<(), Box<dyn Error>> {
             skipped: index.skipped,
             failures: index.failures.len(),
             completeness,
+            index_elapsed_ms,
+            source_bytes_read,
+            database_bytes,
+            database_bytes_per_source_byte,
         },
         overall: overall_metrics,
         by_source_type: categories
             .into_iter()
             .map(|(source_type, accumulator)| (source_type, finalize_metrics(accumulator)))
             .collect(),
+        failure_taxonomy_by_source_type,
         failures,
     };
     println!("{}", serde_json::to_string_pretty(&report)?);
@@ -458,8 +508,8 @@ fn validate_manifest_inputs(
     manifest_path: &Path,
     corpus: &Path,
     queries: &[BenchmarkQuery],
-) -> Result<BTreeMap<String, String>, Box<dyn Error>> {
-    if manifest.schema_version != 2 {
+) -> Result<BTreeMap<String, Option<String>>, Box<dyn Error>> {
+    if !(2..=3).contains(&manifest.schema_version) {
         return Err(format!(
             "unsupported benchmark manifest schema version: {}",
             manifest.schema_version
@@ -481,6 +531,14 @@ fn validate_manifest_inputs(
             manifest.thresholds.false_positive_rate,
         ),
         ("index_completeness", manifest.thresholds.index_completeness),
+        (
+            "mean_reciprocal_rank",
+            manifest.thresholds.mean_reciprocal_rank,
+        ),
+        (
+            "reformulation_success",
+            manifest.thresholds.reformulation_success,
+        ),
     ];
     if threshold_values
         .iter()
@@ -533,9 +591,8 @@ fn validate_manifest_inputs(
             .into());
         }
         let text = String::from_utf8(bytes)
-            .map_err(|_| format!("benchmark fixture is not UTF-8: {}", fixture.path))?
-            .replace("\r\n", "\n")
-            .replace('\r', "\n");
+            .ok()
+            .map(|text| text.replace("\r\n", "\n").replace('\r', "\n"));
         if fixture_sources.insert(relative.clone(), text).is_some() {
             return Err(format!("duplicate benchmark fixture path: {relative}").into());
         }
@@ -548,7 +605,7 @@ fn validate_manifest_inputs(
                 query.id, query.expected_file
             )
         })?;
-        if !expected_source_anchor_matches(&query.expected_anchor, source) {
+        if !validate_expected_anchor(&query.expected_anchor, source.as_deref()) {
             return Err(format!(
                 "query {} expected anchor does not resolve to its declared source text",
                 query.id
@@ -572,9 +629,19 @@ fn validate_manifest_inputs(
                         query.id, alternative.expected_file
                     )
                 })?;
-            if !expected_source_anchor_matches(&alternative.expected_anchor, source) {
+            if !validate_expected_anchor(&alternative.expected_anchor, source.as_deref()) {
                 return Err(format!(
                     "query {} alternative anchor does not resolve to its declared source text",
+                    query.id
+                )
+                .into());
+            }
+        }
+        let mut reformulations = BTreeSet::new();
+        for reformulation in &query.reformulations {
+            if reformulation.trim().is_empty() || !reformulations.insert(reformulation) {
+                return Err(format!(
+                    "query {} contains an empty or duplicate reformulation",
                     query.id
                 )
                 .into());
@@ -649,40 +716,170 @@ fn validate_manifest_outputs(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn update_accumulator(
-    accumulator: &mut BenchmarkAccumulator,
+#[derive(Debug)]
+struct QueryEvaluation {
+    negative: bool,
     top_one: bool,
     top_five: bool,
-    anchor_candidate: bool,
     anchor_correct: bool,
+    mrr: f64,
     returned: usize,
     false_positives: usize,
+    negative_no_result: bool,
+    failure_kind: Option<&'static str>,
+}
+
+fn evaluate_query(
+    corpus: &Path,
+    fixture_sources: &BTreeMap<String, Option<String>>,
+    query: &BenchmarkQuery,
+    hits: &[loom_core::SearchHit],
+) -> QueryEvaluation {
+    let matches: Vec<bool> = hits
+        .iter()
+        .map(|hit| matching_expectation(corpus, &hit.source_uri, query).is_some())
+        .collect();
+    let returned = hits.len();
+    if query.negative {
+        return QueryEvaluation {
+            negative: true,
+            top_one: hits.is_empty(),
+            top_five: hits.is_empty(),
+            anchor_correct: hits.is_empty(),
+            mrr: 0.0,
+            returned,
+            false_positives: returned,
+            negative_no_result: hits.is_empty(),
+            failure_kind: (!hits.is_empty()).then_some("false_positive"),
+        };
+    }
+
+    let first_match = matches.iter().position(|matched| *matched);
+    let anchor_correct = hits.iter().any(|hit| {
+        matching_expectation(corpus, &hit.source_uri, query).is_some_and(
+            |(expected_file, expected_anchor)| {
+                anchor_matches(
+                    expected_anchor,
+                    hit,
+                    fixture_sources
+                        .get(expected_file)
+                        .and_then(Option::as_deref),
+                )
+            },
+        )
+    });
+    let top_one = first_match == Some(0);
+    let top_five = first_match.is_some();
+    let mrr = first_match.map_or(0.0, |index| 1.0 / (index as f64 + 1.0));
+    let failure_kind = if hits.is_empty() {
+        Some("no_results")
+    } else if !top_five {
+        Some("wrong_source")
+    } else if !top_one {
+        Some("wrong_source_at_rank_1")
+    } else if !anchor_correct {
+        Some("wrong_anchor")
+    } else {
+        None
+    };
+    QueryEvaluation {
+        negative: false,
+        top_one,
+        top_five,
+        anchor_correct,
+        mrr,
+        returned,
+        false_positives: matches.iter().filter(|matched| !**matched).count(),
+        negative_no_result: false,
+        failure_kind,
+    }
+}
+
+fn update_accumulator(
+    accumulator: &mut BenchmarkAccumulator,
+    evaluation: &QueryEvaluation,
+    reformulation_success: Option<bool>,
     latency: f64,
 ) {
     accumulator.queries += 1;
-    accumulator.top_one += usize::from(top_one);
-    accumulator.top_five += usize::from(top_five);
-    accumulator.anchor_candidates += usize::from(anchor_candidate);
-    accumulator.anchor_correct += usize::from(anchor_correct);
-    accumulator.returned += returned;
-    accumulator.false_positives += false_positives;
+    if evaluation.negative {
+        accumulator.negative_queries += 1;
+        accumulator.negative_no_result += usize::from(evaluation.negative_no_result);
+    } else {
+        accumulator.positive_queries += 1;
+        accumulator.top_one += usize::from(evaluation.top_one);
+        accumulator.top_five += usize::from(evaluation.top_five);
+        accumulator.mrr_sum += evaluation.mrr;
+        accumulator.anchor_candidates += usize::from(evaluation.top_five);
+        accumulator.anchor_correct += usize::from(evaluation.anchor_correct);
+    }
+    if let Some(success) = reformulation_success {
+        accumulator.reformulation_queries += 1;
+        accumulator.reformulation_successes += usize::from(success);
+    }
+    accumulator.returned += evaluation.returned;
+    accumulator.false_positives += evaluation.false_positives;
     accumulator.latencies.push(latency);
 }
 
 fn finalize_metrics(mut accumulator: BenchmarkAccumulator) -> BenchmarkMetrics {
     accumulator.latencies.sort_by(f64::total_cmp);
-    let denominator = accumulator.queries.max(1) as f64;
+    let positive_denominator = accumulator.positive_queries.max(1) as f64;
+    let reformulation_denominator = accumulator.reformulation_queries.max(1) as f64;
+    let negative_denominator = accumulator.negative_queries.max(1) as f64;
     BenchmarkMetrics {
         queries: accumulator.queries,
-        exact_source_recall_at_1: accumulator.top_one as f64 / denominator,
-        exact_source_recall_at_5: accumulator.top_five as f64 / denominator,
+        positive_queries: accumulator.positive_queries,
+        negative_queries: accumulator.negative_queries,
+        exact_source_recall_at_1: accumulator.top_one as f64 / positive_denominator,
+        exact_source_recall_at_5: accumulator.top_five as f64 / positive_denominator,
+        mean_reciprocal_rank: accumulator.mrr_sum / positive_denominator,
         anchor_precision: accumulator.anchor_correct as f64
             / accumulator.anchor_candidates.max(1) as f64,
         false_positive_rate: accumulator.false_positives as f64
             / accumulator.returned.max(1) as f64,
+        reformulation_queries: accumulator.reformulation_queries,
+        reformulation_success: accumulator.reformulation_successes as f64
+            / reformulation_denominator,
+        negative_no_result_rate: accumulator.negative_no_result as f64 / negative_denominator,
         median_latency_ms: median(&accumulator.latencies),
         p95_latency_ms: percentile(&accumulator.latencies, 0.95),
     }
+}
+
+fn record_failure(
+    failures: &mut Vec<BenchmarkFailure>,
+    taxonomy: &mut BTreeMap<String, BTreeMap<String, usize>>,
+    query: &BenchmarkQuery,
+    stage: &str,
+    kind: &str,
+    returned: Vec<String>,
+) {
+    *taxonomy
+        .entry(query.source_type.clone())
+        .or_default()
+        .entry(kind.to_string())
+        .or_default() += 1;
+    failures.push(BenchmarkFailure {
+        id: query.id.clone(),
+        source_type: query.source_type.clone(),
+        stage: stage.into(),
+        kind: kind.into(),
+        expected_file: query.expected_file.clone(),
+        returned,
+    });
+}
+
+fn database_size(path: &Path) -> u64 {
+    [
+        path.to_path_buf(),
+        PathBuf::from(format!("{}-wal", path.display())),
+        PathBuf::from(format!("{}-shm", path.display())),
+    ]
+    .into_iter()
+    .filter_map(|path| fs::metadata(path).ok())
+    .map(|metadata| metadata.len())
+    .sum()
 }
 
 fn fixture_path_matches(corpus: &Path, source_uri: &str, expected_file: &str) -> bool {
@@ -719,8 +916,10 @@ fn benchmark_passes(
     const EPSILON: f64 = 1e-12;
     metrics.exact_source_recall_at_1 + EPSILON >= thresholds.exact_source_recall_at_1
         && metrics.exact_source_recall_at_5 + EPSILON >= thresholds.exact_source_recall_at_5
+        && metrics.mean_reciprocal_rank + EPSILON >= thresholds.mean_reciprocal_rank
         && metrics.anchor_precision + EPSILON >= thresholds.anchor_precision
         && metrics.false_positive_rate <= thresholds.false_positive_rate + EPSILON
+        && metrics.reformulation_success + EPSILON >= thresholds.reformulation_success
         && completeness + EPSILON >= thresholds.index_completeness
 }
 
@@ -747,7 +946,7 @@ fn percentile(sorted_values: &[f64], quantile: f64) -> f64 {
 fn anchor_matches(
     expected: &BenchmarkAnchor,
     hit: &loom_core::SearchHit,
-    expected_source: &str,
+    expected_source: Option<&str>,
 ) -> bool {
     match (expected, &hit.anchor) {
         (
@@ -769,10 +968,135 @@ fn anchor_matches(
                 && actual_char_end == char_end
                 && actual_line_start == line_start
                 && actual_line_end == line_end
-                && expected_source_anchor_matches(expected, expected_source)
+                && expected_source
+                    .is_some_and(|source| expected_source_anchor_matches(expected, source))
+                && phrase_is_highlighted(hit, contains)
+        }
+        (
+            BenchmarkAnchor::PdfPage {
+                page,
+                char_start,
+                char_end,
+                line_start,
+                line_end,
+                contains,
+            },
+            EvidenceAnchor::PdfPage {
+                page: actual_page,
+                char_start: actual_char_start,
+                char_end: actual_char_end,
+                line_start: actual_line_start,
+                line_end: actual_line_end,
+            },
+        ) => {
+            actual_page == page
+                && actual_char_start == char_start
+                && actual_char_end == char_end
+                && actual_line_start == line_start
+                && actual_line_end == line_end
+                && phrase_is_highlighted(hit, contains)
+        }
+        (
+            BenchmarkAnchor::ImageRegion {
+                char_start,
+                char_end,
+                line_start,
+                line_end,
+                x,
+                y,
+                width,
+                height,
+                image_width,
+                image_height,
+                orientation,
+                scale_milli,
+                confidence_milli,
+                contains,
+            },
+            EvidenceAnchor::ImageRegion {
+                char_start: actual_char_start,
+                char_end: actual_char_end,
+                line_start: actual_line_start,
+                line_end: actual_line_end,
+                x: actual_x,
+                y: actual_y,
+                width: actual_width,
+                height: actual_height,
+                image_width: actual_image_width,
+                image_height: actual_image_height,
+                orientation: actual_orientation,
+                scale_milli: actual_scale_milli,
+                confidence_milli: actual_confidence_milli,
+            },
+        ) => {
+            actual_char_start == char_start
+                && actual_char_end == char_end
+                && actual_line_start == line_start
+                && actual_line_end == line_end
+                && actual_x == x
+                && actual_y == y
+                && actual_width == width
+                && actual_height == height
+                && actual_image_width == image_width
+                && actual_image_height == image_height
+                && actual_orientation == orientation
+                && actual_scale_milli == scale_milli
+                && actual_confidence_milli == confidence_milli
                 && phrase_is_highlighted(hit, contains)
         }
         _ => false,
+    }
+}
+
+fn validate_expected_anchor(expected: &BenchmarkAnchor, source: Option<&str>) -> bool {
+    match expected {
+        BenchmarkAnchor::Text { .. } => {
+            source.is_some_and(|source| expected_source_anchor_matches(expected, source))
+        }
+        BenchmarkAnchor::PdfPage {
+            page,
+            char_start,
+            char_end,
+            line_start,
+            line_end,
+            contains,
+        } => {
+            *page > 0
+                && char_end >= char_start
+                && *line_start > 0
+                && line_end >= line_start
+                && !contains.is_empty()
+        }
+        BenchmarkAnchor::ImageRegion {
+            char_start,
+            char_end,
+            line_start,
+            line_end,
+            x,
+            y,
+            width,
+            height,
+            image_width,
+            image_height,
+            orientation,
+            scale_milli,
+            confidence_milli,
+            contains,
+        } => {
+            char_end >= char_start
+                && *line_start > 0
+                && line_end >= line_start
+                && *width > 0
+                && *height > 0
+                && *image_width > 0
+                && *image_height > 0
+                && x.saturating_add(*width) <= *image_width
+                && y.saturating_add(*height) <= *image_height
+                && *orientation > 0
+                && *scale_milli > 0
+                && *confidence_milli <= 1_000
+                && !contains.is_empty()
+        }
     }
 }
 
@@ -783,7 +1107,10 @@ fn expected_source_anchor_matches(expected: &BenchmarkAnchor, source: &str) -> b
         line_start,
         line_end,
         contains,
-    } = expected;
+    } = expected
+    else {
+        return false;
+    };
     if char_end < char_start {
         return false;
     }
@@ -844,9 +1171,10 @@ mod tests {
     };
 
     use super::{
-        benchmark_passes, expected_source_anchor_matches, fixture_path_matches,
-        matching_expectation, median, percentile, phrase_is_highlighted, BenchmarkAlternative,
-        BenchmarkAnchor, BenchmarkQuery, BenchmarkThresholds,
+        benchmark_passes, expected_source_anchor_matches, finalize_metrics, fixture_path_matches,
+        matching_expectation, median, percentile, phrase_is_highlighted, update_accumulator,
+        validate_expected_anchor, BenchmarkAccumulator, BenchmarkAlternative, BenchmarkAnchor,
+        BenchmarkQuery, BenchmarkThresholds, QueryEvaluation,
     };
 
     #[test]
@@ -895,6 +1223,88 @@ mod tests {
             contains: "exact phrase".into(),
         };
         assert!(expected_source_anchor_matches(&expected, source));
+    }
+
+    #[test]
+    fn multimodal_anchor_validation_rejects_bad_geometry() {
+        let pdf = BenchmarkAnchor::PdfPage {
+            page: 1,
+            char_start: 2,
+            char_end: 8,
+            line_start: 1,
+            line_end: 1,
+            contains: "marker".into(),
+        };
+        assert!(validate_expected_anchor(&pdf, None));
+        let image = BenchmarkAnchor::ImageRegion {
+            char_start: 0,
+            char_end: 6,
+            line_start: 1,
+            line_end: 1,
+            x: 5,
+            y: 5,
+            width: 10,
+            height: 10,
+            image_width: 20,
+            image_height: 20,
+            orientation: 1,
+            scale_milli: 1_000,
+            confidence_milli: 900,
+            contains: "marker".into(),
+        };
+        assert!(validate_expected_anchor(&image, None));
+        let invalid = BenchmarkAnchor::ImageRegion {
+            char_start: 0,
+            char_end: 6,
+            line_start: 1,
+            line_end: 1,
+            x: 15,
+            y: 5,
+            width: 10,
+            height: 10,
+            image_width: 20,
+            image_height: 20,
+            orientation: 1,
+            scale_milli: 1_000,
+            confidence_milli: 900,
+            contains: "marker".into(),
+        };
+        assert!(!validate_expected_anchor(&invalid, None));
+    }
+
+    #[test]
+    fn metrics_retain_mrr_reformulation_and_negative_counts() {
+        let positive = QueryEvaluation {
+            negative: false,
+            top_one: false,
+            top_five: true,
+            anchor_correct: true,
+            mrr: 0.5,
+            returned: 2,
+            false_positives: 1,
+            negative_no_result: false,
+            failure_kind: None,
+        };
+        let negative = QueryEvaluation {
+            negative: true,
+            top_one: true,
+            top_five: true,
+            anchor_correct: true,
+            mrr: 0.0,
+            returned: 0,
+            false_positives: 0,
+            negative_no_result: true,
+            failure_kind: None,
+        };
+        let mut accumulator = BenchmarkAccumulator::default();
+        update_accumulator(&mut accumulator, &positive, Some(true), 1.0);
+        update_accumulator(&mut accumulator, &negative, None, 2.0);
+        let metrics = finalize_metrics(accumulator);
+        assert_eq!(metrics.positive_queries, 1);
+        assert_eq!(metrics.negative_queries, 1);
+        assert_eq!(metrics.mean_reciprocal_rank, 0.5);
+        assert_eq!(metrics.reformulation_success, 1.0);
+        assert_eq!(metrics.negative_no_result_rate, 1.0);
     }
 
     #[test]
@@ -967,6 +1377,8 @@ mod tests {
                     contains: "term".into(),
                 },
             }],
+            reformulations: Vec::new(),
+            negative: false,
         };
         let corpus = PathBuf::from("/fixtures");
         let (file, _) = matching_expectation(&corpus, "/fixtures/alternate.md", &query).unwrap();
@@ -982,13 +1394,21 @@ mod tests {
             anchor_precision: 1.0,
             false_positive_rate: 0.0,
             index_completeness: 1.0,
+            mean_reciprocal_rank: 0.0,
+            reformulation_success: 0.0,
         };
         let passing = super::BenchmarkMetrics {
             queries: 3,
+            positive_queries: 3,
+            negative_queries: 0,
             exact_source_recall_at_1: 1.0,
             exact_source_recall_at_5: 1.0,
+            mean_reciprocal_rank: 1.0,
             anchor_precision: 1.0,
             false_positive_rate: 0.0,
+            reformulation_queries: 0,
+            reformulation_success: 0.0,
+            negative_no_result_rate: 1.0,
             median_latency_ms: 1.0,
             p95_latency_ms: 2.0,
         };
@@ -996,10 +1416,16 @@ mod tests {
 
         let false_positive_regression = super::BenchmarkMetrics {
             queries: passing.queries,
+            positive_queries: passing.positive_queries,
+            negative_queries: passing.negative_queries,
             exact_source_recall_at_1: passing.exact_source_recall_at_1,
             exact_source_recall_at_5: passing.exact_source_recall_at_5,
+            mean_reciprocal_rank: passing.mean_reciprocal_rank,
             anchor_precision: passing.anchor_precision,
             false_positive_rate: 0.01,
+            reformulation_queries: passing.reformulation_queries,
+            reformulation_success: passing.reformulation_success,
+            negative_no_result_rate: passing.negative_no_result_rate,
             median_latency_ms: passing.median_latency_ms,
             p95_latency_ms: passing.p95_latency_ms,
         };

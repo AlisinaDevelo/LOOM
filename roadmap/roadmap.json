@@ -839,7 +839,7 @@
     {
       "id": "0206",
       "title": "Expand retrieval evaluation across text, PDF, and OCR",
-      "status": "backlog",
+      "status": "review",
       "quarter": "Q04",
       "phase": "v0.2 Needle",
       "workstream": "foundation",

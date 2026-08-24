@@ -77,6 +77,17 @@ run_mixed_corpus() {
   printf 'MIXED %-23s %s\n' "$([ "$mixed_status" -eq 0 ] && printf PASS || printf FAIL)" "$log"
 }
 
+clear_rust_outputs() {
+  # The target-device runner exercises both Rust and Tauri. Keep their debug
+  # artifacts sequential so a small development disk does not turn a later
+  # test into an ENOSPC false negative.
+  if [[ -d "$ROOT/target" ]]; then
+    find "$ROOT/target" -type f -delete
+    find "$ROOT/target" -type l -delete
+    find "$ROOT/target" -depth -type d -empty -delete
+  fi
+}
+
 mkdir -p "$EVIDENCE_DIR"
 : > "$COMMANDS"
 printf 'LOOM target-device verification\n' > "$SUMMARY"
@@ -97,13 +108,15 @@ run_step clippy cargo clippy --workspace --all-targets --locked -- -D warnings
 run_step rust-workspace cargo test --workspace --locked
 run_step rust-msrv-check cargo +1.88.0 check --workspace --all-targets --locked
 run_step rust-msrv-tests cargo +1.88.0 test -p loom-core --lib --tests -- --nocapture
+run_step retrieval-benchmark cargo run --locked -q -p loom-cli -- benchmark --corpus benchmarks/retrieval/v0/corpus --queries benchmarks/retrieval/v0/queries.jsonl
+run_step retrieval-benchmark-v1 cargo run --locked -q -p loom-cli -- benchmark --corpus benchmarks/retrieval/v1/corpus --queries benchmarks/retrieval/v1/queries.jsonl
+run_step semantic-contract bash scripts/verify-semantic-contract.sh "$EVIDENCE_DIR/semantic"
+run_mixed_corpus
+run_step clear-rust-target clear_rust_outputs
 run_step npm-install npm ci
 run_step npm-check npm run check
-run_step retrieval-benchmark cargo run --locked -q -p loom-cli -- benchmark --corpus benchmarks/retrieval/v0/corpus --queries benchmarks/retrieval/v0/queries.jsonl
-run_step semantic-contract bash scripts/verify-semantic-contract.sh "$EVIDENCE_DIR/semantic"
 run_step security-check bash scripts/security-check.sh
 run_step tauri-build npm run tauri build -- --debug --no-bundle
-run_mixed_corpus
 
 printf '\nstatus=%s\n' "$([ "$STATUS" -eq 0 ] && printf PASS || printf FAIL)" >> "$SUMMARY"
 shasum -a 256 "$EVIDENCE_DIR"/*.log > "$EVIDENCE_DIR/log-sha256.txt" 2>/dev/null || true

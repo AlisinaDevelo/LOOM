@@ -42,6 +42,39 @@ The current synthetic fixture run indexed 3 files with no failures and recovered
 sources at rank one and in the top five, with anchor precision 1.0. Its latency output is a
 measurement of this local run, not a performance target.
 
+## Multimodal benchmark v1
+
+`benchmarks/retrieval/v1/` extends the smoke contract without replacing it. The synthetic
+CC0 corpus covers local text, an exact duplicate, a date, a hard negative, a saved-web record,
+a two-page PDF, a deliberately cropped screenshot, and a rasterized scanned-page stand-in, each
+with OCR/page evidence where applicable. The manifest stores
+content and passage hashes, extractor versions, page/region geometry, query alternatives, a
+negative query, and one paraphrase reformulation. The saved-web fixture is a Markdown stand-in
+with URL, capture time, and snapshot status; it is not a claim that LOOM currently archives every
+HTML page.
+
+Run it with:
+
+```text
+cargo run --locked -p loom-cli -- benchmark \
+  --corpus benchmarks/retrieval/v1/corpus \
+  --queries benchmarks/retrieval/v1/queries.jsonl
+```
+
+Schema v3 reports exact-source Recall@1/5, MRR, anchor precision, false-positive rate, negative
+no-result rate, reformulation success, index completeness, median/p95 latency, and index cost
+(elapsed time, source bytes, database bytes, and amplification). It also splits the metrics and
+failure taxonomy by local text, PDF, saved web, and screenshot. A positive result is not complete
+unless its expected source and exact text/page/region anchor match; a negative query is not
+complete unless it returns no result. The command validates the raw fixture bytes and anchor
+geometry before search, so a changed screenshot crop or PDF cannot silently change the baseline.
+
+The first v1 run is intentionally a diagnostic baseline. It exposes the current lexical failure
+modes (an ambiguous paraphrase can produce no result, and a hard-negative query can retrieve an
+exact duplicate) while retaining the failures in the report. Overall planning thresholds are
+not a population-quality claim; the per-source slice and failure taxonomy are the work queue for
+ranking, query expansion, and duplicate handling.
+
 These checks are observations of the current checkout, not a promise that every environment or
 future commit will pass.
 
@@ -55,10 +88,9 @@ When changing ingestion, segmentation, ranking, or evidence rendering:
 4. Report failures, skipped files, unsupported input, and environment limitations.
 5. Keep tuning queries and parameters separate from any future held-out evaluation set.
 
-Future evaluation may add graded passage or region judgments, Recall@10, MRR, nDCG, p95 latency,
-index completeness, and evidence-open success. Those metrics are not implemented by the current
-fixture contract; the activation gate defines them as explicit measurement targets rather than
-claims about the current smoke fixture.
+Future evaluation may add graded passage or region judgments, Recall@10, nDCG, evidence-open
+success, multilingual slices, and held-out human judgments. Those are explicit measurement
+targets rather than claims about either current fixture.
 
 ## References
 

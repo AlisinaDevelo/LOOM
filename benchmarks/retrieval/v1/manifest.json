@@ -1,0 +1,160 @@
+{
+  "schema_version": 3,
+  "name": "loom-retrieval-v1-multimodal",
+  "license": "CC0-1.0",
+  "media_types": [
+    "text/markdown",
+    "text/plain",
+    "application/pdf",
+    "image/png",
+    "saved_web"
+  ],
+  "query_count": 11,
+  "thresholds": {
+    "exact_source_recall_at_1": 0.85,
+    "exact_source_recall_at_5": 0.85,
+    "mean_reciprocal_rank": 0.85,
+    "anchor_precision": 1.0,
+    "false_positive_rate": 0.20,
+    "reformulation_success": 1.0,
+    "index_completeness": 1.0
+  },
+  "fixtures": [
+    {
+      "path": "corpus/local-text/engineering-notes.md",
+      "content_hash": "blake3:7452d0cf56b7a584f564de4227e1f7324774a6d85fa97117140ba077572e18a6",
+      "extractor_id": "loom.text",
+      "extractor_version": "0.1.0",
+      "passages": [
+        {
+          "ordinal": 0,
+          "text_hash": "blake3:7452d0cf56b7a584f564de4227e1f7324774a6d85fa97117140ba077572e18a6",
+          "anchor": { "kind": "text", "char_start": 0, "char_end": 277, "line_start": 1, "line_end": 6 }
+        }
+      ]
+    },
+    {
+      "path": "corpus/local-text/engineering-notes-copy.md",
+      "content_hash": "blake3:7452d0cf56b7a584f564de4227e1f7324774a6d85fa97117140ba077572e18a6",
+      "extractor_id": "loom.text",
+      "extractor_version": "0.1.0",
+      "passages": [
+        {
+          "ordinal": 0,
+          "text_hash": "blake3:7452d0cf56b7a584f564de4227e1f7324774a6d85fa97117140ba077572e18a6",
+          "anchor": { "kind": "text", "char_start": 0, "char_end": 277, "line_start": 1, "line_end": 6 }
+        }
+      ]
+    },
+    {
+      "path": "corpus/local-text/date-ledger.txt",
+      "content_hash": "blake3:961237669d509dbebe3f021ecea8da1de6884260bb3fccf60dea049f137a77be",
+      "extractor_id": "loom.text",
+      "extractor_version": "0.1.0",
+      "passages": [
+        {
+          "ordinal": 0,
+          "text_hash": "blake3:961237669d509dbebe3f021ecea8da1de6884260bb3fccf60dea049f137a77be",
+          "anchor": { "kind": "text", "char_start": 0, "char_end": 173, "line_start": 1, "line_end": 4 }
+        }
+      ]
+    },
+    {
+      "path": "corpus/local-text/hard-negative.md",
+      "content_hash": "blake3:09fdd21297c05a7ba94ed5a9a9de219bbbc8ba22d4ccdbf6d453be50a54f4bde",
+      "extractor_id": "loom.text",
+      "extractor_version": "0.1.0",
+      "passages": [
+        {
+          "ordinal": 0,
+          "text_hash": "blake3:09fdd21297c05a7ba94ed5a9a9de219bbbc8ba22d4ccdbf6d453be50a54f4bde",
+          "anchor": { "kind": "text", "char_start": 0, "char_end": 243, "line_start": 1, "line_end": 6 }
+        }
+      ]
+    },
+    {
+      "path": "corpus/saved-web/loom-research-snapshot.md",
+      "content_hash": "blake3:319c4ae5bce4afdcc248de4b862070b80a780933b06e2b9f28fe4536c0efd6f1",
+      "extractor_id": "loom.text",
+      "extractor_version": "0.1.0",
+      "passages": [
+        {
+          "ordinal": 0,
+          "text_hash": "blake3:319c4ae5bce4afdcc248de4b862070b80a780933b06e2b9f28fe4536c0efd6f1",
+          "anchor": { "kind": "text", "char_start": 0, "char_end": 364, "line_start": 1, "line_end": 12 }
+        }
+      ]
+    },
+    {
+      "path": "corpus/pdf/research-page.pdf",
+      "content_hash": "blake3:d60aa7c64c12e5fcac2d0671638929e06e85d99cb10c0b90ab4180cf347fc6f1",
+      "extractor_id": "loom.pdf",
+      "extractor_version": "0.1.0",
+      "passages": [
+        {
+          "ordinal": 0,
+          "text_hash": "blake3:eb1a9243d42d79405224970122145545870d9c74ec092569eb212cd82a095d03",
+          "anchor": { "kind": "pdf_page", "page": 1, "char_start": 0, "char_end": 53, "line_start": 1, "line_end": 1 }
+        },
+        {
+          "ordinal": 1,
+          "text_hash": "blake3:a679d322e4811bbc8b3ee5b86b80c1945ff10cbc45aa16d8d584e47513ef7b71",
+          "anchor": { "kind": "pdf_page", "page": 2, "char_start": 0, "char_end": 50, "line_start": 1, "line_end": 1 }
+        }
+      ]
+    },
+    {
+      "path": "corpus/screenshot/ocr-cropped.png",
+      "content_hash": "blake3:d54065959fae94738e75dfaafe5fad8577c63e066c09f8f943bfbdade1829ff0",
+      "extractor_id": "loom.ocr",
+      "extractor_version": "0.1.0",
+      "passages": [
+        {
+          "ordinal": 0,
+          "text_hash": "blake3:1138f195b3c311db84cd420a5e684dab092f4b88c375e50ac87a0eee62fdab00",
+          "anchor": { "kind": "image_region", "char_start": 0, "char_end": 19, "line_start": 1, "line_end": 1, "x": 0, "y": 0, "width": 876, "height": 68, "image_width": 878, "image_height": 191, "orientation": 1, "scale_milli": 1000, "confidence_milli": 1000 }
+        },
+        {
+          "ordinal": 1,
+          "text_hash": "blake3:00bd80d67b19aae976d52c7f79c9fe46b7f99eb200146365264444f33b59d697",
+          "anchor": { "kind": "image_region", "char_start": 20, "char_end": 47, "line_start": 2, "line_end": 2, "x": 0, "y": 141, "width": 668, "height": 48, "image_width": 878, "image_height": 191, "orientation": 1, "scale_milli": 1000, "confidence_milli": 1000 }
+        }
+      ]
+    },
+    {
+      "path": "corpus/screenshot/scanned-page.png",
+      "content_hash": "blake3:b737123e1d16e8ccde727bf63c433114f6d72ae1259397a3e2be394dc40277d6",
+      "extractor_id": "loom.ocr",
+      "extractor_version": "0.1.0",
+      "passages": [
+        {
+          "ordinal": 0,
+          "text_hash": "blake3:61056af58a1aeee806c410db708408d3c13c948617e180dfcbfb443ed168f92d",
+          "anchor": { "kind": "image_region", "char_start": 0, "char_end": 24, "line_start": 1, "line_end": 1, "x": 0, "y": 0, "width": 573, "height": 46, "image_width": 575, "image_height": 143, "orientation": 1, "scale_milli": 1000, "confidence_milli": 1000 }
+        },
+        {
+          "ordinal": 1,
+          "text_hash": "blake3:eba5c322c093888956e82645ca0a6cf18215c50953b7ee034d72740ea6d0f057",
+          "anchor": { "kind": "image_region", "char_start": 25, "char_end": 53, "line_start": 2, "line_end": 2, "x": 0, "y": 101, "width": 573, "height": 40, "image_width": 575, "image_height": 143, "orientation": 1, "scale_milli": 1000, "confidence_milli": 1000 }
+        }
+      ]
+    }
+  ],
+  "reported_metrics": [
+    "exact_source_recall_at_1",
+    "exact_source_recall_at_5",
+    "mean_reciprocal_rank",
+    "anchor_precision",
+    "false_positive_rate",
+    "reformulation_success",
+    "negative_no_result_rate",
+    "index_completeness",
+    "median_latency_ms",
+    "p95_latency_ms",
+    "index_elapsed_ms",
+    "source_bytes_read",
+    "database_bytes",
+    "database_bytes_per_source_byte"
+  ],
+  "notes": "Synthetic CC0 fixture with duplicate, paraphrase, date, screenshot/OCR, rasterized scanned-page, PDF, saved-web, and hard-negative cases. It is a baseline evaluation artifact, not a population-quality claim."
+}
