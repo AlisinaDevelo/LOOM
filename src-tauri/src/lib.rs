@@ -1,14 +1,15 @@
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use loom_core::{
-    IndexReport, Library, LibraryStats, ObservationReport, OpenArtifactRequest, SearchHit,
-    SearchRequest, SourceRootInfo,
+    IndexCancellationToken, IndexReport, Library, LibraryStats, ObservationReport,
+    OpenArtifactRequest, SearchHit, SearchRequest, SourceRootInfo,
 };
 use tauri::{Manager, State};
 use tauri_plugin_dialog::DialogExt;
 
 struct AppState {
     library: Arc<Library>,
+    active_index: Mutex<Option<IndexCancellationToken>>,
 }
 
 type CommandResult<T> = std::result::Result<T, String>;
@@ -32,12 +33,45 @@ async fn index_selected_folder(
     let path = selected
         .into_path()
         .map_err(|error| format!("could not read selected folder: {error}"))?;
+    let cancellation = IndexCancellationToken::new();
+    {
+        let mut active = state
+            .active_index
+            .lock()
+            .map_err(|_| "index state lock is unavailable".to_string())?;
+        if active.is_some() {
+            return Err("an indexing run is already active".into());
+        }
+        *active = Some(cancellation.clone());
+    }
     let library = Arc::clone(&state.library);
-    tauri::async_runtime::spawn_blocking(move || library.index_path(path))
-        .await
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        library.index_path_with_cancellation(path, &cancellation)
+    })
+    .await;
+    state
+        .active_index
+        .lock()
+        .map_err(|_| "index state lock is unavailable".to_string())?
+        .take();
+    result
         .map_err(|error| format!("index worker stopped: {error}"))?
         .map(Some)
         .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn cancel_indexing(state: State<'_, AppState>) -> CommandResult<bool> {
+    let active = state
+        .active_index
+        .lock()
+        .map_err(|_| "index state lock is unavailable".to_string())?;
+    if let Some(token) = active.as_ref() {
+        token.cancel();
+        Ok(true)
+    } else {
+        Ok(false)
+    }
 }
 
 #[tauri::command]
@@ -116,11 +150,13 @@ pub fn run() {
                 .map_err(|error| std::io::Error::other(error.to_string()))?;
             app.manage(AppState {
                 library: Arc::new(library),
+                active_index: Mutex::new(None),
             });
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
             index_selected_folder,
+            cancel_indexing,
             reconcile_approved_roots,
             list_source_roots,
             revoke_source_root,
@@ -153,6 +189,7 @@ mod tests {
         }
         for command in [
             "allow-index-selected-folder",
+            "allow-cancel-indexing",
             "allow-reconcile-approved-roots",
             "allow-list-source-roots",
             "allow-revoke-source-root",

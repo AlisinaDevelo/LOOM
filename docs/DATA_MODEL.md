@@ -102,10 +102,18 @@ discovered work. Each supported ingestion unit advances `next_unit` in the same 
 that creates or reuses its artifact version and passages. Unsupported or unreadable units advance
 through a small reconciliation transaction and retain an explicit failure in the returned report.
 
+The indexing report exposes the durable job ID as `run_id` and separates `attempted`, `indexed`,
+`unchanged`, `skipped`, `failed`, and `cancelled` counts. A local cancellation token is checked only
+between units. When cancellation is observed, the job remains `interrupted` with the explicit
+`cancelled by request` reason; complete canonical versions and the next-unit checkpoint are kept so
+the next invocation resumes from the exact boundary.
+
 An interrupted or still-running row resumes from its durable `next_unit` when the fingerprint and
 unit count match. Completion records `state = completed` and the next run starts a fresh scan, so
 retries of unchanged bytes reuse the existing content version. The row is intentionally diagnostic
-and rebuildable; canonical artifact, version, passage, and hash records remain authoritative.
+and rebuildable; canonical artifact, version, passage, and hash records remain authoritative. A
+cancelled report identifies the same job ID and counts the remaining units as resumable; cancellation
+never rolls back a previously committed complete unit.
 
 ## Observation hints and reconciliation
 

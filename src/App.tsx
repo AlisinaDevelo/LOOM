@@ -13,10 +13,14 @@ type LibraryStats = {
 };
 
 type IndexReport = {
+  run_id: string;
   discovered: number;
+  attempted: number;
   indexed: number;
   unchanged: number;
   skipped: number;
+  failed: number;
+  cancelled: number;
   bytes_read: number;
   failures: Array<{ source: string; reason: string }>;
 };
@@ -148,9 +152,9 @@ function App() {
         return;
       }
       const failed = report.failures.length;
-      setNotice(
-        `Indexed ${report.indexed}; ${report.unchanged} unchanged; ${report.skipped} unsupported${failed ? `; ${failed} failed` : ""}.`,
-      );
+      setNotice(report.cancelled
+        ? `Cancelled run ${report.run_id.slice(0, 8)}… after ${report.attempted} unit${report.attempted === 1 ? "" : "s"}; ${report.cancelled} remain resumable.`
+        : `Indexed ${report.indexed}; ${report.unchanged} unchanged; ${report.skipped} unsupported${failed ? `; ${failed} failed` : ""}.`);
       if (failed) {
         setError(report.failures.map((item) => `${item.source}: ${item.reason}`).join("\n"));
       }
@@ -160,6 +164,18 @@ function App() {
       setNotice("Indexing stopped safely.");
     } finally {
       setBusy(null);
+    }
+  };
+
+  const cancelIndexing = async () => {
+    setError(null);
+    setNotice("Cancellation requested; LOOM will stop after the current bounded unit…");
+    try {
+      const accepted = await invoke<boolean>("cancel_indexing");
+      if (!accepted) setNotice("No indexing run is active.");
+    } catch (caught) {
+      setError(errorMessage(caught));
+      setNotice("Cancellation could not be requested.");
     }
   };
 
@@ -256,9 +272,14 @@ function App() {
             <div><dt>Versions</dt><dd>{stats.versions}</dd></div>
             <div><dt>Indexed</dt><dd>{formatBytes(stats.indexed_bytes)}</dd></div>
           </dl>
-          <button className="add-source" type="button" onClick={addSource} disabled={busy !== null}>
-            <span aria-hidden="true">＋</span>
-            {busy === "index" ? "Indexing…" : "Add a folder"}
+          <button
+            className={busy === "index" ? "add-source cancel-source" : "add-source"}
+            type="button"
+            onClick={busy === "index" ? cancelIndexing : addSource}
+            disabled={busy !== null && busy !== "index"}
+          >
+            <span aria-hidden="true">{busy === "index" ? "×" : "＋"}</span>
+            {busy === "index" ? "Stop indexing" : "Add a folder"}
           </button>
           <p className="scope-note">Text and Markdown only in this pre-alpha slice.</p>
           <section className="scope-list" aria-labelledby="scope-heading">

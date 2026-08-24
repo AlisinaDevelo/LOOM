@@ -6,6 +6,7 @@
   "permissions": [
     "core:default",
     "allow-index-selected-folder",
+    "allow-cancel-indexing",
     "allow-reconcile-approved-roots",
     "allow-list-source-roots",
     "allow-revoke-source-root",

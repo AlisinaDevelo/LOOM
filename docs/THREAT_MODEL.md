@@ -33,8 +33,8 @@ service attack. There is no supported remote service in this slice.
    moved, unsafe, and revoked states are visible; no fallback path is inferred.
 3. The indexer traverses and reads local files, then writes normalized text and metadata to SQLite.
 4. FTS5 derives a lexical search structure from canonical passage rows.
-5. Tauri IPC exposes indexing, scope status/revocation, search, statistics, and source opening to
-   the UI.
+5. Tauri IPC exposes indexing, cooperative cancellation, scope status/revocation, search,
+   statistics, and source opening to the UI.
 6. The host external application receives an original path when the user requests opening it.
 7. A future semantic index or connector would be a new boundary and requires a separate review.
 
@@ -43,7 +43,7 @@ service attack. There is no supported remote service in this slice.
 | Risk                          | Current mitigation                                                                                              | Remaining limitation                                                                   |
 | ----------------------------- | --------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------- |
 | Indexing an unintended tree   | Backend-owned desktop selection; no frontend path argument; no-follow traversal and canonical containment       | The user or CLI can still choose a broad or sensitive path                             |
-| Resource exhaustion           | 8 MiB per-file and 20,000-file traversal limits                                                                 | Large collections still consume local CPU, memory, and disk                            |
+| Resource exhaustion           | 8 MiB/file and 20,000-file limits; unit cancellation preserves a resumable checkpoint safely; cancel and resume | Large collections still consume local CPU, memory, and disk (local)                    |
 | Reading changing bytes        | No-follow descriptor, root containment, device/inode, size/mtime, post-read checks, and retries                 | Network or hostile filesystems can still deny service; this is not a forensic snapshot |
 | Unsupported or malformed text | Extension allowlist and UTF-8 requirement                                                                       | No malware scanning or general document sandbox                                        |
 | FTS query injection           | Search terms and phrases are compiled as safe FTS5 input                                                        | Search is lexical and does not defend a compromised database                           |

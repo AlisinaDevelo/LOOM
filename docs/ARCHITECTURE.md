@@ -55,9 +55,10 @@ another path.
 ### Tauri shell and UI
 
 The Tauri layer opens the application-data SQLite database and exposes the narrow commands
-index_selected_folder, reconcile_approved_roots, list_source_roots, revoke_source_root, search,
-library_stats, and open_artifact. Folder selection happens inside the Rust command through the native
-dialog; the webview does not provide a path. Persisted roots are exact read-only locators with
+index_selected_folder, cancel_indexing, reconcile_approved_roots, list_source_roots,
+revoke_source_root, search, library_stats, and open_artifact. Folder selection happens inside the
+Rust command through the native dialog; the webview does not provide a path. Persisted roots are
+exact read-only locators with
 available/missing/denied/moved/unsafe/revoked status. Re-selection through the native picker is the
 current relaunch recovery path; a future sandboxed build must add persistent security-scoped
 bookmarks rather than widening permissions. Opening requires the artifact ID, version ID, and content
@@ -99,7 +100,11 @@ databases are explicitly rejected because their content-version uniqueness contr
 extractor identity. A content observation is keyed by source artifact, byte hash, extractor, and
 extractor version so changed extraction logic cannot silently reuse old passages. Each indexing
 unit advances a fingerprint-bound checkpoint in the same transaction as canonical writes, allowing
-an interrupted scan to resume without making a partially committed artifact searchable.
+an interrupted or cancelled scan to resume without making a partially committed artifact searchable.
+The returned report carries the durable job ID plus discovered, attempted, indexed, unchanged,
+skipped, failed, and cancelled counts. The desktop stop command sets a cooperative token; the
+worker observes it between units, marks the checkpoint interrupted with `cancelled by request`,
+and leaves already committed versions intact.
 
 Approved-root observation is deliberately conservative. The coalescer accepts only absolute,
 in-scope hints, debounces duplicate create/modify/remove/rename events, and turns overflow or large
