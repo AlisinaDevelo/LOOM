@@ -133,6 +133,7 @@ run_step semantic-contract bash scripts/verify-semantic-contract.sh "$EVIDENCE_D
 run_step performance-budget-tests python3 scripts/test-performance-budget.py
 run_mixed_corpus
 run_step performance-budget python3 scripts/performance-budget.py --evidence-dir "$EVIDENCE_DIR/performance" --loom "$EVIDENCE_DIR/loom"
+run_step accessibility-contract python3 scripts/test-accessibility-contract.py
 run_step npm-install npm ci
 run_step npm-check npm run check
 run_step security-check bash scripts/security-check.sh

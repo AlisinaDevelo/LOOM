@@ -1,4 +1,4 @@
-import { FormEvent, useCallback, useEffect, useMemo, useState } from "react";
+import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 
 import "./App.css";
@@ -156,27 +156,33 @@ function EvidenceViewer({
   onClose,
   onOpenOriginal,
 }: EvidenceViewerProps) {
+  const headingRef = useRef<HTMLHeadingElement>(null);
   const view = state.view;
+
+  useEffect(() => {
+    headingRef.current?.focus();
+  }, [state.status, view?.artifact_id]);
+
   if (state.status === "loading") {
     return (
-      <section className="evidence-viewer" aria-label="Evidence viewer">
+      <section className="evidence-viewer" aria-labelledby="evidence-viewer-title" role="region">
         <div className="evidence-viewer-heading">
-          <div><p className="eyebrow">Verified evidence</p><h2>Checking the source…</h2></div>
+          <div><p className="eyebrow">Verified evidence</p><h2 id="evidence-viewer-title" ref={headingRef} tabIndex={-1}>Checking the source…</h2></div>
           <button type="button" className="viewer-close" onClick={onClose}>Close</button>
         </div>
-        <p className="evidence-loading">Re-checking the active version, content hash, and passage anchor.</p>
+        <p className="evidence-loading" id="evidence-viewer-description">Re-checking the active version, content hash, and passage anchor.</p>
       </section>
     );
   }
   if (state.status === "error" || !view) {
     return (
-      <section className="evidence-viewer evidence-viewer-error" aria-label="Evidence viewer">
+      <section className="evidence-viewer evidence-viewer-error" aria-labelledby="evidence-viewer-title" role="region">
         <div className="evidence-viewer-heading">
-          <div><p className="eyebrow">Evidence unavailable</p><h2>Source needs attention.</h2></div>
+          <div><p className="eyebrow">Evidence unavailable</p><h2 id="evidence-viewer-title" ref={headingRef} tabIndex={-1}>Source needs attention.</h2></div>
           <button type="button" className="viewer-close" onClick={onClose}>Close</button>
         </div>
         <p role="alert">{state.error ?? "The source could not be verified."}</p>
-        <p className="evidence-loading">Re-index the selected folder, then retry this evidence result.</p>
+        <p className="evidence-loading" id="evidence-viewer-description">Re-index the selected folder, then retry this evidence result.</p>
       </section>
     );
   }
@@ -200,19 +206,19 @@ function EvidenceViewer({
       : `Text lines ${anchor.line_start}–${anchor.line_end}`;
 
   return (
-    <section className="evidence-viewer" aria-label="Evidence viewer">
+    <section className="evidence-viewer" aria-labelledby="evidence-viewer-title" aria-describedby="evidence-viewer-description" role="region">
       <div className="evidence-viewer-heading">
         <div>
           <p className="eyebrow">Verified evidence</p>
-          <h2>{view.title}</h2>
-          <p className="evidence-location">{location} · {view.extractor_id} {view.extractor_version}</p>
+          <h2 id="evidence-viewer-title" ref={headingRef} tabIndex={-1}>{view.title}</h2>
+          <p className="evidence-location" id="evidence-viewer-description">{location} · {view.extractor_id} {view.extractor_version}</p>
         </div>
         <div className="viewer-actions">
           {isImage && <>
-            <button type="button" className="viewer-control" onClick={() => onZoomChange(zoom - 0.25)} aria-label="Zoom out">−</button>
-            <span className="viewer-zoom">{Math.round(zoom * 100)}%</span>
-            <button type="button" className="viewer-control" onClick={() => onZoomChange(zoom + 0.25)} aria-label="Zoom in">＋</button>
-            <button type="button" className="viewer-control" onClick={() => onRotationChange(rotation + 90)} aria-label="Rotate evidence">↻</button>
+            <button type="button" className="viewer-control" onClick={() => onZoomChange(zoom - 0.25)} aria-label="Zoom out" aria-controls="image-evidence-stage">−</button>
+            <span className="viewer-zoom" aria-live="polite" aria-atomic="true">{Math.round(zoom * 100)}%</span>
+            <button type="button" className="viewer-control" onClick={() => onZoomChange(zoom + 0.25)} aria-label="Zoom in" aria-controls="image-evidence-stage">＋</button>
+            <button type="button" className="viewer-control" onClick={() => onRotationChange(rotation + 90)} aria-label="Rotate evidence" aria-controls="image-evidence-stage">↻</button>
           </>}
           <button type="button" className="viewer-close" onClick={onClose}>Close</button>
         </div>
@@ -221,15 +227,20 @@ function EvidenceViewer({
       {isImage && imageProjection ? (
         <div
           className="evidence-stage image-stage"
+          id="image-evidence-stage"
           data-testid="image-evidence-stage"
           data-rotation={imageProjection.rotation}
           data-zoom={imageProjection.scale}
           style={{ aspectRatio: `${imageProjection.canvasWidth} / ${imageProjection.canvasHeight}` }}
+          role="group"
+          aria-label="Verified image evidence"
         >
           <div
             className="image-evidence-map"
             style={{ aspectRatio: `${imageProjection.canvasWidth} / ${imageProjection.canvasHeight}` }}
             aria-label={`Image evidence canvas at ${imageProjection.rotation} degrees`}
+            role="img"
+            tabIndex={0}
           >
             <div
               className="image-evidence-region"
@@ -282,6 +293,10 @@ function App() {
   const [evidenceRotation, setEvidenceRotation] = useState(0);
   const [notice, setNotice] = useState("Ready. LOOM does not upload your library.");
   const [error, setError] = useState<string | null>(null);
+  const searchInputRef = useRef<HTMLInputElement>(null);
+  const resultsHeadingRef = useRef<HTMLHeadingElement>(null);
+  const noResultsHeadingRef = useRef<HTMLHeadingElement>(null);
+  const focusResultsAfterSearchRef = useRef(false);
 
   const refreshStats = useCallback(async () => {
     try {
@@ -321,6 +336,27 @@ function App() {
       active = false;
     };
   }, [refreshLibrary]);
+
+  useEffect(() => {
+    const focusSearch = (event: KeyboardEvent) => {
+      if (!(event.metaKey || event.ctrlKey) || event.key.toLowerCase() !== "k") return;
+      const target = event.target as HTMLElement | null;
+      const isOtherEditable = target && target !== searchInputRef.current
+        && (target.isContentEditable || ["INPUT", "TEXTAREA", "SELECT"].includes(target.tagName));
+      if (isOtherEditable) return;
+      event.preventDefault();
+      searchInputRef.current?.focus();
+      setNotice("Search focused. Type a query and press Enter.");
+    };
+    window.addEventListener("keydown", focusSearch);
+    return () => window.removeEventListener("keydown", focusSearch);
+  }, []);
+
+  useEffect(() => {
+    if (busy !== null || !searched || !focusResultsAfterSearchRef.current) return;
+    focusResultsAfterSearchRef.current = false;
+    (hits.length > 0 ? resultsHeadingRef : noResultsHeadingRef).current?.focus();
+  }, [busy, hits.length, searched]);
 
   const addSource = async () => {
     setError(null);
@@ -420,6 +456,7 @@ function App() {
     setError(null);
     setBusy("search");
     setSearched(true);
+    focusResultsAfterSearchRef.current = true;
     setNotice("Searching canonical local passages…");
     try {
       const results = await invoke<SearchHit[]>("search", {
@@ -491,6 +528,7 @@ function App() {
 
   return (
     <div className="app-shell">
+      <a className="skip-link" href="#main-content">Skip to search and results</a>
       <aside className="sidebar">
         <div className="brand-block">
           <div className="brand-mark" aria-hidden="true"><span /><span /><span /></div>
@@ -498,7 +536,7 @@ function App() {
         </div>
 
         <nav aria-label="Library">
-          <button className="nav-item active" type="button">
+          <button className="nav-item active" type="button" aria-current="page">
             <span className="nav-icon" aria-hidden="true">⌕</span>Search
           </button>
           <button className="nav-item" type="button" disabled title="Planned for a later release">
@@ -583,38 +621,44 @@ function App() {
         </div>
       </aside>
 
-      <main className="workspace">
+      <main className="workspace" id="main-content" tabIndex={-1} aria-labelledby="workspace-heading">
         <header className="workspace-header">
           <div>
             <p className="eyebrow">Evidence-first personal retrieval</p>
-            <h1>Recover the exact thing.</h1>
+            <h1 id="workspace-heading">Recover the exact thing.</h1>
             <p className="header-copy">{headerMessage}</p>
           </div>
-          <div className="status-pill"><span />pre-alpha</div>
+          <div className="status-pill"><span aria-hidden="true" />pre-alpha</div>
         </header>
 
-        <form className="search-form" onSubmit={runSearch} role="search">
+        <form className="search-form" onSubmit={runSearch} role="search" aria-label="Search local sources">
           <span className="search-glyph" aria-hidden="true">⌕</span>
           <label className="sr-only" htmlFor="loom-query">Search your local sources</label>
           <input
             id="loom-query"
+            ref={searchInputRef}
             value={query}
             onChange={(event) => setQuery(event.target.value)}
             placeholder='Try “the note about SQLite isolation”'
             autoComplete="off"
             spellCheck="false"
+            aria-describedby="query-hint keyboard-hint"
+            aria-keyshortcuts="Control+K Meta+K"
           />
-          <kbd>↵</kbd>
+          <span id="keyboard-hint" className="sr-only">Press Command or Control K to focus search. Press Enter to search.</span>
+          <span className="keyboard-hints" aria-hidden="true">
+            <kbd aria-hidden="true">⌘K</kbd><kbd aria-hidden="true">↵</kbd>
+          </span>
           <button type="submit" disabled={busy !== null || !query.trim()}>
             {busy === "search" ? "Searching" : "Search"}
           </button>
         </form>
-        <p className="query-hint">
+        <p className="query-hint" id="query-hint">
           Filters: <code>after:</code> <code>before:</code> <code>type:</code> <code>path:</code>{" "}
           <code>confidence:</code> · quoted text searches an exact phrase
         </p>
 
-        <div className="notice" role="status" aria-live="polite">
+        <div className="notice" role="status" aria-live="polite" aria-atomic="true">
           <span className={busy ? "pulse" : ""} />{notice}
         </div>
         {error && <pre className="error-panel" role="alert">{error}</pre>}
@@ -637,17 +681,17 @@ function App() {
         )}
 
         {searched && hits.length === 0 && busy !== "search" && (
-          <section className="no-results">
-            <h2>No matching evidence</h2>
+          <section className="no-results" aria-labelledby="no-results-heading">
+            <h2 id="no-results-heading" ref={noResultsHeadingRef} tabIndex={-1}>No matching evidence</h2>
             <p>Try fewer terms or add a folder. LOOM will not invent an answer when it cannot find the source.</p>
           </section>
         )}
 
         {hits.length > 0 && (
-          <section className="results" aria-label="Search results">
+          <section className="results" aria-labelledby="results-heading" aria-describedby="results-summary">
             <div className="results-heading">
-              <h2>Recovered sources</h2>
-              <span>{hits.length} matches · ranked with FTS5 BM25</span>
+              <h2 id="results-heading" ref={resultsHeadingRef} tabIndex={-1}>Recovered sources</h2>
+              <span id="results-summary">{hits.length} matches · ranked with FTS5 BM25</span>
             </div>
             {evidenceState && (
               <EvidenceViewer
@@ -691,6 +735,7 @@ function App() {
                           : <span key={index}>{part.text}</span>,
                       )}
                     </blockquote>
+                    <p className="match-reason"><span>Why this matched</span>{hit.match_reason}</p>
                     <div className="evidence-row">
                       <span>
                         {hit.anchor.kind === "pdf_page" ? `page ${hit.anchor.page} · ` : ""}
