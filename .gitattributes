@@ -1,5 +1,6 @@
 * text=auto eol=lf
 *.png binary
+*.pdf binary
 *.ico binary
 *.icns binary
 *.sqlite binary
