@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-reconcile-approved-roots"
+description = "Enables the reconcile_approved_roots command without any pre-configured scope."
+commands.allow = ["reconcile_approved_roots"]
+
+[[permission]]
+identifier = "deny-reconcile-approved-roots"
+description = "Denies the reconcile_approved_roots command without any pre-configured scope."
+commands.deny = ["reconcile_approved_roots"]
