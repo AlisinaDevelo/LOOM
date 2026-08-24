@@ -14,14 +14,18 @@ pub use domain::{
     ArtifactObservation, EvidenceAnchor, EvidenceExcerpt, EvidenceSegment, EvidenceView,
     FtsHealthReport, FtsRepairReport, IndexCancellationToken, IndexCheckpoint, IndexFailure,
     IndexReport, LibraryStats, ObservationReport, OcrPurgeReport, OcrStatus, OpenArtifactRequest,
-    PassageObservation, ResolveEvidenceRequest, SearchHit, SearchRequest, SemanticCandidate,
-    SemanticDropReport, SemanticIndexConfig, SemanticIndexManifest, SemanticIndexStatus,
-    SemanticProviderMeasurement, SemanticRebuildReport, SourceRootInfo, SourceRootStatus,
+    PassageObservation, RankContributions, ResolveEvidenceRequest, SearchHit, SearchRequest,
+    SemanticCandidate, SemanticDropReport, SemanticIndexConfig, SemanticIndexManifest,
+    SemanticIndexStatus, SemanticProviderMeasurement, SemanticRebuildReport, SourceRootInfo,
+    SourceRootStatus,
 };
 pub use error::{LoomError, Result};
 pub use observe::{coalesce_events, ObservationEvent, ObservationEventKind, ObservationPlan};
 pub use ranking::{
     fuse_hybrid_candidates, HybridRankConfig, HybridRankInput, HybridSearchHit,
     HybridSignalEvidence,
+};
+pub use search::{
+    parse_query, ConfidenceFilter, ConfidenceOperator, ParsedQuery, QueryFilters, SourceTypeFilter,
 };
 pub use store::{Library, LibraryLimits};

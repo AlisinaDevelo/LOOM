@@ -839,7 +839,9 @@ fn phrase_is_highlighted(hit: &loom_core::SearchHit, phrase: &str) -> bool {
 mod tests {
     use std::path::PathBuf;
 
-    use loom_core::{EvidenceAnchor, EvidenceExcerpt, EvidenceSegment, SearchHit};
+    use loom_core::{
+        EvidenceAnchor, EvidenceExcerpt, EvidenceSegment, RankContributions, SearchHit,
+    };
 
     use super::{
         benchmark_passes, expected_source_anchor_matches, fixture_path_matches,
@@ -928,6 +930,12 @@ mod tests {
                 char_end: 12,
                 line_start: 1,
                 line_end: 1,
+            },
+            contributions: RankContributions {
+                lexical: 1.0,
+                semantic: 0.0,
+                metadata: 0.0,
+                reranker: 0.0,
             },
             match_reason: "fixture".into(),
         };

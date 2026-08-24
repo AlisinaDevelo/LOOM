@@ -69,6 +69,12 @@ type SearchHit = {
     scale_milli?: number;
     confidence_milli?: number;
   };
+  contributions: {
+    lexical: number;
+    semantic: number;
+    metadata: number;
+    reranker: number;
+  };
   match_reason: string;
 };
 
@@ -603,6 +609,10 @@ function App() {
             {busy === "search" ? "Searching" : "Search"}
           </button>
         </form>
+        <p className="query-hint">
+          Filters: <code>after:</code> <code>before:</code> <code>type:</code> <code>path:</code>{" "}
+          <code>confidence:</code> · quoted text searches an exact phrase
+        </p>
 
         <div className="notice" role="status" aria-live="polite">
           <span className={busy ? "pulse" : ""} />{notice}

@@ -9,7 +9,7 @@ use std::collections::BTreeSet;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    domain::{EvidenceAnchor, EvidenceExcerpt},
+    domain::{EvidenceAnchor, EvidenceExcerpt, RankContributions},
     error::{LoomError, Result},
 };
 
@@ -59,6 +59,7 @@ pub struct HybridSearchHit {
     pub excerpt: EvidenceExcerpt,
     pub anchor: EvidenceAnchor,
     pub signals: HybridSignalEvidence,
+    pub contributions: RankContributions,
     pub match_reason: String,
 }
 
@@ -119,11 +120,15 @@ pub fn fuse_hybrid_candidates(
                 path_token_overlap,
                 recency_score,
             };
-            let score = config.lexical_weight * lexical_rrf
-                + config.semantic_weight * semantic_rrf
-                + config.exact_match_weight * f64::from(exact_match)
-                + config.path_weight * path_token_overlap
-                + config.recency_weight * recency_score;
+            let contributions = RankContributions {
+                lexical: config.lexical_weight * lexical_rrf,
+                semantic: config.semantic_weight * semantic_rrf,
+                metadata: config.exact_match_weight * f64::from(exact_match)
+                    + config.path_weight * path_token_overlap
+                    + config.recency_weight * recency_score,
+                reranker: 0.0,
+            };
+            let score = contributions.lexical + contributions.semantic + contributions.metadata;
             HybridSearchHit {
                 rank: 0,
                 score,
@@ -137,6 +142,7 @@ pub fn fuse_hybrid_candidates(
                 excerpt: input.excerpt,
                 anchor: input.anchor,
                 signals,
+                contributions,
                 match_reason: "hybrid-rank-v1 weighted reciprocal-rank fusion".into(),
             }
         })
