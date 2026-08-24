@@ -73,3 +73,24 @@ This evidence covers explicit local UTF-8 text and Markdown only. PDF/OCR, brows
 passive capture, and unavailable hardware were not substituted or claimed. Review, protected-main
 merge, the same reproduction against the merged SHA, and final issue-linked evidence remain
 required before #12 can close.
+
+## Merged-main reproduction
+
+The same target-device harness was rerun against protected `main` at
+`6b97dc0e493a0fd63810ae1294cde7f2d558d273` after the issue-12 implementation
+merged. The evidence directory is `/tmp/loom-merged-main-device.RiWdYT`.
+
+- Device: MacBook Pro 17,1, Apple M1, 8 GB; macOS 26.6.2 (25G83), arm64
+- Native Rust/Cargo: 1.96.0; declared MSRV Rust/Cargo: 1.88.0
+- Node v26.7.0; npm 11.19.0
+- Format, clippy, workspace tests, MSRV check/tests, npm check, retrieval benchmark,
+  Tauri debug build, and mixed corpus — pass
+- Mixed corpus: initial `discovered=4`, `indexed=2`, `skipped=1`, one bounded
+  oversized-source failure; outside-root symlink remained unreachable; recovery
+  reindex reported `indexed=1`, `unchanged=2`, `skipped=1`, no failures; final
+  stats were 3 artifacts, 3 versions, 3 passages, 250 indexed bytes
+- Summary SHA-256: `f802d4596498c683b58870dd344117ca66ffb375ca8ebcf100a01ee12de44136`
+- Log manifest SHA-256: `7224bdaffdd0bccb9ace38f0a52278dfbae02b3409a378cd0d118a8e85f408f7`
+
+This is the merged-main reproduction record; the issue may close only after this
+artifact is linked in its discussion and the repository review policy is satisfied.
