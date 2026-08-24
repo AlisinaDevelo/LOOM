@@ -4,14 +4,15 @@ mod domain;
 mod error;
 mod ingest;
 mod observe;
+mod ocr;
 mod search;
 mod store;
 
 pub use domain::{
     ArtifactObservation, EvidenceAnchor, EvidenceExcerpt, EvidenceSegment, FtsHealthReport,
     FtsRepairReport, IndexCancellationToken, IndexCheckpoint, IndexFailure, IndexReport,
-    LibraryStats, ObservationReport, OpenArtifactRequest, PassageObservation, SearchHit,
-    SearchRequest, SourceRootInfo, SourceRootStatus,
+    LibraryStats, ObservationReport, OcrPurgeReport, OcrStatus, OpenArtifactRequest,
+    PassageObservation, SearchHit, SearchRequest, SourceRootInfo, SourceRootStatus,
 };
 pub use error::{LoomError, Result};
 pub use observe::{coalesce_events, ObservationEvent, ObservationEventKind, ObservationPlan};

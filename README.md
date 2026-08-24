@@ -3,8 +3,8 @@
 Recover the exact source object, locally.
 
 LOOM is a pre-alpha, local-first retrieval tool for finding passages in a user-selected collection
-of text and Markdown files. The current slice is deliberately small: it preserves the source path,
-content hash, excerpt, and exact text anchor with every result.
+of text, documents, and images. The current slice is deliberately small: it preserves the source
+path, content hash, excerpt, and exact text or pixel-region anchor with every result.
 
 > [!WARNING] LOOM is pre-alpha software. Do not rely on it as a backup, records system, security
 > boundary, or production data-loss prevention system. The current local database is not encrypted
@@ -15,17 +15,21 @@ content hash, excerpt, and exact text anchor with every result.
 - An explicitly selected file or directory is indexed; directory traversal does not follow symlinks.
   The desktop picker runs in the Rust backend, so the webview cannot submit an arbitrary path to the
   index command.
-- Supported inputs are UTF-8 .txt, .md, .markdown, and bounded text-based .pdf files. Files larger
-  than 8 MiB, PDFs over 2,048 pages, and traversals larger than 20,000 files are rejected or
-  reported with an explicit bounded outcome.
+- Supported inputs are UTF-8 .txt, .md, .markdown, bounded text-based .pdf files, and .png/.jpg/
+  .jpeg/.gif/.webp images. Image OCR runs locally through macOS Vision; non-macOS builds report
+  OCR unavailable rather than silently indexing an image without evidence. Files larger than 8 MiB,
+  PDFs over 2,048 pages, and traversals larger than 20,000 files are rejected or reported with an
+  explicit bounded outcome.
 - SQLite is the canonical store. SQLite FTS5 provides lexical retrieval over indexed passages.
 - `loom-cli fts-health` compares canonical passage hashes and tokenizer vocabulary with the
   disposable FTS5 projection; `loom-cli fts-repair` rebuilds it transactionally and reports before/
   after digests.
 - `loom-cli inspect path/to/source` prints the stored extractor identity, PDF page count/warnings,
-  and exact anchors for an indexed source.
+  image OCR provider/model metadata, and exact anchors for an indexed source. `ocr-status`,
+  `ocr-enable`, `ocr-disable`, and `ocr-purge` expose the local OCR policy and derived-record purge.
 - Results include the original path, BLAKE3 content hash, structured excerpt, and exact
-  character/line anchor. Literal source characters cannot become highlight instructions.
+  character/line or image-region pixel anchor. Literal source characters cannot become highlight
+  instructions.
 - A complete rescan hides deleted or unreadable sources. Opening a result verifies its artifact,
   version, and current BLAKE3 hash before handing the path to another application.
 - The CLI and Tauri desktop UI use the same Rust core and local database.
@@ -36,8 +40,8 @@ content hash, excerpt, and exact text anchor with every result.
   durable checkpoint resumes the remainder.
 - The retrieval smoke fixture is the rights-clean synthetic corpus in benchmarks/retrieval/v0/.
 
-Image OCR, embeddings, a semantic index, browser capture, cloud sync, accounts,
-multi-device sync, and mobile clients are not part of this supported slice.
+Embeddings, a semantic index, browser capture, cloud sync, accounts, multi-device sync, and mobile
+clients are not part of this supported slice.
 
 ## Quick start
 

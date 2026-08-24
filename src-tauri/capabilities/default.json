@@ -12,6 +12,9 @@
     "allow-revoke-source-root",
     "allow-search",
     "allow-library-stats",
+    "allow-ocr-status",
+    "allow-set-ocr-enabled",
+    "allow-purge-ocr-records",
     "allow-open-artifact"
   ]
 }

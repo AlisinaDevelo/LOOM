@@ -25,6 +25,18 @@ pub enum LoomError {
     #[error("PDF extraction failed: {0}")]
     PdfExtraction(String),
 
+    #[error("image extraction failed: {0}")]
+    ImageExtraction(String),
+
+    #[error("OCR extraction failed: {0}")]
+    OcrExtraction(String),
+
+    #[error("image OCR is disabled")]
+    OcrDisabled,
+
+    #[error("OCR is unavailable: {0}")]
+    OcrUnavailable(String),
+
     #[error("source changed while it was being read: {0}")]
     SourceChanged(String),
 

@@ -1,8 +1,8 @@
 use std::sync::{Arc, Mutex};
 
 use loom_core::{
-    IndexCancellationToken, IndexReport, Library, LibraryStats, ObservationReport,
-    OpenArtifactRequest, SearchHit, SearchRequest, SourceRootInfo,
+    IndexCancellationToken, IndexReport, Library, LibraryStats, ObservationReport, OcrPurgeReport,
+    OcrStatus, OpenArtifactRequest, SearchHit, SearchRequest, SourceRootInfo,
 };
 use tauri::{Manager, State};
 use tauri_plugin_dialog::DialogExt;
@@ -120,6 +120,30 @@ fn library_stats(state: State<'_, AppState>) -> CommandResult<LibraryStats> {
 }
 
 #[tauri::command]
+fn ocr_status(state: State<'_, AppState>) -> CommandResult<OcrStatus> {
+    state
+        .library
+        .ocr_status()
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn set_ocr_enabled(state: State<'_, AppState>, enabled: bool) -> CommandResult<OcrPurgeReport> {
+    state
+        .library
+        .set_ocr_enabled(enabled)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn purge_ocr_records(state: State<'_, AppState>) -> CommandResult<OcrPurgeReport> {
+    state
+        .library
+        .purge_ocr_records()
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
 async fn open_artifact(
     state: State<'_, AppState>,
     request: OpenArtifactRequest,
@@ -162,6 +186,9 @@ pub fn run() {
             revoke_source_root,
             search,
             library_stats,
+            ocr_status,
+            set_ocr_enabled,
+            purge_ocr_records,
             open_artifact
         ])
         .run(tauri::generate_context!())
@@ -195,6 +222,9 @@ mod tests {
             "allow-revoke-source-root",
             "allow-search",
             "allow-library-stats",
+            "allow-ocr-status",
+            "allow-set-ocr-enabled",
+            "allow-purge-ocr-records",
             "allow-open-artifact",
         ] {
             assert!(
