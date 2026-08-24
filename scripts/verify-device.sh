@@ -88,6 +88,13 @@ clear_rust_outputs() {
   fi
 }
 
+stage_cli_binary() {
+  local staged_binary="$EVIDENCE_DIR/loom"
+  cp "$ROOT/target/debug/loom" "$staged_binary"
+  chmod +x "$staged_binary"
+  printf 'staged=%s\n' "$staged_binary"
+}
+
 mkdir -p "$EVIDENCE_DIR"
 : > "$COMMANDS"
 printf 'LOOM target-device verification\n' > "$SUMMARY"
@@ -112,8 +119,12 @@ run_step retrieval-benchmark cargo run --locked -q -p loom-cli -- benchmark --co
 run_step retrieval-benchmark-v1 cargo run --locked -q -p loom-cli -- benchmark --corpus benchmarks/retrieval/v1/corpus --queries benchmarks/retrieval/v1/queries.jsonl
 run_step hybrid-ablation python3 scripts/hybrid-ablation.py
 run_step semantic-contract bash scripts/verify-semantic-contract.sh "$EVIDENCE_DIR/semantic"
+run_step performance-budget-tests python3 scripts/test-performance-budget.py
 run_mixed_corpus
+run_step performance-build cargo build --locked -q -p loom-cli
+run_step stage-cli-binary stage_cli_binary
 run_step clear-rust-target clear_rust_outputs
+run_step performance-budget python3 scripts/performance-budget.py --evidence-dir "$EVIDENCE_DIR/performance" --loom "$EVIDENCE_DIR/loom"
 run_step npm-install npm ci
 run_step npm-check npm run check
 run_step security-check bash scripts/security-check.sh

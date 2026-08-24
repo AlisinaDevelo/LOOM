@@ -8,7 +8,7 @@ use std::{
 };
 
 use clap::{Parser, Subcommand};
-use loom_core::{EvidenceAnchor, Library, SearchRequest};
+use loom_core::{EvidenceAnchor, Library, LibraryLimits, SearchRequest};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Parser)]
@@ -73,6 +73,17 @@ enum Command {
         corpus: PathBuf,
         #[arg(long)]
         queries: PathBuf,
+    },
+    /// Measure a selected corpus, query path, and rebuild cost in one process.
+    Performance {
+        #[arg(long)]
+        corpus: PathBuf,
+        #[arg(long)]
+        query: String,
+        #[arg(long, default_value_t = 31)]
+        warm_queries: usize,
+        #[arg(long, default_value_t = 100_000)]
+        max_files: usize,
     },
 }
 
@@ -239,6 +250,54 @@ struct BenchmarkReport {
     failures: Vec<BenchmarkFailure>,
 }
 
+#[derive(Debug, Serialize)]
+struct PerformanceQueryMetrics {
+    query: String,
+    cold_connection_latency_ms: f64,
+    cold_hit_count: usize,
+    cold_has_evidence: bool,
+    first_source_uri: Option<String>,
+    warm_queries: usize,
+    warm_median_latency_ms: f64,
+    warm_p95_latency_ms: f64,
+    warm_min_latency_ms: f64,
+    warm_max_latency_ms: f64,
+}
+
+#[derive(Debug, Serialize)]
+struct PerformanceIndexMetrics {
+    discovered: u64,
+    indexed: u64,
+    unchanged: u64,
+    skipped: u64,
+    failures: usize,
+    source_bytes_read: u64,
+    elapsed_ms: f64,
+    artifacts_per_second: f64,
+    completeness: f64,
+}
+
+#[derive(Debug, Serialize)]
+struct PerformanceRebuildMetrics {
+    elapsed_ms: f64,
+    report: loom_core::FtsRepairReport,
+}
+
+#[derive(Debug, Serialize)]
+struct PerformanceReport {
+    schema_version: u32,
+    corpus: String,
+    max_files: usize,
+    cache_conditions: &'static str,
+    open_elapsed_ms: f64,
+    index: PerformanceIndexMetrics,
+    query: PerformanceQueryMetrics,
+    fts_rebuild: PerformanceRebuildMetrics,
+    stats: loom_core::LibraryStats,
+    database_bytes: u64,
+    database_bytes_per_source_byte: f64,
+}
+
 fn main() -> Result<(), Box<dyn Error>> {
     let arguments = Arguments::parse();
     match arguments.command {
@@ -345,7 +404,154 @@ fn main() -> Result<(), Box<dyn Error>> {
             );
         }
         Command::Benchmark { corpus, queries } => run_benchmark(&corpus, &queries)?,
+        Command::Performance {
+            corpus,
+            query,
+            warm_queries,
+            max_files,
+        } => run_performance(
+            &arguments.database,
+            &corpus,
+            &query,
+            warm_queries,
+            max_files,
+        )?,
     }
+    Ok(())
+}
+
+fn run_performance(
+    database: &Path,
+    corpus: &Path,
+    query: &str,
+    warm_queries: usize,
+    max_files: usize,
+) -> Result<(), Box<dyn Error>> {
+    if query.trim().is_empty() {
+        return Err("performance query must not be empty".into());
+    }
+    if max_files == 0 {
+        return Err("performance max-files must be greater than zero".into());
+    }
+    let corpus = corpus.canonicalize()?;
+    let warm_queries = warm_queries.clamp(1, 1_000);
+    let limits = LibraryLimits {
+        max_files_per_request: max_files,
+        ..LibraryLimits::default()
+    };
+
+    let open_started = Instant::now();
+    let library = Library::open_with_limits(database, limits)?;
+    let open_elapsed_ms = open_started.elapsed().as_secs_f64() * 1_000.0;
+
+    let index_started = Instant::now();
+    let index = library.index_path(&corpus)?;
+    let index_elapsed_ms = index_started.elapsed().as_secs_f64() * 1_000.0;
+    if !index.failures.is_empty() {
+        return Err(format!(
+            "performance corpus had indexing failures: {:?}",
+            index.failures
+        )
+        .into());
+    }
+    let supported = index.discovered.saturating_sub(index.skipped);
+    let completeness = if supported == 0 {
+        1.0
+    } else {
+        (index.indexed + index.unchanged) as f64 / supported as f64
+    };
+
+    // The first query is a cold-connection observation. We deliberately do not attempt to drop
+    // the operating-system page cache: that would require privileged, destructive operations on
+    // macOS and would not be a portable product check. The report names this condition explicitly.
+    let cold_started = Instant::now();
+    let cold_hits = library.search(&SearchRequest {
+        text: query.to_string(),
+        limit: 5,
+    })?;
+    let cold_connection_latency_ms = cold_started.elapsed().as_secs_f64() * 1_000.0;
+    let first_source_uri = cold_hits.first().map(|hit| hit.source_uri.clone());
+    let cold_has_evidence = !cold_hits.is_empty()
+        && cold_hits.iter().all(|hit| {
+            !hit.source_uri.is_empty()
+                && !hit.artifact_id.is_empty()
+                && !hit.version_id.is_empty()
+                && !hit.passage_id.is_empty()
+        });
+
+    let mut warm_latencies = Vec::with_capacity(warm_queries);
+    for _ in 0..warm_queries {
+        let started = Instant::now();
+        let hits = library.search(&SearchRequest {
+            text: query.to_string(),
+            limit: 5,
+        })?;
+        if hits.is_empty() || hits.iter().any(|hit| hit.source_uri.is_empty()) {
+            return Err("performance query lost its evidence-backed hit".into());
+        }
+        warm_latencies.push(started.elapsed().as_secs_f64() * 1_000.0);
+    }
+    warm_latencies.sort_by(f64::total_cmp);
+    let warm_median_latency_ms = median(&warm_latencies);
+    let warm_p95_latency_ms = percentile(&warm_latencies, 0.95);
+    let warm_min_latency_ms = warm_latencies.first().copied().unwrap_or(0.0);
+    let warm_max_latency_ms = warm_latencies.last().copied().unwrap_or(0.0);
+
+    let rebuild_started = Instant::now();
+    let rebuild = library.repair_fts()?;
+    let rebuild_elapsed_ms = rebuild_started.elapsed().as_secs_f64() * 1_000.0;
+    let stats = library.stats()?;
+    let database_bytes = database_size(database);
+    let database_bytes_per_source_byte = if index.bytes_read == 0 {
+        0.0
+    } else {
+        database_bytes as f64 / index.bytes_read as f64
+    };
+    let artifacts_per_second = if index_elapsed_ms <= 0.0 {
+        0.0
+    } else {
+        index.indexed as f64 / (index_elapsed_ms / 1_000.0)
+    };
+
+    let report = PerformanceReport {
+        schema_version: 1,
+        corpus: corpus.display().to_string(),
+        max_files,
+        cache_conditions:
+            "cold = first query after open/index; warm = repeated query; OS page cache not dropped",
+        open_elapsed_ms,
+        index: PerformanceIndexMetrics {
+            discovered: index.discovered,
+            indexed: index.indexed,
+            unchanged: index.unchanged,
+            skipped: index.skipped,
+            failures: index.failures.len(),
+            source_bytes_read: index.bytes_read,
+            elapsed_ms: index_elapsed_ms,
+            artifacts_per_second,
+            completeness,
+        },
+        query: PerformanceQueryMetrics {
+            query: query.to_string(),
+            cold_connection_latency_ms,
+            cold_hit_count: cold_hits.len(),
+            cold_has_evidence,
+            first_source_uri,
+            warm_queries,
+            warm_median_latency_ms,
+            warm_p95_latency_ms,
+            warm_min_latency_ms,
+            warm_max_latency_ms,
+        },
+        fts_rebuild: PerformanceRebuildMetrics {
+            elapsed_ms: rebuild_elapsed_ms,
+            report: rebuild,
+        },
+        stats,
+        database_bytes,
+        database_bytes_per_source_byte,
+    };
+    println!("{}", serde_json::to_string_pretty(&report)?);
     Ok(())
 }
 

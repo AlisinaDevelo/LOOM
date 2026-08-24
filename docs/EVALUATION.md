@@ -78,6 +78,33 @@ ranking, query expansion, and duplicate handling.
 These checks are observations of the current checkout, not a promise that every environment or
 future commit will pass.
 
+## Large-library performance gate
+
+Issue 0207 has a device-reproducible scale harness at
+[`scripts/performance-budget.py`](../scripts/performance-budget.py). It generates a deterministic,
+rights-clean corpus at 10,000 and 100,000 artifacts (70% Markdown and 30% plain text), selects one
+corpus root explicitly, and invokes the in-process CLI performance command. The generator records
+its version, seed, shard shape, source bytes, query marker, and aggregate SHA-256 manifest; the
+100,000-file shape uses explicit `--max-files 100000` rather than changing the normal 20,000-file
+request boundary.
+
+Run it on the target Mac after building `target/debug/loom`:
+
+```text
+python3 scripts/performance-budget.py \
+  --evidence-dir /tmp/loom-performance-evidence \
+  --loom target/debug/loom \
+  --runs 2
+```
+
+Each run reports open, indexing, and FTS5 derivative-rebuild time, indexing throughput, source and
+database bytes, amplification, first-query and repeated-query latency, canonical counts, and a
+process-level `/usr/bin/time -lp` profile (user/system CPU and maximum RSS). “Cold” is the first
+query after a new process/SQLite connection; “warm” is repeated in the same process. The harness
+does not flush the macOS page cache or claim battery-energy measurement. It retains run variance,
+limitations, pre-optimization budgets, and a release-gate disposition for every exceeded budget.
+The full `verify-device.sh` pipe runs this gate before clearing Rust build output.
+
 ## Protocol
 
 When changing ingestion, segmentation, ranking, or evidence rendering:
