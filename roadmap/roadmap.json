@@ -501,7 +501,7 @@
     {
       "id": "0110",
       "title": "Define the v0.1 activation and recovery gate",
-      "status": "ready",
+      "status": "review",
       "quarter": "Q02",
       "phase": "v0.1 Thread",
       "workstream": "product-evaluation",
