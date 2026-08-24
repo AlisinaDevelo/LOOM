@@ -360,7 +360,7 @@
     {
       "id": "0105",
       "title": "Establish retrieval benchmark v0",
-      "status": "backlog",
+      "status": "review",
       "quarter": "Q01",
       "phase": "v0.1 Thread",
       "workstream": "foundation",
@@ -388,7 +388,7 @@
     {
       "id": "0106",
       "title": "Build the Tauri desktop truth path",
-      "status": "backlog",
+      "status": "review",
       "quarter": "Q01",
       "phase": "v0.1 Thread",
       "workstream": "foundation",
@@ -416,7 +416,7 @@
     {
       "id": "0107",
       "title": "Add CI and supply-chain baseline checks",
-      "status": "backlog",
+      "status": "review",
       "quarter": "Q01",
       "phase": "v0.1 Thread",
       "workstream": "foundation",
@@ -445,7 +445,7 @@
     {
       "id": "0108",
       "title": "Make indexing crash-safe and resumable",
-      "status": "backlog",
+      "status": "review",
       "quarter": "Q02",
       "phase": "v0.1 Thread",
       "workstream": "foundation",
@@ -473,7 +473,7 @@
     {
       "id": "0109",
       "title": "Add incremental filesystem observation and reconciliation",
-      "status": "backlog",
+      "status": "review",
       "quarter": "Q02",
       "phase": "v0.1 Thread",
       "workstream": "foundation",

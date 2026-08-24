@@ -2,8 +2,9 @@
 
 This artifact records the local CI, dependency, secret-scan, and release-hygiene verification
 for issue [#16](https://github.com/AlisinaDevelo/LOOM/issues/16). The change is stacked on desktop
-truth PR [#168](https://github.com/AlisinaDevelo/LOOM/pull/168); issue #16 stays open until review,
-merge, and the same reproduction against the merged `main` SHA.
+truth PR [#168](https://github.com/AlisinaDevelo/LOOM/pull/168); issue #16 remains open until
+independent review and a protected-main policy are available. The current merged-main reproduction
+is recorded below.
 
 ## Device and toolchain
 
@@ -73,5 +74,27 @@ tauri-build.log         sha256:48a383632604f9c3df642514113aba8d760cff9f38e88e639
 
 This run proves local parity and supply-chain hygiene on the specified Mac; it does not claim a
 hosted Actions result, a cargo-audit result, notarization, a third-party security audit, or a
-different OS/architecture. Review, protected-main merge, the same reproduction against the merged
-SHA, and final issue-linked evidence remain required before #16 can close.
+different OS/architecture. The post-merge reproduction below satisfies the code and target-device
+evidence portion; independent review and a protected-main policy remain required before #16 can
+close.
+
+## Merged-main reproduction
+
+The same target-device harness was rerun against runtime-tested merged `main` commit
+`eee1236710b98375e86b12187d545ed451ee2b7c` on the Mac specified above. The final main tip
+`8af236898ae17d898faa82d4acf351c322ac1898` adds only documentation and roadmap metadata after
+that runtime-tested commit; no CI/security source changed.
+
+- Verification directory: `/tmp/loom-0110-main-device.QLkKl1`
+- Harness summary SHA-256: `45bc997dcb26b8bc6cbd63a09fa17aed6c5d4ae968ef349be473b0b034e94e70`
+- Commands SHA-256: `d840925fb008af9101dc3121870b79960c1b6924451df17a7851f2f6132bb209`
+- Log manifest: `/tmp/loom-0110-main-device.QLkKl1/log-sha256.txt`
+- Log manifest SHA-256: `ed539c48e8c9b648f0ae341ddf37f02107d5aacff5d5e2a19ae0d28612c57d64`
+
+The full local pipe passed: format, warnings-denied Clippy, workspace tests, Rust 1.88 MSRV
+check/tests, `npm ci`, `npm run check`, retrieval benchmark, semantic contract, local gitleaks
+and dependency checks, Tauri debug build, and mixed-corpus failure/recovery. The local security
+run scanned the repository with no leaks and npm reported zero vulnerabilities; this does not
+claim cargo-audit because it is not installed on the device. No hosted CI or unavailable hardware
+substituted for this target-device evidence. Future desktop captures must be cropped to the
+relevant evidence panel.

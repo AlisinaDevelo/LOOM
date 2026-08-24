@@ -3,7 +3,8 @@
 This artifact records the retrieval benchmark v0 schema, threshold gate, and reproducibility
 verification for issue [#14](https://github.com/AlisinaDevelo/LOOM/issues/14). The change is stacked
 on the source-backed result contract in PR [#166](https://github.com/AlisinaDevelo/LOOM/pull/166);
-issue #14 stays open until review, merge, and a repeat against the merged `main` SHA.
+issue #14 remains open until independent review and a protected-main policy are available. The
+current merged-main reproduction is recorded below.
 
 ## Device and toolchain
 
@@ -70,5 +71,28 @@ tauri-build.log         sha256:a87dcd019b2d9c611bb8ec6357b3731c883dc2bb336912a1d
 
 This is a deterministic, rights-clean local-text smoke benchmark, not evidence of real-world
 retrieval quality. PDF/OCR, screenshots, saved web pages, passive capture, and unavailable
-hardware were not substituted or claimed. Review, protected-main merge, the same reproduction
-against the merged SHA, and final issue-linked evidence remain required before #14 can close.
+hardware were not substituted or claimed. The post-merge reproduction below satisfies the code and
+target-device evidence portion; independent review and a protected-main policy remain required
+before #14 can close.
+
+## Merged-main reproduction
+
+The same target-device harness was rerun against runtime-tested merged `main` commit
+`eee1236710b98375e86b12187d545ed451ee2b7c` on the Mac specified above. The final main tip
+`8af236898ae17d898faa82d4acf351c322ac1898` adds only documentation and roadmap metadata after
+that runtime-tested commit; no benchmark source changed.
+
+- Verification directory: `/tmp/loom-0110-main-device.QLkKl1`
+- Harness summary SHA-256: `45bc997dcb26b8bc6cbd63a09fa17aed6c5d4ae968ef349be473b0b034e94e70`
+- Commands SHA-256: `d840925fb008af9101dc3121870b79960c1b6924451df17a7851f2f6132bb209`
+- Log manifest: `/tmp/loom-0110-main-device.QLkKl1/log-sha256.txt`
+- Log manifest SHA-256: `ed539c48e8c9b648f0ae341ddf37f02107d5aacff5d5e2a19ae0d28612c57d64`
+
+The full local pipe passed: format, warnings-denied Clippy, workspace tests, Rust 1.88 MSRV
+check/tests, `npm ci`, `npm run check`, retrieval benchmark, semantic contract, local security
+scan, Tauri debug build, and mixed-corpus failure/recovery. The benchmark command reported the
+declared schema, threshold object, source-type breakdown, exact-source Recall@1/5 1.0, anchor
+precision 1.0, false-positive rate 0.0, completeness 1.0, median latency 0.185 ms, p95 latency
+0.518041 ms, and an empty failure list. Existing threshold-negative tests remain part of the
+retained Rust/fixture test evidence. No hosted CI or unavailable hardware substituted for this
+target-device evidence. Future desktop captures must be cropped to the relevant evidence panel.
