@@ -14,7 +14,7 @@ implementation contract for the pre-alpha slice, not a stable migration guarante
 | artifact_versions | Immutable content observations            | content_hash, hash_algorithm, byte_size, source mtime, extractor identity/version, status |
 | passages          | Normalized text and exact anchors         | artifact version, ordinal, text, text hash, JSON locator, character/line offsets          |
 | relationships     | Reserved source-to-source relationships   | source/target artifacts, optional evidence passage, method, confidence                    |
-| index_jobs        | Durable progress for one selected-root scan | discovery fingerprint, total/next unit, state, error, timestamps                         |
+| index_jobs        | Durable progress for one root scan        | discovery fingerprint, total/next unit, state, error, timestamps                          |
 
 The current extractor creates file locators. The schema also names URL and managed-copy locator
 kinds for future work; they are not part of the current supported input path.
