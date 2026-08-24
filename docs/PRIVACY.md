@@ -17,6 +17,8 @@ For a selected file or directory, the current path may store:
 - extractor identity and version;
 - for images, derived OCR text, pixel-region anchors, provider/model identity, confidence, EXIF
   orientation, and fixed-point display scale;
+- for an explicitly rebuilt semantic derivative, passage hashes, provider/model identity, vector
+  dimensions/revision, and encoded local vectors;
 - local timestamps and indexing statistics.
 
 Search queries are used in memory for the current search operation and are not a field in the
@@ -46,6 +48,9 @@ or content to the selected external application.
   accepted in this slice. Image OCR is local macOS Vision processing; it is disabled/purged as a
   user-visible policy and never uploads source bytes.
 - No automatic cloud upload or third-party model processing occurs in the current path.
+- Semantic commands run the current deterministic provider locally and never download a model or
+  send passage text to a network service. The vector tables are derived and can be dropped without
+  deleting canonical source records.
 - Revoking a saved scope disables future reconciliation and hides its active artifacts from search;
   canonical historical rows remain until a future retention/purge policy is implemented.
 - The desktop stop control requests cooperative cancellation at a bounded indexing-unit boundary;

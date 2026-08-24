@@ -47,6 +47,20 @@ enum Command {
     OcrDisable,
     /// Purge derived OCR records without changing the enable policy.
     OcrPurge,
+    /// Print the disposable semantic-index manifest and health state.
+    SemanticStatus,
+    /// Rebuild the versioned local semantic derivative from canonical passages.
+    SemanticRebuild,
+    /// Measure local provider candidates on the active passage corpus.
+    SemanticBenchmark,
+    /// Delete semantic vectors and their manifest without changing canonical records.
+    SemanticDrop,
+    /// Search the rebuilt semantic derivative and print evidence-bound candidates.
+    SemanticSearch {
+        query: String,
+        #[arg(long, default_value_t = 10)]
+        limit: u32,
+    },
     /// Evaluate exact-artifact recovery on a rights-clean JSONL query set.
     Benchmark {
         #[arg(long)]
@@ -229,6 +243,41 @@ fn main() -> Result<(), Box<dyn Error>> {
             println!(
                 "{}",
                 serde_json::to_string_pretty(&library.purge_ocr_records()?)?
+            );
+        }
+        Command::SemanticStatus => {
+            let library = Library::open(arguments.database)?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&library.semantic_status()?)?
+            );
+        }
+        Command::SemanticRebuild => {
+            let library = Library::open(arguments.database)?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&library.semantic_rebuild()?)?
+            );
+        }
+        Command::SemanticBenchmark => {
+            let library = Library::open(arguments.database)?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&library.semantic_provider_benchmark()?)?
+            );
+        }
+        Command::SemanticDrop => {
+            let library = Library::open(arguments.database)?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&library.semantic_drop()?)?
+            );
+        }
+        Command::SemanticSearch { query, limit } => {
+            let library = Library::open(arguments.database)?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&library.semantic_search(&query, limit)?)?
             );
         }
         Command::Benchmark { corpus, queries } => run_benchmark(&corpus, &queries)?,

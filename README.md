@@ -43,8 +43,11 @@ path, content hash, excerpt, and exact text or pixel-region anchor with every re
   durable checkpoint resumes the remainder.
 - The retrieval smoke fixture is the rights-clean synthetic corpus in benchmarks/retrieval/v0/.
 
-Embeddings, a semantic index, browser capture, cloud sync, accounts, multi-device sync, and mobile
-clients are not part of this supported slice.
+The semantic derivative contract is available through explicit CLI commands. It uses a
+deterministic local baseline, stores only rebuildable vectors, and fails closed when its manifest
+or canonical passage digest is stale. It is not a quality claim or a replacement for lexical
+evidence. Browser capture, cloud sync, accounts, multi-device sync, and mobile clients are not
+part of this supported slice.
 
 ## Quick start
 
@@ -62,6 +65,8 @@ Index a selected folder and search it from the CLI:
 cargo run --locked -p loom-cli -- --database .loom/library.sqlite3 index ./notes
 cargo run --locked -p loom-cli -- --database .loom/library.sqlite3 search "retry anomaly"
 cargo run --locked -p loom-cli -- --database .loom/library.sqlite3 stats
+cargo run --locked -p loom-cli -- --database .loom/library.sqlite3 semantic-rebuild
+cargo run --locked -p loom-cli -- --database .loom/library.sqlite3 semantic-search "retry anomaly"
 ```
 
 Start the desktop development shell:
