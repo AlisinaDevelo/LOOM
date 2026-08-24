@@ -810,7 +810,7 @@
     {
       "id": "0205",
       "title": "Add safe temporal and source-type query filters",
-      "status": "backlog",
+      "status": "review",
       "quarter": "Q04",
       "phase": "v0.2 Needle",
       "workstream": "foundation",
