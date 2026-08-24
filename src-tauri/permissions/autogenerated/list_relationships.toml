@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-list-relationships"
+description = "Enables the list_relationships command without any pre-configured scope."
+commands.allow = ["list_relationships"]
+
+[[permission]]
+identifier = "deny-list-relationships"
+description = "Denies the list_relationships command without any pre-configured scope."
+commands.deny = ["list_relationships"]

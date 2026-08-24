@@ -15,6 +15,7 @@
     "allow-reconcile-approved-roots",
     "allow-list-source-roots",
     "allow-revoke-source-root",
+    "allow-list-relationships",
     "allow-search",
     "allow-library-stats",
     "allow-ocr-status",

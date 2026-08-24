@@ -26,4 +26,26 @@ export default tseslint.config(
       ],
     },
   },
+  {
+    files: ["browser-extension/src/**/*.js"],
+    languageOptions: {
+      ecmaVersion: "latest",
+      globals: {
+        ...globals.browser,
+        TextDecoder: "readonly",
+        TextEncoder: "readonly",
+        atob: "readonly",
+        btoa: "readonly",
+        crypto: "readonly",
+        structuredClone: "readonly",
+      },
+    },
+  },
+  {
+    files: ["browser-extension/test/**/*.js"],
+    languageOptions: {
+      ecmaVersion: "latest",
+      globals: globals.node,
+    },
+  },
 );

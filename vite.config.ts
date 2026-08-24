@@ -10,6 +10,14 @@ export default defineConfig(async () => ({
   test: {
     environment: "jsdom",
     setupFiles: ["./src/test/setup.ts"],
+    // The browser extension suite uses Node's built-in test runner and has
+    // its own npm script; keep Vitest from treating it as an empty suite.
+    exclude: [
+      "**/node_modules/**",
+      "**/target/**",
+      "**/.git/**",
+      "**/browser-extension/test/**",
+    ],
   },
 
   // Vite options tailored for Tauri development and only applied in `tauri dev` or `tauri build`

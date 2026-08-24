@@ -1,6 +1,6 @@
 # Data model
 
-This document describes the schema currently created by LOOM schema version 5. The supported
+This document describes the schema currently created by LOOM schema version 6. The supported
 version matrix and migration policy are maintained in [SCHEMA_COMPATIBILITY.md](SCHEMA_COMPATIBILITY.md).
 
 ## Identity and source records
@@ -13,7 +13,7 @@ version matrix and migration policy are maintained in [SCHEMA_COMPATIBILITY.md](
 |artifact_locators|Resolves an artifact to a source location|kind, locator, active, first/last seen timestamps|
 |artifact_versions|Immutable content observations|content_hash, byte_size, mtime, extractor/version, page_count, parse_warnings_json, extraction_metadata_json, status|
 |passages|Normalized text and exact anchors|artifact version, ordinal, text, text hash, JSON locator, character/line/pixel offsets|
-|relationships|Reserved source-to-source relationships|source/target artifacts, optional evidence passage, method, confidence|
+|relationships|Typed source-to-source relationships|source/target artifacts, kind, origin, optional evidence passage, method, confidence, metadata, relationship schema version|
 |index_jobs|Durable progress for one root scan|discovery fingerprint, total/next unit, state, error, timestamps|
 |semantic_index_meta|One disposable semantic-index manifest|provider/model/tokenizer, dimension, normalization, build parameters, revision, canonical digest/counts, vector bytes|
 |semantic_embeddings|Rebuildable vector per active passage|passage hash, provider/model/tokenizer, dimension, normalization, build parameters, revision, encoded vector bytes|
@@ -58,6 +58,22 @@ dimensions, EXIF orientation, fixed-point display scale, and OCR confidence. `ex
 records the local provider, provider version, model revision, dimensions, orientation, scale, and
 region count. The source image bytes remain at the original locator; LOOM stores only derived OCR
 text and metadata.
+
+## Relationship records
+
+`relationships` is a canonical, source-to-source edge table. Every row has a relationship envelope
+version, a typed known kind (`saved_from`, `screenshot_of`, `duplicate_of`, `previous_version_of`,
+or `related`) or an `Unknown` string preserved verbatim for future readers, an origin (`observed`,
+`inferred`, or `user_confirmed`), the method that produced it, optional passage evidence, optional
+confidence in the inclusive range 0–1, creation time, and bounded JSON metadata. New edges require
+both endpoint artifacts to exist; supplied evidence must belong to one endpoint. Repeating the
+same source/target/kind/origin/method observation returns the existing row without replacing its
+evidence.
+
+The core exposes a bounded relationship listing that joins both endpoint artifacts to their active
+source URI, version ID, content hash, title, media type, and lifecycle state. The desktop viewer
+uses that projection to traverse a verified result to its related source and current version without
+introducing a graph database or treating inferred edges as confirmed facts.
 
 ## Lexical index
 
@@ -125,11 +141,12 @@ erasure and a user-facing retention policy are not implemented.
 
 ## Compatibility
 
-The schema is currently version 5. LOOM validates the expected shape before changing a known
+The schema is currently version 6. LOOM validates the expected shape before changing a known
 database, refuses missing or unknown version markers, and fails malformed versions with a named
-reason. Version 2 databases migrate transactionally by adding the `index_jobs` table and recording
-version 5; the populated fixture and preservation checks are documented in
-[SCHEMA_COMPATIBILITY.md](SCHEMA_COMPATIBILITY.md). Pre-alpha version 1 databases are rejected
+reason. Version 2 databases migrate transactionally by adding the `index_jobs` table, relationship
+envelope defaults, and recording version 6; the populated fixture and preservation checks are
+documented in [SCHEMA_COMPATIBILITY.md](SCHEMA_COMPATIBILITY.md). Pre-alpha version 1 databases are
+rejected
 because their content-version uniqueness contract omitted extractor identity; users of that
 unpublished format must rebuild the local index from source files. Changes to identity, content
 hashing, anchors, or FTS5 maintenance require an ordered migration plan, updated fixtures, and an

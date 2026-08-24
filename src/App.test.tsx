@@ -98,6 +98,40 @@ const lowConfidenceImageHit = {
   },
 };
 
+const relationshipView = {
+  relationship: {
+    id: "44444444-4444-4444-8444-444444444444",
+    schema_version: 1,
+    source_artifact_id: hit.artifact_id,
+    target_artifact_id: "55555555-5555-4555-8555-555555555555",
+    kind: "saved_from",
+    origin: "inferred" as const,
+    evidence_passage_id: hit.passage_id,
+    confidence: 0.85,
+    method: "browser-capture-v1",
+    metadata: { redirects: 1 },
+    created_at: "2026-08-25T00:00:00Z",
+  },
+  source: {
+    artifact_id: hit.artifact_id,
+    title: hit.title,
+    media_type: hit.media_type,
+    source_uri: hit.source_uri,
+    version_id: hit.version_id,
+    content_hash: hit.content_hash,
+    state: "active",
+  },
+  target: {
+    artifact_id: "55555555-5555-4555-8555-555555555555",
+    title: "saved-page.html",
+    media_type: "text/html",
+    source_uri: "https://example.test/research",
+    version_id: "66666666-6666-4666-8666-666666666666",
+    content_hash: "blake3:abcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcd",
+    state: "active",
+  },
+};
+
 describe("desktop truth path", () => {
   afterEach(() => {
     cleanup();
@@ -244,6 +278,47 @@ describe("desktop truth path", () => {
           content_hash: pdfHit.content_hash,
         },
       });
+    });
+  });
+
+  it("traverses a verified result through source-backed relationship endpoints", async () => {
+    const evidenceView = {
+      artifact_id: hit.artifact_id,
+      version_id: hit.version_id,
+      passage_id: hit.passage_id,
+      title: hit.title,
+      media_type: hit.media_type,
+      source_uri: hit.source_uri,
+      content_hash: hit.content_hash,
+      passage_text: "Serializable isolation prevents retry anomalies",
+      anchor: hit.anchor,
+      extractor_id: "loom.text",
+      extractor_version: "0.1.0",
+      extraction_metadata: {},
+    };
+    invokeMock.mockImplementation(async (command) => {
+      if (command === "reconcile_approved_roots") return {};
+      if (command === "list_source_roots") return [];
+      if (command === "library_stats") return readyStats;
+      if (command === "search") return [hit];
+      if (command === "resolve_evidence") return evidenceView;
+      if (command === "list_relationships") return [relationshipView];
+      throw new Error(`unexpected command: ${command}`);
+    });
+
+    render(<App />);
+    const input = screen.getByRole("textbox", { name: "Search your local sources" });
+    fireEvent.change(input, { target: { value: "retry anomalies" } });
+    fireEvent.submit(screen.getByRole("search"));
+    fireEvent.click(await screen.findByRole("button", { name: "View evidence" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Show relationships" }));
+
+    expect(await screen.findByRole("heading", { name: "Related source records" })).toBeInTheDocument();
+    expect(screen.getByText("saved_from")).toBeInTheDocument();
+    expect(screen.getByText("saved-page.html")).toBeInTheDocument();
+    expect(screen.getByText("method browser-capture-v1 · confidence 85.0% · evidence 33333333-333…")).toBeInTheDocument();
+    await waitFor(() => {
+      expect(invokeMock).toHaveBeenCalledWith("list_relationships", { artifactId: hit.artifact_id });
     });
   });
 

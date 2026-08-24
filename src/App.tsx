@@ -103,6 +103,41 @@ type EvidenceState = {
   error?: string;
 };
 
+type RelationshipEndpoint = {
+  artifact_id: string;
+  title: string;
+  media_type: string;
+  source_uri: string | null;
+  version_id: string | null;
+  content_hash: string | null;
+  state: string;
+};
+
+type RelationshipView = {
+  relationship: {
+    id: string;
+    schema_version: number;
+    source_artifact_id: string;
+    target_artifact_id: string;
+    kind: string;
+    origin: "observed" | "inferred" | "user_confirmed";
+    evidence_passage_id: string | null;
+    confidence: number | null;
+    method: string;
+    metadata: Record<string, unknown>;
+    created_at: string;
+  };
+  source: RelationshipEndpoint;
+  target: RelationshipEndpoint;
+};
+
+type RelationshipState = {
+  artifactId: string;
+  status: "loading" | "ready" | "error";
+  items: RelationshipView[];
+  error?: string;
+};
+
 type OcrStatus = {
   enabled: boolean;
   derived_versions: number;
@@ -170,6 +205,58 @@ function sourceRootStatusLabel(status: SourceRootStatus): string {
   }[status];
 }
 
+function RelationshipPanel({ state }: { state: RelationshipState }) {
+  if (state.status === "loading") {
+    return <p className="relationship-status" role="status">Loading source relationships…</p>;
+  }
+  if (state.status === "error") {
+    return <p className="relationship-status" role="alert">{state.error ?? "Relationships are unavailable."}</p>;
+  }
+  if (state.items.length === 0) {
+    return <p className="relationship-status">No source relationships recorded for this artifact.</p>;
+  }
+  return (
+    <section className="relationship-panel" aria-labelledby="relationship-panel-heading">
+      <div className="relationship-panel-heading">
+        <div>
+          <p className="eyebrow">Provenance graph</p>
+          <h3 id="relationship-panel-heading">Related source records</h3>
+        </div>
+        <span>{state.items.length} edge{state.items.length === 1 ? "" : "s"}</span>
+      </div>
+      <ol className="relationship-list">
+        {state.items.map((item) => {
+          const relation = item.relationship;
+          return (
+            <li key={relation.id} className="relationship-card">
+              <div className="relationship-card-heading">
+                <strong>{relation.kind}</strong>
+                <span>{relation.origin.replace("_", " ")}</span>
+              </div>
+              <div className="relationship-endpoints">
+                {[{ label: "Source", endpoint: item.source }, { label: "Target", endpoint: item.target }].map(({ label, endpoint }) => (
+                  <div key={`${relation.id}-${label}`} className="relationship-endpoint">
+                    <span className="relationship-endpoint-label">{label}</span>
+                    <strong>{endpoint.title}</strong>
+                    <span className="relationship-endpoint-state">{endpoint.state}</span>
+                    <code>{endpoint.version_id ? `version ${endpoint.version_id.slice(0, 12)}…` : "no active version"}</code>
+                    <p title={endpoint.source_uri ?? undefined}>{endpoint.source_uri ? compactPath(endpoint.source_uri) : "source locator unavailable"}</p>
+                  </div>
+                ))}
+              </div>
+              <p className="relationship-meta">
+                method {relation.method}
+                {relation.confidence === null ? " · confidence unknown" : ` · confidence ${(relation.confidence * 100).toFixed(1)}%`}
+                {relation.evidence_passage_id ? ` · evidence ${relation.evidence_passage_id.slice(0, 12)}…` : " · no passage evidence"}
+              </p>
+            </li>
+          );
+        })}
+      </ol>
+    </section>
+  );
+}
+
 type EvidenceViewerProps = {
   state: EvidenceState;
   zoom: number;
@@ -178,6 +265,8 @@ type EvidenceViewerProps = {
   onRotationChange: (rotation: number) => void;
   onClose: () => void;
   onOpenOriginal: (hit: SearchHit) => void;
+  relationshipState: RelationshipState | null;
+  onLoadRelationships: (artifactId: string) => void;
 };
 
 function EvidenceViewer({
@@ -188,6 +277,8 @@ function EvidenceViewer({
   onRotationChange,
   onClose,
   onOpenOriginal,
+  relationshipState,
+  onLoadRelationships,
 }: EvidenceViewerProps) {
   const headingRef = useRef<HTMLHeadingElement>(null);
   const view = state.view;
@@ -309,7 +400,17 @@ function EvidenceViewer({
         <button type="button" className="open-button" onClick={() => onOpenOriginal(state.hit)}>
           Open original <span aria-hidden="true">↗</span>
         </button>
+        <button
+          type="button"
+          className="viewer-control"
+          onClick={() => onLoadRelationships(view.artifact_id)}
+          aria-expanded={relationshipState?.artifactId === view.artifact_id && relationshipState.status === "ready"}
+          aria-controls="relationship-panel-heading"
+        >
+          {relationshipState?.artifactId === view.artifact_id ? "Refresh relationships" : "Show relationships"}
+        </button>
       </div>
+      {relationshipState?.artifactId === view.artifact_id && <RelationshipPanel state={relationshipState} />}
     </section>
   );
 }
@@ -327,6 +428,7 @@ function App() {
   const [busy, setBusy] = useState<"index" | "search" | "scope" | "ocr" | "evidence" | null>(null);
   const [sourceRoots, setSourceRoots] = useState<SourceRootInfo[]>([]);
   const [evidenceState, setEvidenceState] = useState<EvidenceState | null>(null);
+  const [relationshipState, setRelationshipState] = useState<RelationshipState | null>(null);
   const [evidenceZoom, setEvidenceZoom] = useState(1);
   const [evidenceRotation, setEvidenceRotation] = useState(0);
   const [notice, setNotice] = useState("Ready. LOOM does not upload your library.");
@@ -650,6 +752,16 @@ function App() {
     }
   };
 
+  const loadRelationships = async (artifactId: string) => {
+    setRelationshipState({ artifactId, status: "loading", items: [] });
+    try {
+      const items = await invoke<RelationshipView[]>("list_relationships", { artifactId });
+      setRelationshipState({ artifactId, status: "ready", items });
+    } catch (caught) {
+      setRelationshipState({ artifactId, status: "error", items: [], error: errorMessage(caught) });
+    }
+  };
+
   const headerMessage = useMemo(
     () =>
       stats.artifacts === 0
@@ -892,8 +1004,13 @@ function App() {
                 rotation={evidenceRotation}
                 onZoomChange={(next) => setEvidenceZoom(Math.max(0.5, Math.min(2, next)))}
                 onRotationChange={(next) => setEvidenceRotation(((next % 360) + 360) % 360)}
-                onClose={() => setEvidenceState(null)}
+                onClose={() => {
+                  setEvidenceState(null);
+                  setRelationshipState(null);
+                }}
                 onOpenOriginal={openArtifact}
+                relationshipState={relationshipState}
+                onLoadRelationships={loadRelationships}
               />
             )}
             <ol>
