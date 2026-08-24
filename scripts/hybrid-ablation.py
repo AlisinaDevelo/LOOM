@@ -216,6 +216,7 @@ def main() -> int:
                 "exact_match_weight": 0.10,
                 "path_weight": 0.05,
                 "recency_weight": 0.05,
+                "semantic_only_admission": "at least half of distinct query tokens in passage, title, or source URI",
             },
         },
         "gate": {

@@ -66,7 +66,7 @@ fn fusion_is_deterministic_and_retains_per_signal_evidence() {
             "semantic-only",
             "Recovery notes",
             "/corpus/recovery-notes.txt",
-            "Recovery can resume from a durable checkpoint.",
+            "Retry recovery can resume from a durable checkpoint.",
             None,
             Some(2),
             None,
@@ -141,6 +141,38 @@ fn exact_path_and_recency_signals_are_bounded_and_explainable() {
 }
 
 #[test]
+fn unsupported_semantic_only_candidates_are_not_admitted() {
+    let ranked = fuse_hybrid_candidates(
+        "retry anomalies",
+        vec![
+            candidate(
+                "expected",
+                "Retry notes",
+                "/corpus/retry.txt",
+                "Retry anomalies need an exact source anchor.",
+                Some(1),
+                Some(1),
+                None,
+            ),
+            candidate(
+                "unsupported",
+                "Database notes",
+                "/corpus/database.txt",
+                "Durable checkpoints keep recovery safe.",
+                None,
+                Some(1),
+                None,
+            ),
+        ],
+        &HybridRankConfig::default(),
+    )
+    .unwrap();
+
+    assert_eq!(ranked.len(), 1);
+    assert_eq!(ranked[0].passage_id, "expected");
+}
+
+#[test]
 fn invalid_or_empty_queries_fail_closed() {
     let input = candidate(
         "one",
@@ -181,6 +213,7 @@ fn library_hybrid_search_is_evidence_bound_and_requires_a_healthy_semantic_index
 
     let hits = library.hybrid_search("retry anomalies", 5).unwrap();
     assert!(!hits.is_empty());
+    assert_eq!(hits.len(), 1);
     let hit = &hits[0];
     assert!(hit.source_uri.ends_with("retry.md"));
     assert_eq!(hit.signals.lexical_rank, Some(1));
