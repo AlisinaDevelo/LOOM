@@ -331,7 +331,7 @@
     {
       "id": "0104",
       "title": "Deliver evidence-first lexical search and exact source opening",
-      "status": "backlog",
+      "status": "review",
       "quarter": "Q01",
       "phase": "v0.1 Thread",
       "workstream": "foundation",

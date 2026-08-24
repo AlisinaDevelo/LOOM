@@ -3,8 +3,9 @@
 This artifact records the source-backed search-result and exact-open verification for issue
 [#13](https://github.com/AlisinaDevelo/LOOM/issues/13). The change is stacked on the canonical
 store and bounded-ingestion work in PRs [#163](https://github.com/AlisinaDevelo/LOOM/pull/163) and
-[#164](https://github.com/AlisinaDevelo/LOOM/pull/164); issue #13 stays open until review, merge,
-and a repeat against the merged `main` SHA.
+[#164](https://github.com/AlisinaDevelo/LOOM/pull/164). The original implementation run remains
+retained for history; the current merged-main reproduction is recorded below. Issue #13 remains
+open until independent review and a protected-main policy are available.
 
 ## Device and toolchain
 
@@ -74,6 +75,33 @@ tauri-build.log          sha256:485c0cdd5f98d578c85ca61a6eaacfbb9a00b3437f3e9d75
 ## Limitations and closure gate
 
 This evidence covers the current local UTF-8 text/Markdown result contract. PDF/OCR, browser
-capture, passive capture, and unavailable hardware were not substituted or claimed. Review,
-protected-main merge, the same reproduction against the merged SHA, and final issue-linked
-evidence remain required before #13 can close.
+capture, passive capture, and unavailable hardware were not substituted or claimed. The post-merge
+reproduction below satisfies the code and target-device evidence portion; independent review and a
+protected-main policy remain required before #13 can close.
+
+## Merged-main reproduction
+
+The same target-device harness was rerun against runtime-tested merged `main` commit
+`eee1236710b98375e86b12187d545ed451ee2b7c` on the Mac specified above. The final main tip
+`459f9defaebc699fa231de9672e9cd855b77f65a` adds only documentation and roadmap metadata after
+that runtime-tested commit; no result-contract source changed.
+
+- Verification directory: `/tmp/loom-0110-main-device.QLkKl1`
+- Harness summary SHA-256: `45bc997dcb26b8bc6cbd63a09fa17aed6c5d4ae968ef349be473b0b034e94e70`
+- Commands SHA-256: `d840925fb008af9101dc3121870b79960c1b6924451df17a7851f2f6132bb209`
+- Log manifest: `/tmp/loom-0110-main-device.QLkKl1/log-sha256.txt`
+- Log manifest SHA-256: `ed539c48e8c9b648f0ae341ddf37f02107d5aacff5d5e2a19ae0d28612c57d64`
+
+The full local pipe passed: format, warnings-denied Clippy, workspace tests, Rust 1.88 MSRV
+check/tests, `npm ci`, `npm run check`, retrieval benchmark, semantic contract, local security
+scan, Tauri debug build, and mixed-corpus failure/recovery. The result-contract integration tests
+passed source-backed identity/anchor checks, unsafe-query rejection, stale tuple rejection, and
+mutation-negative coverage. Retrieval measured Recall@1/5 1.0, anchor precision 1.0,
+false-positive rate 0.0, completeness 1.0, median latency 0.185 ms, and p95 latency 0.518041 ms.
+
+The mixed corpus again reported `discovered=4`, `indexed=2`, `skipped=1`, and one bounded-size
+failure; the outside-root symlink remained unreachable. Replacing the oversized file recovered it
+on the next index with `indexed=1`, `unchanged=2`, `skipped=1`, no failures, and final stats of 3
+artifacts, 3 versions, 3 passages, and 250 indexed bytes. No hosted CI or unavailable hardware
+substituted for this target-device evidence. Any future desktop capture must be cropped to the
+relevant evidence panel.
