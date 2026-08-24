@@ -11,6 +11,7 @@ for the supported slice.
 | [0003](0003-derived-semantic-index.md) | Treat a semantic index as optional, derived, and rebuildable | Accepted for future work |
 | [0004](0004-mpl-2-license.md) | Use the Mozilla Public License 2.0 | Accepted |
 | [0005](0005-semantic-index-provider.md) | Use a deterministic local provider for the semantic-index contract | Accepted |
+| [0009](0009-browser-capture-protocol.md) | Bound browser capture to explicit, authenticated saves | Proposed |
 
 New decisions should state context, the decision, consequences, and what is deliberately out of
 scope. Superseding a decision should link the replacement record.
