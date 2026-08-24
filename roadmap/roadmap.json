@@ -958,7 +958,7 @@
     {
       "id": "0210",
       "title": "Build an adversarial PDF extraction corpus",
-      "status": "backlog",
+      "status": "done",
       "quarter": "Q04",
       "phase": "v0.2 Needle",
       "workstream": "ingestion-evidence",
