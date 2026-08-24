@@ -23,6 +23,8 @@ content hash, excerpt, and exact text anchor with every result.
 - A complete rescan hides deleted or unreadable sources. Opening a result verifies its artifact,
   version, and current BLAKE3 hash before handing the path to another application.
 - The CLI and Tauri desktop UI use the same Rust core and local database.
+- Saved desktop scopes persist as exact read-only locators. Missing, denied, moved, unsafe, and
+  revoked roots are visible; re-selection is explicit and never broadens access.
 - The retrieval smoke fixture is the rights-clean synthetic corpus in benchmarks/retrieval/v0/.
 
 PDF/OCR extraction, embeddings, a semantic index, browser capture, cloud sync, accounts,

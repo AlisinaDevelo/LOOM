@@ -121,6 +121,17 @@ command reconciles those roots again; missing or revoked roots return explicit f
 fall back to a broader directory. A native event adapter may optimize the hint source later, but
 the content-hash scan remains the correctness boundary.
 
+## Persisted source scopes
+
+`source_roots` stores the exact canonical locator selected by the user, its file/directory kind,
+enabled state, and timestamps. The desktop exposes a derived availability status without storing a
+write capability: available, missing, denied, wrong type, unsafe symlink, unavailable, or revoked.
+The current direct-distribution build uses explicit re-selection through the native picker rather
+than claiming a macOS security-scoped bookmark. Revocation disables future reconciliation and marks
+the root's active artifacts missing so they are not searchable or openable; canonical historical
+rows remain for a future retention/export policy. Re-selection is the only path that re-enables a
+revoked locator.
+
 ## References
 
 - [SQLite FTS5](https://www.sqlite.org/fts5.html)

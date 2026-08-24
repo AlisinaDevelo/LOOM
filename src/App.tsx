@@ -1,4 +1,4 @@
-import { FormEvent, useEffect, useMemo, useState } from "react";
+import { FormEvent, useCallback, useEffect, useMemo, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 
 import "./App.css";
@@ -19,6 +19,20 @@ type IndexReport = {
   skipped: number;
   bytes_read: number;
   failures: Array<{ source: string; reason: string }>;
+};
+
+type ObservationReport = {
+  failures?: Array<{ source: string; reason: string }>;
+};
+
+type SourceRootStatus = "available" | "missing" | "denied" | "wrong_type" | "unsafe" | "revoked" | "unavailable";
+
+type SourceRootInfo = {
+  locator: string;
+  kind: string;
+  enabled: boolean;
+  read_only: boolean;
+  status: SourceRootStatus;
 };
 
 type SearchHit = {
@@ -62,29 +76,58 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+function sourceRootStatusLabel(status: SourceRootStatus): string {
+  return {
+    available: "available",
+    missing: "missing — re-select",
+    denied: "denied — re-select",
+    wrong_type: "moved — re-select",
+    unsafe: "unsafe — re-select",
+    revoked: "revoked",
+    unavailable: "unavailable — re-select",
+  }[status];
+}
+
 function App() {
   const [stats, setStats] = useState<LibraryStats>(emptyStats);
   const [query, setQuery] = useState("");
   const [hits, setHits] = useState<SearchHit[]>([]);
   const [searched, setSearched] = useState(false);
-  const [busy, setBusy] = useState<"index" | "search" | null>(null);
+  const [busy, setBusy] = useState<"index" | "search" | "scope" | null>(null);
+  const [sourceRoots, setSourceRoots] = useState<SourceRootInfo[]>([]);
   const [notice, setNotice] = useState("Ready. LOOM does not upload your library.");
   const [error, setError] = useState<string | null>(null);
 
-  const refreshStats = async () => {
+  const refreshStats = useCallback(async () => {
     try {
       setStats(await invoke<LibraryStats>("library_stats"));
     } catch (caught) {
       setError(errorMessage(caught));
     }
-  };
+  }, []);
+
+  const refreshSourceRoots = useCallback(async () => {
+    try {
+      setSourceRoots(await invoke<SourceRootInfo[]>("list_source_roots"));
+    } catch (caught) {
+      setError(errorMessage(caught));
+    }
+  }, []);
+
+  const refreshLibrary = useCallback(async () => {
+    await Promise.all([refreshStats(), refreshSourceRoots()]);
+  }, [refreshSourceRoots, refreshStats]);
 
   useEffect(() => {
     let active = true;
-    void invoke("reconcile_approved_roots")
-      .then(() => invoke<LibraryStats>("library_stats"))
-      .then((value) => {
-        if (active) setStats(value);
+    void invoke<ObservationReport>("reconcile_approved_roots")
+      .then((report) => {
+        const failures = report?.failures ?? [];
+        if (active && failures.length) {
+          setNotice(`${failures.length} saved folder${failures.length === 1 ? " needs" : "s need"} attention.`);
+          setError(failures.map((item) => `${item.source}: ${item.reason}`).join("\n"));
+        }
+        return refreshLibrary();
       })
       .catch((caught: unknown) => {
         if (active) setError(errorMessage(caught));
@@ -92,7 +135,7 @@ function App() {
     return () => {
       active = false;
     };
-  }, []);
+  }, [refreshLibrary]);
 
   const addSource = async () => {
     setError(null);
@@ -111,10 +154,26 @@ function App() {
       if (failed) {
         setError(report.failures.map((item) => `${item.source}: ${item.reason}`).join("\n"));
       }
-      await refreshStats();
+      await refreshLibrary();
     } catch (caught) {
       setError(errorMessage(caught));
       setNotice("Indexing stopped safely.");
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const revokeSource = async (root: SourceRootInfo) => {
+    setError(null);
+    setBusy("scope");
+    setNotice(`Revoking ${compactPath(root.locator)}…`);
+    try {
+      await invoke("revoke_source_root", { locator: root.locator });
+      await refreshLibrary();
+      setNotice("Folder revoked. Its indexed evidence is hidden until you explicitly re-select it.");
+    } catch (caught) {
+      setError(errorMessage(caught));
+      setNotice("Folder revocation stopped safely.");
     } finally {
       setBusy(null);
     }
@@ -202,6 +261,42 @@ function App() {
             {busy === "index" ? "Indexing…" : "Add a folder"}
           </button>
           <p className="scope-note">Text and Markdown only in this pre-alpha slice.</p>
+          <section className="scope-list" aria-labelledby="scope-heading">
+            <div className="section-label" id="scope-heading">Saved scopes</div>
+            {sourceRoots.length === 0 ? (
+              <p className="scope-empty">No folders saved yet.</p>
+            ) : (
+              <ul>
+                {sourceRoots.map((root) => (
+                  <li key={root.locator} className={`scope-row scope-${root.status}`}>
+                    <div className="scope-row-main">
+                      <span className="scope-path" title={root.locator}>{compactPath(root.locator, 31)}</span>
+                      <span className="scope-status">{sourceRootStatusLabel(root.status)}</span>
+                    </div>
+                    <div className="scope-actions">
+                      {root.status !== "available" && root.status !== "revoked" && (
+                        <button type="button" className="scope-action" onClick={addSource} disabled={busy !== null}>
+                          Re-select
+                        </button>
+                      )}
+                      {root.enabled && (
+                        <button
+                          type="button"
+                          className="scope-action scope-revoke"
+                          onClick={() => revokeSource(root)}
+                          disabled={busy !== null}
+                          aria-label={`Revoke ${root.locator}`}
+                        >
+                          Revoke
+                        </button>
+                      )}
+                    </div>
+                  </li>
+                ))}
+              </ul>
+            )}
+            <p className="scope-note">Saved paths persist locally and are read-only. Missing or denied folders never broaden access; re-select a folder explicitly to grant it again.</p>
+          </section>
         </section>
 
         <div className="privacy-note">

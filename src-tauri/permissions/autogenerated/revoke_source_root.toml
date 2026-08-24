@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-revoke-source-root"
+description = "Enables the revoke_source_root command without any pre-configured scope."
+commands.allow = ["revoke_source_root"]
+
+[[permission]]
+identifier = "deny-revoke-source-root"
+description = "Denies the revoke_source_root command without any pre-configured scope."
+commands.deny = ["revoke_source_root"]

@@ -55,12 +55,16 @@ another path.
 ### Tauri shell and UI
 
 The Tauri layer opens the application-data SQLite database and exposes the narrow commands
-index_selected_folder, search, library_stats, and open_artifact. Folder selection happens inside the
-Rust command through the native dialog; the webview does not provide a path. Opening requires the
-artifact ID, version ID, and content hash returned by search, then rereads and verifies current
-source bytes before handing the path to the host. The React UI can search, inspect structured
-source-backed evidence, and request that verified open operation. Tauri capability configuration is
-a security boundary and must be reviewed with command changes. See the
+index_selected_folder, reconcile_approved_roots, list_source_roots, revoke_source_root, search,
+library_stats, and open_artifact. Folder selection happens inside the Rust command through the native
+dialog; the webview does not provide a path. Persisted roots are exact read-only locators with
+available/missing/denied/moved/unsafe/revoked status. Re-selection through the native picker is the
+current relaunch recovery path; a future sandboxed build must add persistent security-scoped
+bookmarks rather than widening permissions. Opening requires the artifact ID, version ID, and content
+hash returned by search, then rereads and verifies current source bytes before handing the path to the
+host. The React UI can search, inspect structured source-backed evidence, inspect/revoke scopes, and
+request that verified open operation. Tauri capability configuration is a security boundary and must
+be reviewed with command changes. See the
 [Tauri capabilities documentation](https://v2.tauri.app/security/capabilities/).
 
 ### Benchmark fixture
