@@ -32,7 +32,11 @@ else
 fi
 
 run_cli() {
-  cargo run --locked -q -p loom-cli -- --database "$DATABASE" "$@"
+  if [[ -n "${LOOM_BINARY:-}" ]]; then
+    "$LOOM_BINARY" --database "$DATABASE" "$@"
+  else
+    cargo run --locked -q -p loom-cli -- --database "$DATABASE" "$@"
+  fi
 }
 
 run_cli index "$CORPUS" > "$EVIDENCE_DIR/index.json"
@@ -42,13 +46,19 @@ run_cli semantic-status > "$EVIDENCE_DIR/status-after.json"
 run_cli semantic-benchmark > "$EVIDENCE_DIR/provider-benchmark.json"
 run_cli semantic-search "retry anomalies" --limit 5 > "$EVIDENCE_DIR/search-first.json"
 
-if [[ -x target/debug/loom ]]; then
+if [[ -n "${LOOM_BINARY:-}" && -x "$LOOM_BINARY" ]]; then
+  binary_bytes=$(stat -f %z "$LOOM_BINARY" 2>/dev/null || stat -c %s "$LOOM_BINARY")
+elif [[ -x target/debug/loom ]]; then
   binary_bytes=$(stat -f %z target/debug/loom 2>/dev/null || stat -c %s target/debug/loom)
 else
   binary_bytes=0
 fi
 
-/usr/bin/time -lp cargo run --locked -q -p loom-cli -- --database "$DATABASE" semantic-rebuild > "$EVIDENCE_DIR/rebuild-timed.json" 2> "$EVIDENCE_DIR/rebuild-time.txt"
+if [[ -n "${LOOM_BINARY:-}" ]]; then
+  /usr/bin/time -lp "$LOOM_BINARY" --database "$DATABASE" semantic-rebuild > "$EVIDENCE_DIR/rebuild-timed.json" 2> "$EVIDENCE_DIR/rebuild-time.txt"
+else
+  /usr/bin/time -lp cargo run --locked -q -p loom-cli -- --database "$DATABASE" semantic-rebuild > "$EVIDENCE_DIR/rebuild-timed.json" 2> "$EVIDENCE_DIR/rebuild-time.txt"
+fi
 run_cli semantic-drop > "$EVIDENCE_DIR/drop.json"
 run_cli semantic-status > "$EVIDENCE_DIR/status-dropped.json"
 run_cli semantic-rebuild > "$EVIDENCE_DIR/rebuild-second.json"

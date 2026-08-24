@@ -103,7 +103,8 @@ process-level `/usr/bin/time -lp` profile (user/system CPU and maximum RSS). “
 query after a new process/SQLite connection; “warm” is repeated in the same process. The harness
 does not flush the macOS page cache or claim battery-energy measurement. It retains run variance,
 limitations, pre-optimization budgets, and a release-gate disposition for every exceeded budget.
-The full `verify-device.sh` pipe runs this gate before clearing Rust build output.
+The full `verify-device.sh` pipe stages the tested CLI binary, clears Rust build output, and then
+runs this gate so the large corpus cannot turn an otherwise valid run into an ENOSPC false negative.
 
 ## Protocol
 
