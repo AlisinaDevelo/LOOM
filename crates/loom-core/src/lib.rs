@@ -10,7 +10,7 @@ mod store;
 pub use domain::{
     ArtifactObservation, EvidenceAnchor, EvidenceExcerpt, EvidenceSegment, IndexCheckpoint,
     IndexFailure, IndexReport, LibraryStats, ObservationReport, OpenArtifactRequest,
-    PassageObservation, SearchHit, SearchRequest,
+    PassageObservation, SearchHit, SearchRequest, SourceRootInfo, SourceRootStatus,
 };
 pub use error::{LoomError, Result};
 pub use observe::{coalesce_events, ObservationEvent, ObservationEventKind, ObservationPlan};

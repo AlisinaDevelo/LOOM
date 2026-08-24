@@ -13,6 +13,7 @@ use crate::{
     domain::{
         ArtifactObservation, EvidenceAnchor, IndexCheckpoint, IndexFailure, IndexReport,
         LibraryStats, ObservationReport, PassageObservation, SearchHit, SearchRequest,
+        SourceRootInfo, SourceRootStatus,
     },
     error::{io_error, LoomError, Result},
     ingest::{self, PassageDraft, StableDocument, EXTRACTOR_ID, EXTRACTOR_VERSION},
@@ -136,10 +137,20 @@ impl Library {
     /// event adapter is selected. Missing or revoked roots become explicit failures and cannot
     /// widen the scan to an arbitrary directory.
     pub fn reconcile_approved_roots(&self) -> Result<ObservationReport> {
-        let roots = self.approved_root_locators()?;
+        let roots = self.approved_root_specs()?;
         let mut report = ObservationReport::default();
-        for root in roots {
+        for (root, kind) in roots {
             report.roots_scanned += 1;
+            let status = source_root_status(&root, &kind, true);
+            if status != SourceRootStatus::Available {
+                report.roots_failed += 1;
+                report.full_rescans += 1;
+                report.failures.push(IndexFailure {
+                    source: root,
+                    reason: format!("persisted source root is {status:?}"),
+                });
+                continue;
+            }
             match self.index_path(&root) {
                 Ok(index) => merge_observation_index(&mut report, &index),
                 Err(error) => {
@@ -153,6 +164,70 @@ impl Library {
             }
         }
         Ok(report)
+    }
+
+    /// Lists persisted user-selected roots without widening their access scope.
+    ///
+    /// Status is derived from the exact persisted locator. A missing, denied, moved, or unsafe
+    /// root is reported rather than replaced with a broader fallback directory.
+    pub fn source_roots(&self) -> Result<Vec<SourceRootInfo>> {
+        let connection = self.lock()?;
+        let mut statement = connection
+            .prepare("SELECT locator, kind, enabled FROM source_roots ORDER BY locator")?;
+        let rows = statement.query_map([], |row| {
+            let locator: String = row.get(0)?;
+            let kind: String = row.get(1)?;
+            let enabled: i64 = row.get(2)?;
+            Ok(SourceRootInfo {
+                status: source_root_status(&locator, &kind, enabled != 0),
+                locator,
+                kind,
+                enabled: enabled != 0,
+                read_only: true,
+            })
+        })?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(Into::into)
+    }
+
+    /// Revokes a previously persisted root and hides its active evidence.
+    ///
+    /// The canonical rows remain on disk for explicit local retention/export policy, but revoked
+    /// artifacts are no longer searchable or openable. Re-selection through the folder picker is
+    /// the only path that re-enables the exact root.
+    pub fn revoke_source_root(&self, locator: &str) -> Result<SourceRootInfo> {
+        let mut connection = self.lock()?;
+        let transaction = connection.transaction()?;
+        let exists: bool = transaction.query_row(
+            "SELECT EXISTS(SELECT 1 FROM source_roots WHERE locator = ?1)",
+            [locator],
+            |row| row.get(0),
+        )?;
+        if !exists {
+            return Err(LoomError::InvalidPath(format!(
+                "source root is not persisted: {locator}"
+            )));
+        }
+        transaction.execute(
+            "UPDATE source_roots SET enabled = 0, last_seen_at = ?1 WHERE locator = ?2",
+            params![Utc::now().to_rfc3339(), locator],
+        )?;
+        transaction.execute(
+            "UPDATE artifacts SET state = 'missing', last_seen_at = ?1
+             WHERE source_root_id = (SELECT id FROM source_roots WHERE locator = ?2)
+               AND state = 'active'",
+            params![Utc::now().to_rfc3339(), locator],
+        )?;
+        transaction.commit()?;
+        drop(connection);
+        self.source_roots()?
+            .into_iter()
+            .find(|root| root.locator == locator)
+            .ok_or_else(|| {
+                LoomError::InvalidPath(format!(
+                    "source root disappeared during revocation: {locator}"
+                ))
+            })
     }
 
     /// Returns the durable checkpoint for a selected file or directory, when one exists.
@@ -770,11 +845,11 @@ impl Library {
             .map_err(Into::into)
     }
 
-    fn approved_root_locators(&self) -> Result<Vec<String>> {
+    fn approved_root_specs(&self) -> Result<Vec<(String, String)>> {
         let connection = self.lock()?;
         let mut statement = connection
-            .prepare("SELECT locator FROM source_roots WHERE enabled = 1 ORDER BY locator")?;
-        let rows = statement.query_map([], |row| row.get(0))?;
+            .prepare("SELECT locator, kind FROM source_roots WHERE enabled = 1 ORDER BY locator")?;
+        let rows = statement.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
         rows.collect::<rusqlite::Result<Vec<_>>>()
             .map_err(Into::into)
     }
@@ -972,6 +1047,37 @@ fn canonical_selected_root(requested_path: &Path) -> Result<PathBuf> {
     requested_path
         .canonicalize()
         .map_err(|source| io_error(requested_path, source))
+}
+
+fn source_root_status(locator: &str, kind: &str, enabled: bool) -> SourceRootStatus {
+    if !enabled {
+        return SourceRootStatus::Revoked;
+    }
+    match fs::symlink_metadata(locator) {
+        Ok(metadata) if metadata.file_type().is_symlink() => SourceRootStatus::Unsafe,
+        Ok(metadata) if kind == "file" && metadata.is_file() => match fs::File::open(locator) {
+            Ok(_) => SourceRootStatus::Available,
+            Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
+                SourceRootStatus::Denied
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => SourceRootStatus::Missing,
+            Err(_) => SourceRootStatus::Unavailable,
+        },
+        Ok(metadata) if kind == "directory" && metadata.is_dir() => match fs::read_dir(locator) {
+            Ok(_) => SourceRootStatus::Available,
+            Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
+                SourceRootStatus::Denied
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => SourceRootStatus::Missing,
+            Err(_) => SourceRootStatus::Unavailable,
+        },
+        Ok(_) => SourceRootStatus::WrongType,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => SourceRootStatus::Missing,
+        Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
+            SourceRootStatus::Denied
+        }
+        Err(_) => SourceRootStatus::Unavailable,
+    }
 }
 
 fn observation_from_index(

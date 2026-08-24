@@ -29,11 +29,14 @@ service attack. There is no supported remote service in this slice.
 
 1. The CLI supplies an explicit path, or the Rust backend owns a native folder picker; the desktop
    webview cannot submit a path to the index command.
-2. The indexer traverses and reads local files, then writes normalized text and metadata to SQLite.
-3. FTS5 derives a lexical search structure from canonical passage rows.
-4. Tauri IPC exposes indexing, search, statistics, and source opening to the UI.
-5. The host external application receives an original path when the user requests opening it.
-6. A future semantic index or connector would be a new boundary and requires a separate review.
+2. Persisted roots retain only the exact selected locator and a read-only contract. Missing, denied,
+   moved, unsafe, and revoked states are visible; no fallback path is inferred.
+3. The indexer traverses and reads local files, then writes normalized text and metadata to SQLite.
+4. FTS5 derives a lexical search structure from canonical passage rows.
+5. Tauri IPC exposes indexing, scope status/revocation, search, statistics, and source opening to
+   the UI.
+6. The host external application receives an original path when the user requests opening it.
+7. A future semantic index or connector would be a new boundary and requires a separate review.
 
 ## Current risks and mitigations
 
@@ -46,6 +49,7 @@ service attack. There is no supported remote service in this slice.
 | FTS query injection           | Search terms and phrases are compiled as safe FTS5 input                                                        | Search is lexical and does not defend a compromised database                           |
 | Stale evidence                | Complete rescans hide missing/failed sources; open is bound to artifact/version/hash and rehashes current bytes | Historical extracted text remains until a purge feature exists                         |
 | Local data disclosure         | No network path in the current slice; UI displays source-backed results                                         | SQLite and WAL files are unencrypted and readable by local access                      |
+| Persisted scope drift         | Exact locators, status inspection, explicit re-selection, and revocation hide active artifacts                  | Direct-distribution build does not yet persist macOS security-scoped bookmarks         |
 | Tauri command overreach       | Narrow command set; backend-owned selection; no arbitrary path command; hash-bound open                         | Capability configuration and host permissions still need release hardening             |
 | Dependency compromise         | Locked dependency resolution and ordinary build review                                                          | No reproducible-build or signed-release guarantee yet                                  |
 

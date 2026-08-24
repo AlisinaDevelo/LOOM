@@ -124,6 +124,21 @@ nav { display: grid; gap: 6px; }
 .add-source:hover:not(:disabled) { border-color: var(--thread); }
 .add-source:disabled { cursor: wait; opacity: 0.7; }
 .scope-note { margin: 10px 0 0; color: var(--faint); font-size: 10px; line-height: 1.45; }
+.scope-list { margin-top: 18px; padding-top: 14px; border-top: 1px solid var(--line); }
+.scope-list ul { display: grid; gap: 7px; margin: 10px 0 0; padding: 0; list-style: none; }
+.scope-row { display: grid; gap: 5px; padding: 8px; border: 1px solid var(--line); border-radius: 7px; background: #151814; }
+.scope-row-main { display: flex; min-width: 0; align-items: center; justify-content: space-between; gap: 7px; }
+.scope-path { min-width: 0; overflow: hidden; color: #c4c8bc; font: 9px ui-monospace, monospace; text-overflow: ellipsis; white-space: nowrap; }
+.scope-status { flex: none; color: #82916e; font: 8px ui-monospace, monospace; text-transform: uppercase; letter-spacing: 0.03em; }
+.scope-missing .scope-status, .scope-denied .scope-status, .scope-wrong_type .scope-status,
+.scope-unsafe .scope-status, .scope-unavailable .scope-status { color: var(--warm); }
+.scope-revoked .scope-status { color: var(--faint); }
+.scope-actions { display: flex; justify-content: flex-end; gap: 7px; }
+.scope-action { border: 0; padding: 2px 0; background: transparent; color: var(--thread); font: 9px ui-monospace, monospace; cursor: pointer; }
+.scope-action:hover:not(:disabled) { text-decoration: underline; }
+.scope-action:disabled { cursor: wait; opacity: 0.5; }
+.scope-revoke { color: #d49b86; }
+.scope-empty { margin: 10px 0 0; color: var(--faint); font-size: 10px; }
 .privacy-note { margin-top: auto; display: flex; gap: 10px; padding: 0 7px; align-items: flex-start; }
 .privacy-dot {
   width: 7px;

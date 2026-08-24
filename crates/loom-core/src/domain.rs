@@ -56,6 +56,33 @@ pub struct ObservationReport {
     pub failures: Vec<IndexFailure>,
 }
 
+/// Availability of a persisted, explicitly selected source root.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SourceRootStatus {
+    Available,
+    Missing,
+    Denied,
+    WrongType,
+    Unsafe,
+    Revoked,
+    Unavailable,
+}
+
+/// A persisted source scope exposed to the desktop UI.
+///
+/// LOOM's current direct-distribution build uses an explicit re-selection path instead of
+/// pretending to hold a security-scoped bookmark. Ingestion opens source bytes read-only, and the
+/// scope record contains no write capability.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SourceRootInfo {
+    pub locator: String,
+    pub kind: String,
+    pub enabled: bool,
+    pub read_only: bool,
+    pub status: SourceRootStatus,
+}
+
 /// Canonical library counts. Derived-index files are intentionally excluded.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LibraryStats {

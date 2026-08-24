@@ -7,6 +7,8 @@
     "core:default",
     "allow-index-selected-folder",
     "allow-reconcile-approved-roots",
+    "allow-list-source-roots",
+    "allow-revoke-source-root",
     "allow-search",
     "allow-library-stats",
     "allow-open-artifact"

@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use loom_core::{
     IndexReport, Library, LibraryStats, ObservationReport, OpenArtifactRequest, SearchHit,
-    SearchRequest,
+    SearchRequest, SourceRootInfo,
 };
 use tauri::{Manager, State};
 use tauri_plugin_dialog::DialogExt;
@@ -46,6 +46,25 @@ async fn reconcile_approved_roots(state: State<'_, AppState>) -> CommandResult<O
     tauri::async_runtime::spawn_blocking(move || library.reconcile_approved_roots())
         .await
         .map_err(|error| format!("observation worker stopped: {error}"))?
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn list_source_roots(state: State<'_, AppState>) -> CommandResult<Vec<SourceRootInfo>> {
+    state
+        .library
+        .source_roots()
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn revoke_source_root(
+    state: State<'_, AppState>,
+    locator: String,
+) -> CommandResult<SourceRootInfo> {
+    state
+        .library
+        .revoke_source_root(&locator)
         .map_err(|error| error.to_string())
 }
 
@@ -103,6 +122,8 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             index_selected_folder,
             reconcile_approved_roots,
+            list_source_roots,
+            revoke_source_root,
             search,
             library_stats,
             open_artifact
@@ -133,6 +154,8 @@ mod tests {
         for command in [
             "allow-index-selected-folder",
             "allow-reconcile-approved-roots",
+            "allow-list-source-roots",
+            "allow-revoke-source-root",
             "allow-search",
             "allow-library-stats",
             "allow-open-artifact",

@@ -64,6 +64,7 @@ describe("desktop truth path", () => {
   it("exposes an accessible empty state and keyboard-search form", async () => {
     invokeMock.mockImplementation(async (command) => {
       if (command === "reconcile_approved_roots") return {};
+      if (command === "list_source_roots") return [];
       if (command === "library_stats") return emptyStats;
       throw new Error(`unexpected command: ${command}`);
     });
@@ -82,6 +83,7 @@ describe("desktop truth path", () => {
   it("runs the primary keyboard retrieval flow and opens the bound original", async () => {
     invokeMock.mockImplementation(async (command) => {
       if (command === "reconcile_approved_roots") return {};
+      if (command === "list_source_roots") return [];
       if (command === "library_stats") return readyStats;
       if (command === "search") return [hit];
       if (command === "open_artifact") return undefined;
@@ -118,6 +120,7 @@ describe("desktop truth path", () => {
     });
     invokeMock.mockImplementation(async (command) => {
       if (command === "reconcile_approved_roots") return {};
+      if (command === "list_source_roots") return [];
       if (command === "library_stats") return emptyStats;
       if (command === "search") return pendingSearch;
       throw new Error(`unexpected command: ${command}`);
@@ -137,6 +140,7 @@ describe("desktop truth path", () => {
   it("shows partial indexing failures without hiding the usable library", async () => {
     invokeMock.mockImplementation(async (command) => {
       if (command === "reconcile_approved_roots") return {};
+      if (command === "list_source_roots") return [];
       if (command === "library_stats") return readyStats;
       if (command === "index_selected_folder") {
         return {
@@ -162,6 +166,7 @@ describe("desktop truth path", () => {
   it("states when a valid search has no evidence instead of inventing an answer", async () => {
     invokeMock.mockImplementation(async (command) => {
       if (command === "reconcile_approved_roots") return {};
+      if (command === "list_source_roots") return [];
       if (command === "library_stats") return emptyStats;
       if (command === "search") return [];
       throw new Error(`unexpected command: ${command}`);
@@ -174,5 +179,31 @@ describe("desktop truth path", () => {
 
     expect(await screen.findByRole("heading", { name: "No matching evidence" })).toBeInTheDocument();
     expect(screen.getByRole("status")).toHaveTextContent("No evidence met this lexical query.");
+  });
+
+  it("shows bounded saved-scope states and revokes without widening access", async () => {
+    const roots = [{
+      locator: "/Users/test/notes",
+      kind: "directory",
+      enabled: true,
+      read_only: true,
+      status: "missing",
+    }];
+    invokeMock.mockImplementation(async (command) => {
+      if (command === "reconcile_approved_roots") return { failures: [{ source: "/Users/test/notes", reason: "missing" }] };
+      if (command === "list_source_roots") return roots;
+      if (command === "library_stats") return emptyStats;
+      if (command === "revoke_source_root") return { ...roots[0], enabled: false, status: "revoked" };
+      throw new Error(`unexpected command: ${command}`);
+    });
+
+    render(<App />);
+
+    expect(await screen.findByText("missing — re-select")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Re-select" })).toBeEnabled();
+    fireEvent.click(screen.getByRole("button", { name: "Revoke /Users/test/notes" }));
+    await waitFor(() => {
+      expect(invokeMock).toHaveBeenCalledWith("revoke_source_root", { locator: "/Users/test/notes" });
+    });
   });
 });

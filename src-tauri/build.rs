@@ -3,6 +3,8 @@ fn main() {
         tauri_build::AppManifest::new().commands(&[
             "index_selected_folder",
             "reconcile_approved_roots",
+            "list_source_roots",
+            "revoke_source_root",
             "search",
             "library_stats",
             "open_artifact",
