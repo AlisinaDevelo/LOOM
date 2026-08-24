@@ -810,7 +810,7 @@
     {
       "id": "0205",
       "title": "Add safe temporal and source-type query filters",
-      "status": "review",
+      "status": "done",
       "quarter": "Q04",
       "phase": "v0.2 Needle",
       "workstream": "foundation",
@@ -839,7 +839,7 @@
     {
       "id": "0206",
       "title": "Expand retrieval evaluation across text, PDF, and OCR",
-      "status": "review",
+      "status": "done",
       "quarter": "Q04",
       "phase": "v0.2 Needle",
       "workstream": "foundation",
