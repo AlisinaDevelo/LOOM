@@ -61,6 +61,12 @@ enum Command {
         #[arg(long, default_value_t = 10)]
         limit: u32,
     },
+    /// Search the experimental evidence-bound hybrid ranker.
+    HybridSearch {
+        query: String,
+        #[arg(long, default_value_t = 10)]
+        limit: u32,
+    },
     /// Evaluate exact-artifact recovery on a rights-clean JSONL query set.
     Benchmark {
         #[arg(long)]
@@ -278,6 +284,13 @@ fn main() -> Result<(), Box<dyn Error>> {
             println!(
                 "{}",
                 serde_json::to_string_pretty(&library.semantic_search(&query, limit)?)?
+            );
+        }
+        Command::HybridSearch { query, limit } => {
+            let library = Library::open(arguments.database)?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&library.hybrid_search(&query, limit)?)?
             );
         }
         Command::Benchmark { corpus, queries } => run_benchmark(&corpus, &queries)?,

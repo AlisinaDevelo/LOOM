@@ -1,5 +1,5 @@
 use std::{
-    collections::HashSet,
+    collections::{BTreeMap, HashSet},
     fs,
     path::{Path, PathBuf},
     sync::{
@@ -14,12 +14,12 @@ use uuid::Uuid;
 
 use crate::{
     domain::{
-        ArtifactObservation, EvidenceAnchor, EvidenceView, FtsHealthReport, FtsRepairReport,
-        IndexCancellationToken, IndexCheckpoint, IndexFailure, IndexReport, LibraryStats,
-        ObservationReport, OcrPurgeReport, OcrStatus, PassageObservation, ResolveEvidenceRequest,
-        SearchHit, SearchRequest, SemanticCandidate, SemanticDropReport, SemanticIndexConfig,
-        SemanticIndexManifest, SemanticIndexStatus, SemanticProviderMeasurement,
-        SemanticRebuildReport, SourceRootInfo, SourceRootStatus,
+        ArtifactObservation, EvidenceAnchor, EvidenceExcerpt, EvidenceSegment, EvidenceView,
+        FtsHealthReport, FtsRepairReport, IndexCancellationToken, IndexCheckpoint, IndexFailure,
+        IndexReport, LibraryStats, ObservationReport, OcrPurgeReport, OcrStatus,
+        PassageObservation, ResolveEvidenceRequest, SearchHit, SearchRequest, SemanticCandidate,
+        SemanticDropReport, SemanticIndexConfig, SemanticIndexManifest, SemanticIndexStatus,
+        SemanticProviderMeasurement, SemanticRebuildReport, SourceRootInfo, SourceRootStatus,
     },
     error::{io_error, LoomError, Result},
     ingest::{
@@ -28,6 +28,7 @@ use crate::{
     },
     observe::{self, ObservationEvent},
     ocr::IMAGE_OCR_EXTRACTOR_ID,
+    ranking::{fuse_hybrid_candidates, HybridRankConfig, HybridRankInput, HybridSearchHit},
     search::{collision_free_markers, compile_query, project_fts_evidence},
     semantic::{
         cosine_similarity, decode_vector, encode_vector, measure_providers, HashEmbeddingProvider,
@@ -803,6 +804,91 @@ impl Library {
                 anchor,
                 match_reason: "SQLite FTS5 BM25 over the active source passage".into(),
             });
+        }
+        Ok(hits)
+    }
+
+    /// Searches the lexical and semantic derivatives through the experimental hybrid ranker.
+    ///
+    /// The semantic derivative must be healthy; a missing or incompatible derivative fails closed
+    /// instead of silently presenting a lexical-only result as a hybrid result. This method is not
+    /// wired into the desktop default until the benchmark gate in issue 0204 passes.
+    pub fn hybrid_search(&self, query: &str, limit: u32) -> Result<Vec<HybridSearchHit>> {
+        let limit = limit.clamp(1, 100);
+        let candidate_limit = limit.saturating_mul(4).clamp(limit, 100);
+        let lexical = self.search(&SearchRequest {
+            text: query.to_string(),
+            limit: candidate_limit,
+        })?;
+        let semantic = self.semantic_search(query, candidate_limit)?;
+        let mut inputs = BTreeMap::<String, HybridRankInput>::new();
+
+        for hit in lexical {
+            let passage_id = hit.passage_id.clone();
+            inputs.insert(
+                passage_id,
+                HybridRankInput {
+                    artifact_id: hit.artifact_id,
+                    version_id: hit.version_id.clone(),
+                    passage_id: hit.passage_id,
+                    title: hit.title,
+                    media_type: hit.media_type,
+                    source_uri: hit.source_uri,
+                    content_hash: hit.content_hash,
+                    passage_text: hit
+                        .excerpt
+                        .segments
+                        .iter()
+                        .map(|segment| segment.text.as_str())
+                        .collect(),
+                    excerpt: hit.excerpt,
+                    anchor: hit.anchor,
+                    source_modified_ns: self.source_modified_ns(&hit.version_id)?,
+                    lexical_rank: Some(hit.rank),
+                    semantic_rank: None,
+                },
+            );
+        }
+
+        for candidate in semantic {
+            if let Some(input) = inputs.get_mut(&candidate.passage_id) {
+                input.semantic_rank = Some(candidate.rank);
+                continue;
+            }
+            let passage_text = candidate.passage_text.clone();
+            inputs.insert(
+                candidate.passage_id.clone(),
+                HybridRankInput {
+                    artifact_id: candidate.artifact_id,
+                    version_id: candidate.version_id.clone(),
+                    passage_id: candidate.passage_id,
+                    title: candidate.title,
+                    media_type: candidate.media_type,
+                    source_uri: candidate.source_uri,
+                    content_hash: candidate.content_hash,
+                    passage_text: passage_text.clone(),
+                    excerpt: EvidenceExcerpt {
+                        segments: vec![EvidenceSegment {
+                            text: passage_text,
+                            highlighted: false,
+                        }],
+                    },
+                    anchor: candidate.anchor,
+                    source_modified_ns: self.source_modified_ns(&candidate.version_id)?,
+                    lexical_rank: None,
+                    semantic_rank: Some(candidate.rank),
+                },
+            );
+        }
+
+        let mut hits = fuse_hybrid_candidates(
+            query,
+            inputs.into_values().collect(),
+            &HybridRankConfig::default(),
+        )?;
+        hits.truncate(limit as usize);
+        for (index, hit) in hits.iter_mut().enumerate() {
+            hit.rank = index as u32 + 1;
         }
         Ok(hits)
     }
@@ -1695,6 +1781,18 @@ impl Library {
 
     fn lock(&self) -> Result<MutexGuard<'_, Connection>> {
         self.connection.lock().map_err(|_| LoomError::LockPoisoned)
+    }
+
+    fn source_modified_ns(&self, version_id: &str) -> Result<Option<i64>> {
+        let connection = self.lock()?;
+        connection
+            .query_row(
+                "SELECT source_modified_ns FROM artifact_versions WHERE id = ?1",
+                [version_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(Into::into)
     }
 }
 
