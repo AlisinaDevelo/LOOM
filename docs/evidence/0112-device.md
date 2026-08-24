@@ -4,7 +4,10 @@ This artifact records the persisted, revocable source-scope contract for issue
 [#65](https://github.com/AlisinaDevelo/LOOM/issues/65). It covers exact user-selected locators,
 bounded status reporting for missing/denied/moved/unsafe roots, read-only reconciliation, and
 explicit revocation/re-selection. The current direct-distribution build uses explicit
-re-selection; it does not claim a sandbox security-scoped bookmark implementation.
+re-selection; it does not claim a sandbox security-scoped bookmark implementation. The
+implementation was merged through PR [#177](https://github.com/AlisinaDevelo/LOOM/pull/177); the
+merged-main reproduction is recorded below. Issue #65 remains in `review` until independent
+approval and protected-main enforcement are available.
 
 ## Device and toolchain
 
@@ -83,5 +86,24 @@ This run proves the persisted-scope contract on the specified Mac; it does not c
 OS/architecture, a sandbox security-scoped bookmark, notarization, a third-party security audit,
 a `cargo-audit` result, or a large-library resource benchmark. The current implementation keeps
 historical rows when a scope is revoked; retention/purge policy remains separate work. Issue 65
-remains open until independent review, a protected-main merge, and the same reproduction against
-the merged `main` SHA are available.
+remains in `review`; the post-merge reproduction below satisfies the code and target-device
+evidence portion, while independent review and protected-main enforcement remain required.
+
+## Merged-main reproduction
+
+The same target-device harness was run against runtime-tested merged `main` commit
+`eee1236710b98375e86b12187d545ed451ee2b7c` on the Mac specified above. The current main tip
+`d4b219b0bb634054bee6ce8ad9a71a17dd8bf003` adds only documentation and roadmap metadata after
+that runtime-tested commit; no source-root implementation changed.
+
+- Verification directory: `/tmp/loom-0110-main-device.QLkKl1`
+- Harness summary SHA-256: `45bc997dcb26b8bc6cbd63a09fa17aed6c5d4ae968ef349be473b0b034e94e70`
+- Commands SHA-256: `d840925fb008af9101dc3121870b79960c1b6924451df17a7851f2f6132bb209`
+- Log manifest: `/tmp/loom-0110-main-device.QLkKl1/log-sha256.txt`
+- Log manifest SHA-256: `ed539c48e8c9b648f0ae341ddf37f02107d5aacff5d5e2a19ae0d28612c57d64`
+
+The full local pipe passed. Its MSRV workspace run included all five source-root tests for
+persisted relaunch, denied and unsafe scopes, moved-root re-selection, revocation, and explicit
+re-selection; frontend status/revoke checks also passed. No hosted Actions or unavailable
+hardware substituted for this target-device evidence. The direct-distribution re-selection limit
+and future crop rule remain explicit.

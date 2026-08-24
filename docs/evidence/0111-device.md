@@ -2,7 +2,10 @@
 
 This artifact records the schema compatibility and migration contract for issue [#64](https://github.com/AlisinaDevelo/LOOM/issues/64).
 It covers the reviewed version-2 to version-3 migration, canonical-row preservation, derived-index
-rebuild, and fail-closed malformed-version behavior.
+rebuild, and fail-closed malformed-version behavior. The implementation was merged through PR
+[#176](https://github.com/AlisinaDevelo/LOOM/pull/176); the merged-main reproduction is recorded
+below. Issue #64 remains in `review` until independent approval and protected-main enforcement are
+available.
 
 ## Device and toolchain
 
@@ -77,6 +80,25 @@ tauri-build.log         sha256:c533c1a8c1c2c297f79f9b49b12ba8dd974cc3108c08fb138
 
 This run proves the migration contract on the specified Mac; it does not claim another
 OS/architecture, notarization, a third-party security audit, a `cargo-audit` result, or a
-large-library startup/resource benchmark for deterministic FTS rebuild. Issue 64 remains open
-until independent review, a protected-main merge, and the same reproduction against the merged
-`main` SHA are available.
+large-library startup/resource benchmark for deterministic FTS rebuild. The post-merge
+reproduction below satisfies the code and target-device evidence portion; independent review and
+protected-main enforcement remain required before issue #64 can close.
+
+## Merged-main reproduction
+
+The same target-device harness was run against runtime-tested merged `main` commit
+`eee1236710b98375e86b12187d545ed451ee2b7c` on the Mac specified above. The current main tip
+`d4b219b0bb634054bee6ce8ad9a71a17dd8bf003` adds only documentation and roadmap metadata after
+that runtime-tested commit; no schema-compatibility source changed.
+
+- Verification directory: `/tmp/loom-0110-main-device.QLkKl1`
+- Harness summary SHA-256: `45bc997dcb26b8bc6cbd63a09fa17aed6c5d4ae968ef349be473b0b034e94e70`
+- Commands SHA-256: `d840925fb008af9101dc3121870b79960c1b6924451df17a7851f2f6132bb209`
+- Log manifest: `/tmp/loom-0110-main-device.QLkKl1/log-sha256.txt`
+- Log manifest SHA-256: `ed539c48e8c9b648f0ae341ddf37f02107d5aacff5d5e2a19ae0d28612c57d64`
+
+The full local pipe passed. Its MSRV workspace run included all five schema-compatibility tests:
+populated v2 migration preservation, v3/v4 migration, derived FTS rebuild, and malformed-marker
+fail-closed behavior. Retrieval, frontend, security, Tauri, and mixed-corpus failure/recovery
+checks also passed. No hosted Actions or unavailable hardware substituted for this target-device
+evidence. Future desktop captures must be cropped to the relevant evidence panel.
