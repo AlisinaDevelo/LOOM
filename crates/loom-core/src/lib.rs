@@ -5,6 +5,7 @@ mod error;
 mod ingest;
 mod observe;
 mod ocr;
+mod ranking;
 mod search;
 mod semantic;
 mod store;
@@ -19,4 +20,8 @@ pub use domain::{
 };
 pub use error::{LoomError, Result};
 pub use observe::{coalesce_events, ObservationEvent, ObservationEventKind, ObservationPlan};
+pub use ranking::{
+    fuse_hybrid_candidates, HybridRankConfig, HybridRankInput, HybridSearchHit,
+    HybridSignalEvidence,
+};
 pub use store::{Library, LibraryLimits};
