@@ -1,4 +1,4 @@
-.PHONY: install fmt fmt-check lint test benchmark build roadmap-check check tauri-dev
+.PHONY: install fmt fmt-check lint test benchmark build roadmap-check check verify-device tauri-dev
 
 install:
 	npm ci
@@ -27,6 +27,9 @@ build:
 roadmap-check:
 	python3 scripts/roadmap.py --validate-only
 	python3 -m unittest discover -s tests -v
+
+verify-device:
+	bash scripts/verify-device.sh
 
 check: lint test benchmark build roadmap-check
 
