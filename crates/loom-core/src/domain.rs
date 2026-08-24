@@ -31,6 +31,16 @@ pub struct IndexReport {
     pub failures: Vec<IndexFailure>,
 }
 
+/// Durable progress for the most recent indexing job for an explicitly selected root.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IndexCheckpoint {
+    pub job_id: String,
+    pub state: String,
+    pub next_unit: u64,
+    pub total_units: u64,
+    pub last_error: Option<String>,
+}
+
 /// Canonical library counts. Derived-index files are intentionally excluded.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LibraryStats {

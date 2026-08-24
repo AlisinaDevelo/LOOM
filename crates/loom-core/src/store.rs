@@ -11,15 +11,16 @@ use uuid::Uuid;
 
 use crate::{
     domain::{
-        ArtifactObservation, EvidenceAnchor, IndexFailure, IndexReport, LibraryStats,
-        PassageObservation, SearchHit, SearchRequest,
+        ArtifactObservation, EvidenceAnchor, IndexCheckpoint, IndexFailure, IndexReport,
+        LibraryStats, PassageObservation, SearchHit, SearchRequest,
     },
     error::{io_error, LoomError, Result},
     ingest::{self, PassageDraft, StableDocument, EXTRACTOR_ID, EXTRACTOR_VERSION},
     search::{collision_free_markers, compile_query, project_fts_evidence},
 };
 
-const SCHEMA_VERSION: i64 = 2;
+const SCHEMA_VERSION: i64 = 3;
+const PREVIOUS_SCHEMA_VERSION: i64 = 2;
 
 /// Resource boundaries applied to every ingestion request.
 #[derive(Debug, Clone, Copy)]
@@ -79,6 +80,60 @@ impl Library {
 
     /// Indexes one explicitly selected regular file or directory.
     pub fn index_path(&self, selected_path: impl AsRef<Path>) -> Result<IndexReport> {
+        self.index_path_with_fault(selected_path, None)
+    }
+
+    /// Returns the durable checkpoint for a selected file or directory, when one exists.
+    pub fn index_checkpoint(
+        &self,
+        selected_path: impl AsRef<Path>,
+    ) -> Result<Option<IndexCheckpoint>> {
+        let requested_path = selected_path.as_ref();
+        let requested_metadata = fs::symlink_metadata(requested_path)
+            .map_err(|source| io_error(requested_path, source))?;
+        if requested_metadata.file_type().is_symlink() {
+            return Err(LoomError::InvalidPath(format!(
+                "symbolic links are not followed: {}",
+                requested_path.display()
+            )));
+        }
+        let selected_path = requested_path
+            .canonicalize()
+            .map_err(|source| io_error(requested_path, source))?;
+        let selected_uri = utf8_path(&selected_path)?;
+        let connection = self.lock()?;
+        connection
+            .query_row(
+                "SELECT j.id, j.state, j.next_unit, j.total_units, j.last_error
+                 FROM index_jobs j
+                 JOIN source_roots r ON r.id = j.source_root_id
+                 WHERE r.locator = ?1 AND j.selection_locator = ?1",
+                [&selected_uri],
+                |row| {
+                    Ok(IndexCheckpoint {
+                        job_id: row.get(0)?,
+                        state: row.get(1)?,
+                        next_unit: row.get::<_, i64>(2)?.max(0) as u64,
+                        total_units: row.get::<_, i64>(3)?.max(0) as u64,
+                        last_error: row.get(4)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
+    /// Test-only fault injection that interrupts after `units` completed units.
+    ///
+    /// The hook is intentionally explicit and is not used by the normal indexing path. It lets
+    /// the integration suite simulate a process termination at a durable unit boundary without
+    /// relying on timing or killing the test runner.
+    #[doc(hidden)]
+    pub fn index_path_with_fault(
+        &self,
+        selected_path: impl AsRef<Path>,
+        interrupt_after_units: Option<usize>,
+    ) -> Result<IndexReport> {
         let requested_path = selected_path.as_ref();
         let requested_metadata = fs::symlink_metadata(requested_path)
             .map_err(|source| io_error(requested_path, source))?;
@@ -94,17 +149,44 @@ impl Library {
         let selected_uri = utf8_path(&selected_path)?;
         let discovered = ingest::discover(&selected_path, self.limits.max_files_per_request)?;
 
+        let discovery_fingerprint = discovery_fingerprint(&discovered);
         let root_id = {
             let mut connection = self.lock()?;
             ensure_source_root(&mut connection, &selected_uri, selected_path.is_dir())?
         };
+        let job = self.start_index_job(
+            &root_id,
+            &selected_uri,
+            &discovery_fingerprint,
+            discovered.len(),
+        )?;
 
         let mut report = IndexReport {
             discovered: discovered.len() as u64,
             ..IndexReport::default()
         };
         let mut seen = HashSet::new();
-        for path in discovered {
+        let mut units_processed_this_run = 0usize;
+        for path in &discovered {
+            if ingest::supported_media_type(path).is_some() {
+                if let Ok(locator) = utf8_path(path) {
+                    seen.insert(locator);
+                }
+            }
+        }
+        for (unit, path) in discovered
+            .into_iter()
+            .enumerate()
+            .skip(job.next_unit as usize)
+        {
+            if interrupt_after_units.is_some_and(|limit| units_processed_this_run >= limit) {
+                let message = format!(
+                    "fault injection after {} completed unit(s)",
+                    units_processed_this_run
+                );
+                self.interrupt_index_job(&job.job_id, &message)?;
+                return Err(LoomError::IndexInterrupted(job.job_id));
+            }
             let locator = match utf8_path(&path) {
                 Ok(locator) => locator,
                 Err(error) => {
@@ -112,34 +194,51 @@ impl Library {
                         source: path.display().to_string(),
                         reason: error.to_string(),
                     });
+                    self.advance_index_job(&job.job_id, unit as u64 + 1)?;
+                    units_processed_this_run += 1;
                     continue;
                 }
             };
             if ingest::supported_media_type(&path).is_none() {
                 report.skipped += 1;
-                if let Err(error) = self.mark_locator_missing(&root_id, &locator) {
+                if let Err(error) = self.mark_locator_missing_and_advance(
+                    &root_id,
+                    &locator,
+                    &job.job_id,
+                    unit as u64 + 1,
+                ) {
                     report.failures.push(IndexFailure {
                         source: path.display().to_string(),
                         reason: format!("could not reconcile source state: {error}"),
                     });
                 }
+                units_processed_this_run += 1;
                 continue;
             }
             match ingest::read_stable(&path, &selected_path, self.limits.max_file_bytes) {
                 Ok(document) => {
                     let bytes = document.byte_size;
                     report.bytes_read += bytes;
-                    match self.index_document(&root_id, &path, document) {
+                    match self.index_document_with_checkpoint(
+                        &root_id,
+                        &path,
+                        document,
+                        &job.job_id,
+                        unit as u64 + 1,
+                    ) {
                         Ok(true) => {
                             report.indexed += 1;
-                            seen.insert(locator);
                         }
                         Ok(false) => {
                             report.unchanged += 1;
-                            seen.insert(locator);
                         }
                         Err(error) => {
-                            let reason = match self.mark_locator_missing(&root_id, &locator) {
+                            let reason = match self.mark_locator_missing_and_advance(
+                                &root_id,
+                                &locator,
+                                &job.job_id,
+                                unit as u64 + 1,
+                            ) {
                                 Ok(()) => error.to_string(),
                                 Err(reconcile_error) => format!(
                                     "{error}; could not reconcile source state: {reconcile_error}"
@@ -153,7 +252,12 @@ impl Library {
                     }
                 }
                 Err(error) => {
-                    let reason = match self.mark_locator_missing(&root_id, &locator) {
+                    let reason = match self.mark_locator_missing_and_advance(
+                        &root_id,
+                        &locator,
+                        &job.job_id,
+                        unit as u64 + 1,
+                    ) {
                         Ok(()) => error.to_string(),
                         Err(reconcile_error) => {
                             format!("{error}; could not reconcile source state: {reconcile_error}")
@@ -165,17 +269,43 @@ impl Library {
                     });
                 }
             }
+            units_processed_this_run += 1;
         }
         if selected_path.is_dir() {
-            self.reconcile_directory(&root_id, &seen)?;
+            if let Err(error) = self.reconcile_directory(&root_id, &seen) {
+                self.fail_index_job(&job.job_id, &error.to_string())?;
+                return Err(error);
+            }
         }
+        self.complete_index_job(
+            &job.job_id,
+            report
+                .failures
+                .first()
+                .map(|failure| failure.reason.as_str()),
+        )?;
         Ok(report)
     }
 
-    fn index_document(&self, root_id: &str, path: &Path, document: StableDocument) -> Result<bool> {
-        self.index_document_with_extractor(root_id, path, document, EXTRACTOR_ID, EXTRACTOR_VERSION)
+    fn index_document_with_checkpoint(
+        &self,
+        root_id: &str,
+        path: &Path,
+        document: StableDocument,
+        job_id: &str,
+        next_unit: u64,
+    ) -> Result<bool> {
+        self.index_document_with_extractor_and_checkpoint(
+            root_id,
+            path,
+            document,
+            EXTRACTOR_ID,
+            EXTRACTOR_VERSION,
+            Some((job_id, next_unit)),
+        )
     }
 
+    #[cfg(test)]
     fn index_document_with_extractor(
         &self,
         root_id: &str,
@@ -183,6 +313,25 @@ impl Library {
         document: StableDocument,
         extractor_id: &str,
         extractor_version: &str,
+    ) -> Result<bool> {
+        self.index_document_with_extractor_and_checkpoint(
+            root_id,
+            path,
+            document,
+            extractor_id,
+            extractor_version,
+            None,
+        )
+    }
+
+    fn index_document_with_extractor_and_checkpoint(
+        &self,
+        root_id: &str,
+        path: &Path,
+        document: StableDocument,
+        extractor_id: &str,
+        extractor_version: &str,
+        checkpoint: Option<(&str, u64)>,
     ) -> Result<bool> {
         let source_uri = utf8_path(path)?;
         let title = path
@@ -236,6 +385,9 @@ impl Library {
                 && projection.1 == extractor_id
                 && projection.2 == extractor_version
         }) {
+            if let Some((job_id, next_unit)) = checkpoint {
+                update_index_job_checkpoint(&transaction, job_id, next_unit, &now)?;
+            }
             transaction.commit()?;
             return Ok(false);
         }
@@ -278,6 +430,9 @@ impl Library {
             "UPDATE artifacts SET active_version_id = ?1, last_seen_at = ?2 WHERE id = ?3",
             params![version_id, now, artifact_id],
         )?;
+        if let Some((job_id, next_unit)) = checkpoint {
+            update_index_job_checkpoint(&transaction, job_id, next_unit, &now)?;
+        }
         transaction.commit()?;
         Ok(true)
     }
@@ -453,9 +608,94 @@ impl Library {
         Ok(path)
     }
 
-    fn mark_locator_missing(&self, root_id: &str, locator: &str) -> Result<()> {
-        let connection = self.lock()?;
-        connection.execute(
+    fn start_index_job(
+        &self,
+        root_id: &str,
+        selection_locator: &str,
+        discovery_fingerprint: &str,
+        total_units: usize,
+    ) -> Result<IndexJobProgress> {
+        let total_units = sql_i64(total_units as u64, "index job unit count")?;
+        let now = Utc::now().to_rfc3339();
+        let mut connection = self.lock()?;
+        let transaction = connection.transaction()?;
+        let existing: Option<(String, String, i64, i64, String)> = transaction
+            .query_row(
+                "SELECT id, state, next_unit, total_units, discovery_fingerprint
+                 FROM index_jobs
+                 WHERE source_root_id = ?1 AND selection_locator = ?2",
+                params![root_id, selection_locator],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                },
+            )
+            .optional()?;
+        let (job_id, next_unit) = match existing {
+            Some((job_id, state, next_unit, previous_total, previous_fingerprint))
+                if matches!(state.as_str(), "running" | "interrupted")
+                    && previous_total == total_units
+                    && previous_fingerprint == discovery_fingerprint =>
+            {
+                transaction.execute(
+                    "UPDATE index_jobs
+                     SET state = 'running', updated_at = ?1, last_error = NULL
+                     WHERE id = ?2",
+                    params![now, job_id],
+                )?;
+                (job_id, next_unit.max(0) as u64)
+            }
+            Some((job_id, ..)) => {
+                transaction.execute(
+                    "UPDATE index_jobs
+                     SET state = 'running', discovery_fingerprint = ?1, total_units = ?2,
+                         next_unit = 0, started_at = ?3, updated_at = ?3,
+                         completed_at = NULL, last_error = NULL
+                     WHERE id = ?4",
+                    params![discovery_fingerprint, total_units, now, job_id],
+                )?;
+                (job_id, 0)
+            }
+            None => {
+                let job_id = Uuid::new_v4().to_string();
+                transaction.execute(
+                    "INSERT INTO index_jobs(
+                        id, source_root_id, selection_locator, discovery_fingerprint,
+                        total_units, next_unit, state, last_error, started_at, updated_at,
+                        completed_at
+                     ) VALUES (?1, ?2, ?3, ?4, ?5, 0, 'running', NULL, ?6, ?6, NULL)",
+                    params![
+                        job_id,
+                        root_id,
+                        selection_locator,
+                        discovery_fingerprint,
+                        total_units,
+                        now
+                    ],
+                )?;
+                (job_id, 0)
+            }
+        };
+        transaction.commit()?;
+        Ok(IndexJobProgress { job_id, next_unit })
+    }
+
+    fn mark_locator_missing_and_advance(
+        &self,
+        root_id: &str,
+        locator: &str,
+        job_id: &str,
+        next_unit: u64,
+    ) -> Result<()> {
+        let now = Utc::now().to_rfc3339();
+        let mut connection = self.lock()?;
+        let transaction = connection.transaction()?;
+        transaction.execute(
             "UPDATE artifacts SET state = 'missing'
              WHERE source_root_id = ?1 AND state = 'active' AND id IN (
                  SELECT artifact_id FROM artifact_locators
@@ -463,6 +703,48 @@ impl Library {
              )",
             params![root_id, locator],
         )?;
+        update_index_job_checkpoint(&transaction, job_id, next_unit, &now)?;
+        transaction.commit()?;
+        Ok(())
+    }
+
+    fn interrupt_index_job(&self, job_id: &str, message: &str) -> Result<()> {
+        let connection = self.lock()?;
+        connection.execute(
+            "UPDATE index_jobs SET state = 'interrupted', last_error = ?1, updated_at = ?2
+             WHERE id = ?3",
+            params![message, Utc::now().to_rfc3339(), job_id],
+        )?;
+        Ok(())
+    }
+
+    fn fail_index_job(&self, job_id: &str, message: &str) -> Result<()> {
+        let connection = self.lock()?;
+        connection.execute(
+            "UPDATE index_jobs SET state = 'failed', last_error = ?1, updated_at = ?2
+             WHERE id = ?3",
+            params![message, Utc::now().to_rfc3339(), job_id],
+        )?;
+        Ok(())
+    }
+
+    fn complete_index_job(&self, job_id: &str, last_error: Option<&str>) -> Result<()> {
+        let connection = self.lock()?;
+        connection.execute(
+            "UPDATE index_jobs
+             SET state = 'completed', next_unit = total_units, last_error = ?1,
+                 updated_at = ?2, completed_at = ?2
+             WHERE id = ?3",
+            params![last_error, Utc::now().to_rfc3339(), job_id],
+        )?;
+        Ok(())
+    }
+
+    fn advance_index_job(&self, job_id: &str, next_unit: u64) -> Result<()> {
+        let connection = self.lock()?;
+        let transaction = connection.unchecked_transaction()?;
+        update_index_job_checkpoint(&transaction, job_id, next_unit, &Utc::now().to_rfc3339())?;
+        transaction.commit()?;
         Ok(())
     }
 
@@ -584,6 +866,35 @@ impl Library {
     }
 }
 
+struct IndexJobProgress {
+    job_id: String,
+    next_unit: u64,
+}
+
+fn update_index_job_checkpoint(
+    transaction: &Transaction<'_>,
+    job_id: &str,
+    next_unit: u64,
+    now: &str,
+) -> Result<()> {
+    transaction.execute(
+        "UPDATE index_jobs
+         SET next_unit = ?1, updated_at = ?2
+         WHERE id = ?3 AND state = 'running'",
+        params![sql_i64(next_unit, "index job progress")?, now, job_id],
+    )?;
+    Ok(())
+}
+
+fn discovery_fingerprint(paths: &[PathBuf]) -> String {
+    let mut hasher = blake3::Hasher::new();
+    for path in paths {
+        hasher.update(path.to_string_lossy().as_bytes());
+        hasher.update(&[0]);
+    }
+    format!("blake3:{}", hasher.finalize().to_hex())
+}
+
 fn configure(connection: &Connection) -> Result<()> {
     connection.busy_timeout(std::time::Duration::from_secs(5))?;
     connection.execute_batch(
@@ -597,7 +908,7 @@ fn configure(connection: &Connection) -> Result<()> {
 
 fn migrate(connection: &mut Connection) -> Result<()> {
     if let Some(version) = stored_schema_version(connection)? {
-        if version != SCHEMA_VERSION {
+        if version != SCHEMA_VERSION && version != PREVIOUS_SCHEMA_VERSION {
             return Err(LoomError::UnsupportedSchemaVersion(version.to_string()));
         }
     }
@@ -682,6 +993,21 @@ fn migrate(connection: &mut Connection) -> Result<()> {
             CHECK(source_artifact_id <> target_artifact_id)
          ) STRICT;
 
+         CREATE TABLE IF NOT EXISTS index_jobs(
+            id TEXT PRIMARY KEY,
+            source_root_id TEXT NOT NULL REFERENCES source_roots(id) ON DELETE CASCADE,
+            selection_locator TEXT NOT NULL,
+            discovery_fingerprint TEXT NOT NULL,
+            total_units INTEGER NOT NULL CHECK(total_units >= 0),
+            next_unit INTEGER NOT NULL CHECK(next_unit >= 0 AND next_unit <= total_units),
+            state TEXT NOT NULL CHECK(state IN ('running', 'interrupted', 'completed', 'failed')),
+            last_error TEXT,
+            started_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            completed_at TEXT,
+            UNIQUE(source_root_id, selection_locator)
+         ) STRICT;
+
          CREATE VIRTUAL TABLE IF NOT EXISTS passages_fts USING fts5(
             text,
             content = 'passages',
@@ -703,7 +1029,8 @@ fn migrate(connection: &mut Connection) -> Result<()> {
          END;",
     )?;
     transaction.execute(
-        "INSERT OR IGNORE INTO schema_meta(key, value) VALUES ('schema_version', ?1)",
+        "INSERT INTO schema_meta(key, value) VALUES ('schema_version', ?1)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
         [SCHEMA_VERSION.to_string()],
     )?;
     transaction.commit()?;
@@ -948,7 +1275,7 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(schema_version, "2");
+        assert_eq!(schema_version, "3");
 
         let foreign_keys: i64 = connection
             .query_row("PRAGMA foreign_keys", [], |row| row.get(0))
@@ -974,6 +1301,7 @@ mod tests {
             "artifact_versions",
             "passages",
             "relationships",
+            "index_jobs",
         ] {
             let exists: bool = connection
                 .query_row(
@@ -993,6 +1321,7 @@ mod tests {
             "artifact_versions",
             "passages",
             "relationships",
+            "index_jobs",
         ] {
             let rows: i64 = connection
                 .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
@@ -1001,6 +1330,41 @@ mod tests {
                 .unwrap();
             assert_eq!(rows, 0, "empty migration populated {table}");
         }
+    }
+
+    #[test]
+    fn migrates_v2_checkpoint_schema_without_overwriting_existing_marker() {
+        let directory = tempdir().unwrap();
+        let database = directory.path().join("v2.sqlite3");
+        let connection = rusqlite::Connection::open(&database).unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE schema_meta(key TEXT PRIMARY KEY, value TEXT NOT NULL) STRICT;
+                 INSERT INTO schema_meta(key, value) VALUES ('schema_version', '2');",
+            )
+            .unwrap();
+        drop(connection);
+
+        let library = Library::open(&database).unwrap();
+        let connection = library.lock().unwrap();
+        let schema_version: String = connection
+            .query_row(
+                "SELECT value FROM schema_meta WHERE key = 'schema_version'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(schema_version, "3");
+        let checkpoint_table: bool = connection
+            .query_row(
+                "SELECT EXISTS(
+                    SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'index_jobs'
+                )",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(checkpoint_table);
     }
 
     #[test]

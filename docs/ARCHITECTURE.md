@@ -70,9 +70,10 @@ from user data and is not a claim about production retrieval quality.
 
 ## Persistence
 
-SQLite is the canonical store. The current schema is version 2 and contains source roots, logical
-artifacts, locators, content versions, passages, and reserved relationships. Each passage has a JSON
-text anchor plus scalar character and line offsets.
+SQLite is the canonical store. The current schema is version 3 and contains source roots, logical
+artifacts, locators, content versions, passages, reserved relationships, and durable indexing-job
+checkpoints. Each passage has a JSON text anchor plus scalar character and line offsets. Version 2
+databases migrate transactionally by adding the checkpoint table.
 
 SQLite FTS5 is an external-content virtual table over passages. Insert, update, and delete triggers
 keep the lexical index synchronized with canonical passage rows. Search uses sanitized FTS5 terms
@@ -85,11 +86,13 @@ mode, in-memory temporary storage, and SQLite trusted-schema hardening. These ar
 choices for the local database, not a promise of crash-proof or encrypted storage. SQLite documents
 the WAL trade-offs in its [WAL reference](https://www.sqlite.org/wal.html).
 
-The current schema is version 2. Opening refuses a missing, malformed, or unknown version marker
-instead of rewriting it. Pre-alpha version 1 databases are explicitly rejected because their
-content-version uniqueness contract did not include extractor identity; no public migration path
-has been promised. A content observation is keyed by source artifact, byte hash, extractor, and
-extractor version so changed extraction logic cannot silently reuse old passages.
+The current schema is version 3. Opening refuses a missing, malformed, or unknown version marker
+instead of rewriting it; version 2 is the one supported transactional migration. Pre-alpha version
+1 databases are explicitly rejected because their content-version uniqueness contract did not
+include extractor identity. A content observation is keyed by source artifact, byte hash, extractor,
+and extractor version so changed extraction logic cannot silently reuse old passages. Each indexing
+unit advances a fingerprint-bound checkpoint in the same transaction as canonical writes, allowing
+an interrupted scan to resume without making a partially committed artifact searchable.
 
 ## Invariants
 
