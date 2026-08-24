@@ -2,7 +2,8 @@
 
 - Issue: [#29](https://github.com/AlisinaDevelo/LOOM/issues/29)
 - Implementation PR: [#217](https://github.com/AlisinaDevelo/LOOM/pull/217)
-- Merged-main SHA: `7de9dff2a5633efc149a8575fa234ae446443c4a`
+- Reconciler-fix PR: [#219](https://github.com/AlisinaDevelo/LOOM/pull/219)
+- Merged-main SHA: `193ee538a62ce04d64dea13c690287c35166379d`
 - Roadmap status: `review`
 - Verification status: PASS for the protocol specification and offline contract; the issue remains
   open while prerequisite `0202` is still in review.
@@ -16,14 +17,15 @@
 | Rust | rustc 1.96.0 / cargo 1.96.0 |
 | JavaScript | Node v26.7.0 / npm 11.19.0 |
 | Python | 3.9.6 |
-| Merged-main run | `/tmp/loom-0300-main.cfLLX1` |
-| Merged PR | `#217`, squash merge `7de9dff2a5633efc149a8575fa234ae446443c4a` |
+| Merged-main run | `/tmp/loom-0300-final.BSyWZq` |
+| Merged PRs | `#217` (`7de9dff2a5633efc149a8575fa234ae446443c4a`), `#219` (`193ee538a62ce04d64dea13c690287c35166379d`) |
 | Main protection | Ruleset `main-protection` (`21332347`), active on `refs/heads/main` |
 
 The run directory retains the exact source SHA, environment, protocol-test output, existing Python
-test output, roadmap validation, markdown lint result, effective main rules, PR merge record, clean
-diff check, clean status, and a SHA-256 manifest. The manifest is
-`/tmp/loom-0300-main.cfLLX1/log-sha256.txt`.
+test output, roadmap validation, markdown lint result, effective main rules, PR merge records, clean
+diff check, clean status, the reconciler plan, and a SHA-256 manifest. The manifest is
+`/tmp/loom-0300-final.BSyWZq/log-sha256.txt` (SHA-256
+`7777977107df93b236c633d62d0dd7ef29b3735433dd9fd574bfb617661e73dc`).
 
 ## Acceptance mapping
 
@@ -41,16 +43,22 @@ unavailable hardware as substitutes:
 
 ```text
 python3 scripts/test-browser-capture-protocol.py       10 passed
-python3 -m unittest discover -s tests -p 'test_*.py'   19 passed
+python3 -m unittest discover -s tests -p 'test_*.py'   20 passed
 python3 scripts/roadmap.py --validate-only             valid
 markdownlint-cli2 ...                                  0 issues
 git diff --check                                        clean
+python3 scripts/roadmap.py --apply                     verified; zero mutations
 ```
 
 Roadmap validation reported 154 active issues, 4 retired issues, 20 milestones, 13 phases, 141
-parent edges, and 314 dependency edges. The main rules endpoint returned deletion, non-fast-forward,
-and pull-request rules for the active protection ruleset. No screenshot was used as evidence; any
-future desktop capture must be cropped to the relevant browser/LOOM panel.
+parent edges, and 314 dependency edges. The reconciler's initial and second plans both reported
+zero label, milestone, issue, retirement, parent, and dependency mutations; its verified result
+reported 158 managed issues and 13 closed issues. The standalone reconciler output is retained at
+`/tmp/loom-0300-final.BSyWZq/roadmap-apply.json` with SHA-256
+`43f96b0c5a024c5917da3b0fd895b2c761cb3bff458355ed088d7b0fc753e3e7`. The main rules endpoint
+returned deletion, non-fast-forward, and pull-request rules for the active protection ruleset. No
+screenshot was used as evidence; any future desktop capture must be cropped to the relevant
+browser/LOOM panel.
 
 ## Review boundary and limitations
 
@@ -59,6 +67,6 @@ extension, native host, HTML sanitizer, browser permission onboarding, cross-bro
 web archive. Those are roadmap `0301` and later acceptance gates. The protocol does not defend
 against a compromised macOS account, Keychain, browser process, or signed native host.
 
-The PR was locally diff-reviewed and merged to the active protected `main` ruleset. The repository
+The PRs were locally diff-reviewed and merged to the active protected `main` ruleset. The repository
 owner is the only available collaborator, so no independent GitHub approval is claimed. Issue #29
 therefore remains in `review` until its declared prerequisite/review governance is satisfied.
