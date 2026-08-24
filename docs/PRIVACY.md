@@ -73,6 +73,12 @@ multi-device sync must define collection scope, consent, retention, deletion, en
 control, and failure behavior before it is enabled. A derived representation must not silently
 expand the collection or become the only way to recover source evidence.
 
+The current [explicit-save browser connector prototype](../browser-extension/README.md) is not an
+always-on capture service: it requests no host permissions, history, tabs, cookies, or network
+access, refuses to inspect a page until a local pairing exists, and sends only sanitized,
+user-requested data to the named native host. A consented browser permission session and host-side
+storage integration remain separate release gates.
+
 The current direct-distribution build uses explicit re-selection rather than claiming a
 security-scoped bookmark. A future sandboxed/notarized build must replace or supplement that path
 with persistent security-scoped bookmarks and test stale bookmark recovery. The design is informed

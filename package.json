@@ -16,6 +16,7 @@
     "lint:code": "eslint . --max-warnings=0",
     "lint:markdown": "markdownlint-cli2 '**/*.md' '#node_modules' '#target' '#.forge'",
     "test": "vitest run",
+    "test:browser-extension": "node --test browser-extension/test/capture.test.js",
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit",
     "preview": "vite preview",

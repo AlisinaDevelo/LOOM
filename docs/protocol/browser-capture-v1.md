@@ -77,6 +77,38 @@ The host returns a `capture.accepted` response containing the stable artifact ID
 snapshot state, and source hash, or a `capture.rejected` response with a stable error code. A
 rejection never creates a source, version, passage, snapshot, or relationship row.
 
+When `snapshot.state` is `complete` or `partial` and `snapshot.bytes` is non-zero, the request is
+followed by one or more authenticated `capture.payload` frames. Payload frames are deliberately
+separate from the metadata request so that an 8 MiB best-effort snapshot does not violate the
+256 KiB native-messaging envelope limit:
+
+```json
+{
+  "protocol": {"major": 1, "minor": 0},
+  "type": "capture.payload",
+  "request_id": "same-request-uuid",
+  "session": {"id": "paired-session-id", "counter": 7},
+  "sequence": 0,
+  "final": false,
+  "content_type": "text/html",
+  "encoding": "base64",
+  "content_hash": "sha256:...",
+  "bytes": 160000,
+  "body": "base64-of-sanitized-utf8-bytes",
+  "auth": {
+    "key_id": "pairing-key-1",
+    "algorithm": "HMAC-SHA256",
+    "mac": "hex-encoded-32-byte-mac"
+  }
+}
+```
+
+Payload `sequence` values start at zero and increase without gaps; exactly one frame has `final:
+true`. Each frame carries at most 160 KiB of raw UTF-8 bytes and remains below the 256 KiB encoded
+frame limit. The host authenticates every frame, rejects an unexpected request ID, counter,
+sequence, hash, content type, or body size, and writes no snapshot until the concatenated bytes
+match the request hash. `failed` and `not_requested` requests have no payload frames.
+
 ## Pairing, authentication, and version negotiation
 
 1. The native host manifest allowlists the signed extension identifier and the exact LOOM host
@@ -161,6 +193,9 @@ snapshot as a complete archive or as evidence that the current live page still m
 
 - Reject a frame larger than 256 KiB, selected text larger than 64 KiB, or sanitized snapshot bytes
   larger than 8 MiB before writing anything; return `payload_too_large`.
+- Treat a missing, duplicate, out-of-order, or hash-mismatched payload frame as
+  `payload_integrity_failed`; discard all uncommitted chunks and retain only the live URL plus a
+  visible partial/failed reason.
 - Cap redirects at eight hops and reject malformed or non-HTTP(S) URLs with `source_invalid`.
 - Apply a per-session rate limit of four accepted requests per minute. Return
   `capture_rate_limited` without changing the library when the limit is exceeded.
