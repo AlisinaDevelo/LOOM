@@ -1038,7 +1038,7 @@
         "phase:v0-2-needle",
         "area:retrieval"
       ],
-      "closure_evidence": "Record the exact tests, fixtures, measurements, review artifacts, or consented study evidence that satisfy every criterion; report only work actually performed.",
+      "closure_evidence": "Merged-main evidence: [docs/evidence/0212-device.md](https://github.com/AlisinaDevelo/LOOM/blob/main/docs/evidence/0212-device.md) at commit `71bba194febb0c628bc48596c693cd3b4b3d55f9`, with PR [#213](https://github.com/AlisinaDevelo/LOOM/pull/213) merged. The target Mac ran the semantic CLI contract (manifest fields, timed rebuild, drop, rebuild, evidence-bound search) and `cargo test -p loom-core --test semantic_index --locked --offline -- --nocapture` (6 passed); retained JSON/log SHA-256 digests and exact acceptance mapping are in the evidence document.",
       "product_boundary": "LOOM remains local-first and evidence-first. Canonical source identity and evidence stay authoritative; derived indexes, model output, snapshots, and transport state remain inspectable, rebuildable, and explicitly uncertain."
     },
     {
