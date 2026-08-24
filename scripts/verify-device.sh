@@ -118,8 +118,11 @@ git rev-parse HEAD >> "$SUMMARY"
 run_step fmt cargo fmt --all --check
 run_step clippy cargo clippy --workspace --all-targets --locked -- -D warnings
 run_step rust-workspace cargo test --workspace --locked
+run_step clear-stable-target clear_rust_outputs
 run_step rust-msrv-check cargo +1.88.0 check --workspace --all-targets --locked
+run_step clear-msrv-check-target clear_rust_outputs
 run_step rust-msrv-tests cargo +1.88.0 test -p loom-core --lib --tests -- --nocapture
+run_step clear-msrv-test-target clear_rust_outputs
 run_step performance-build cargo build --locked -q -p loom-cli
 run_step stage-cli-binary stage_cli_binary
 run_step clear-rust-target clear_rust_outputs
