@@ -2,7 +2,7 @@ import { FormEvent, useCallback, useEffect, useMemo, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 
 import "./App.css";
-import { compactPath } from "./evidence";
+import { compactPath, projectImageRegion, type ImageRegionAnchor } from "./evidence";
 
 type LibraryStats = {
   source_roots: number;
@@ -66,9 +66,33 @@ type SearchHit = {
     image_width?: number;
     image_height?: number;
     orientation?: number;
+    scale_milli?: number;
     confidence_milli?: number;
   };
   match_reason: string;
+};
+
+type EvidenceView = {
+  artifact_id: string;
+  version_id: string;
+  passage_id: string;
+  title: string;
+  media_type: string;
+  source_uri: string;
+  content_hash: string;
+  passage_text: string;
+  anchor: SearchHit["anchor"];
+  page_count?: number;
+  extractor_id: string;
+  extractor_version: string;
+  extraction_metadata: Record<string, unknown>;
+};
+
+type EvidenceState = {
+  hit: SearchHit;
+  status: "loading" | "ready" | "error";
+  view?: EvidenceView;
+  error?: string;
 };
 
 type OcrStatus = {
@@ -107,6 +131,134 @@ function sourceRootStatusLabel(status: SourceRootStatus): string {
   }[status];
 }
 
+type EvidenceViewerProps = {
+  state: EvidenceState;
+  zoom: number;
+  rotation: number;
+  onZoomChange: (zoom: number) => void;
+  onRotationChange: (rotation: number) => void;
+  onClose: () => void;
+  onOpenOriginal: (hit: SearchHit) => void;
+};
+
+function EvidenceViewer({
+  state,
+  zoom,
+  rotation,
+  onZoomChange,
+  onRotationChange,
+  onClose,
+  onOpenOriginal,
+}: EvidenceViewerProps) {
+  const view = state.view;
+  if (state.status === "loading") {
+    return (
+      <section className="evidence-viewer" aria-label="Evidence viewer">
+        <div className="evidence-viewer-heading">
+          <div><p className="eyebrow">Verified evidence</p><h2>Checking the source…</h2></div>
+          <button type="button" className="viewer-close" onClick={onClose}>Close</button>
+        </div>
+        <p className="evidence-loading">Re-checking the active version, content hash, and passage anchor.</p>
+      </section>
+    );
+  }
+  if (state.status === "error" || !view) {
+    return (
+      <section className="evidence-viewer evidence-viewer-error" aria-label="Evidence viewer">
+        <div className="evidence-viewer-heading">
+          <div><p className="eyebrow">Evidence unavailable</p><h2>Source needs attention.</h2></div>
+          <button type="button" className="viewer-close" onClick={onClose}>Close</button>
+        </div>
+        <p role="alert">{state.error ?? "The source could not be verified."}</p>
+        <p className="evidence-loading">Re-index the selected folder, then retry this evidence result.</p>
+      </section>
+    );
+  }
+
+  const anchor = view.anchor;
+  const isImage = anchor.kind === "image_region";
+  const imageProjection = isImage
+    ? projectImageRegion({
+        x: anchor.x ?? 0,
+        y: anchor.y ?? 0,
+        width: anchor.width ?? 0,
+        height: anchor.height ?? 0,
+        image_width: anchor.image_width ?? 1,
+        image_height: anchor.image_height ?? 1,
+      } satisfies ImageRegionAnchor, zoom, rotation, window.devicePixelRatio || 1)
+    : null;
+  const location = anchor.kind === "pdf_page"
+    ? `PDF page ${anchor.page ?? "?"}`
+    : anchor.kind === "image_region"
+      ? `Image region ${anchor.x ?? 0},${anchor.y ?? 0} · ${anchor.width ?? 0}×${anchor.height ?? 0}px`
+      : `Text lines ${anchor.line_start}–${anchor.line_end}`;
+
+  return (
+    <section className="evidence-viewer" aria-label="Evidence viewer">
+      <div className="evidence-viewer-heading">
+        <div>
+          <p className="eyebrow">Verified evidence</p>
+          <h2>{view.title}</h2>
+          <p className="evidence-location">{location} · {view.extractor_id} {view.extractor_version}</p>
+        </div>
+        <div className="viewer-actions">
+          {isImage && <>
+            <button type="button" className="viewer-control" onClick={() => onZoomChange(zoom - 0.25)} aria-label="Zoom out">−</button>
+            <span className="viewer-zoom">{Math.round(zoom * 100)}%</span>
+            <button type="button" className="viewer-control" onClick={() => onZoomChange(zoom + 0.25)} aria-label="Zoom in">＋</button>
+            <button type="button" className="viewer-control" onClick={() => onRotationChange(rotation + 90)} aria-label="Rotate evidence">↻</button>
+          </>}
+          <button type="button" className="viewer-close" onClick={onClose}>Close</button>
+        </div>
+      </div>
+
+      {isImage && imageProjection ? (
+        <div
+          className="evidence-stage image-stage"
+          data-testid="image-evidence-stage"
+          data-rotation={imageProjection.rotation}
+          data-zoom={imageProjection.scale}
+          style={{ aspectRatio: `${imageProjection.canvasWidth} / ${imageProjection.canvasHeight}` }}
+        >
+          <div
+            className="image-evidence-map"
+            style={{ aspectRatio: `${imageProjection.canvasWidth} / ${imageProjection.canvasHeight}` }}
+            aria-label={`Image evidence canvas at ${imageProjection.rotation} degrees`}
+          >
+            <div
+              className="image-evidence-region"
+              style={{
+                left: `${imageProjection.leftPercent}%`,
+                top: `${imageProjection.topPercent}%`,
+                width: `${imageProjection.widthPercent}%`,
+                height: `${imageProjection.heightPercent}%`,
+              }}
+            />
+            <span className="image-evidence-caption">OCR region · confidence {((anchor.confidence_milli ?? 0) / 10).toFixed(1)}%</span>
+          </div>
+        </div>
+      ) : (
+        <div className={`evidence-stage ${anchor.kind === "pdf_page" ? "pdf-stage" : "text-stage"}`}>
+          {anchor.kind === "pdf_page" && <div className="pdf-page-label">Page {anchor.page ?? "?"} of {view.page_count ?? "?"}</div>}
+          <blockquote className="verified-passage"><mark>{view.passage_text}</mark></blockquote>
+          {anchor.kind === "pdf_page" && <div className="pdf-anchor-line" aria-hidden="true" />}
+        </div>
+      )}
+
+      <div className="evidence-viewer-footer">
+        <div>
+          <span className="evidence-footer-label">Verified source</span>
+          <code title={view.content_hash}>{view.content_hash.slice(0, 28)}…</code>
+          <p title={view.source_uri}>{compactPath(view.source_uri)}</p>
+        </div>
+        <button type="button" className="open-button" onClick={() => onOpenOriginal(state.hit)}>
+          Open original <span aria-hidden="true">↗</span>
+        </button>
+      </div>
+    </section>
+  );
+}
+
 function App() {
   const [stats, setStats] = useState<LibraryStats>(emptyStats);
   const [query, setQuery] = useState("");
@@ -117,8 +269,11 @@ function App() {
     derived_passages: 0,
   });
   const [searched, setSearched] = useState(false);
-  const [busy, setBusy] = useState<"index" | "search" | "scope" | "ocr" | null>(null);
+  const [busy, setBusy] = useState<"index" | "search" | "scope" | "ocr" | "evidence" | null>(null);
   const [sourceRoots, setSourceRoots] = useState<SourceRootInfo[]>([]);
+  const [evidenceState, setEvidenceState] = useState<EvidenceState | null>(null);
+  const [evidenceZoom, setEvidenceZoom] = useState(1);
+  const [evidenceRotation, setEvidenceRotation] = useState(0);
   const [notice, setNotice] = useState("Ready. LOOM does not upload your library.");
   const [error, setError] = useState<string | null>(null);
 
@@ -265,6 +420,7 @@ function App() {
         request: { text: query, limit: 30 },
       });
       setHits(results);
+      setEvidenceState(null);
       setNotice(
         results.length
           ? `Found ${results.length} source-backed result${results.length === 1 ? "" : "s"}.`
@@ -291,6 +447,31 @@ function App() {
       });
     } catch (caught) {
       setError(errorMessage(caught));
+    }
+  };
+
+  const resolveEvidence = async (hit: SearchHit) => {
+    setError(null);
+    setBusy("evidence");
+    setEvidenceState({ hit, status: "loading" });
+    setEvidenceZoom(1);
+    setEvidenceRotation(0);
+    try {
+      const view = await invoke<EvidenceView>("resolve_evidence", {
+        request: {
+          artifact_id: hit.artifact_id,
+          version_id: hit.version_id,
+          passage_id: hit.passage_id,
+          content_hash: hit.content_hash,
+        },
+      });
+      setEvidenceState({ hit, status: "ready", view });
+    } catch (caught) {
+      const message = errorMessage(caught);
+      setEvidenceState({ hit, status: "error", error: message });
+      setError(message);
+    } finally {
+      setBusy(null);
     }
   };
 
@@ -458,6 +639,17 @@ function App() {
               <h2>Recovered sources</h2>
               <span>{hits.length} matches · ranked with FTS5 BM25</span>
             </div>
+            {evidenceState && (
+              <EvidenceViewer
+                state={evidenceState}
+                zoom={evidenceZoom}
+                rotation={evidenceRotation}
+                onZoomChange={(next) => setEvidenceZoom(Math.max(0.5, Math.min(2, next)))}
+                onRotationChange={(next) => setEvidenceRotation(((next % 360) + 360) % 360)}
+                onClose={() => setEvidenceState(null)}
+                onOpenOriginal={openArtifact}
+              />
+            )}
             <ol>
               {hits.map((hit) => (
                 <li key={hit.passage_id} className="result-card">
@@ -472,9 +664,14 @@ function App() {
                         </span>
                         <h3>{hit.title}</h3>
                       </div>
-                      <button type="button" className="open-button" onClick={() => openArtifact(hit)}>
-                        Open original <span aria-hidden="true">↗</span>
-                      </button>
+                      <div className="result-actions">
+                        <button type="button" className="evidence-button" onClick={() => resolveEvidence(hit)} disabled={busy !== null}>
+                          {busy === "evidence" && evidenceState?.hit.passage_id === hit.passage_id ? "Checking evidence" : "View evidence"}
+                        </button>
+                        <button type="button" className="open-button" onClick={() => openArtifact(hit)} disabled={busy !== null}>
+                          Open original <span aria-hidden="true">↗</span>
+                        </button>
+                      </div>
                     </div>
                     <p className="source-path" title={hit.source_uri}>{compactPath(hit.source_uri)}</p>
                     <blockquote>

@@ -88,10 +88,12 @@ A search result contains:
 - the exact text anchor;
 - a short match reason.
 
-The UI uses the locator and anchor to show where the evidence came from. Opening sends the result's
-artifact ID, version ID, and content hash back to the core; the core checks that the active record
-still matches and rereads the source through the stable-read path. Missing or changed bytes return
-an explicit stale-source error rather than opening different content under an old excerpt.
+The UI uses the locator and anchor to show where the evidence came from. The evidence viewer sends
+the result's artifact ID, version ID, passage ID, and content hash to `resolve_evidence`; the core
+checks that the active record still matches, rereads the source through the stable-read path, and
+returns the canonical passage plus its page/region anchor and extractor metadata. Missing or changed
+bytes return an explicit stale-source error rather than showing different content under an old
+excerpt. `open_artifact` uses the same verified tuple before handing the original path to the host.
 
 ## Lifecycle states
 

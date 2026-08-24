@@ -329,6 +329,66 @@ h1 { margin: 0; font: 500 clamp(34px, 5vw, 54px)/1.04 Georgia, serif; letter-spa
   letter-spacing: 0.08em;
 }
 
+.evidence-viewer {
+  margin: 0 0 14px;
+  padding: 18px 20px 16px;
+  border: 1px solid #53633d;
+  border-radius: 11px;
+  background: #151b12;
+  box-shadow: 0 16px 40px rgba(0, 0, 0, 0.16);
+}
+
+.evidence-viewer-error { border-color: #6a3d35; background: #241815; }
+.evidence-viewer-heading { display: flex; justify-content: space-between; gap: 16px; align-items: flex-start; }
+.evidence-viewer-heading .eyebrow { margin-bottom: 7px; }
+.evidence-viewer-heading h2 { margin: 0; font: 400 21px Georgia, serif; }
+.evidence-location { margin: 6px 0 0; color: var(--muted); font: 9px ui-monospace, monospace; }
+.viewer-actions { display: flex; align-items: center; gap: 7px; }
+.viewer-close, .viewer-control {
+  border: 1px solid var(--line-strong);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted);
+  padding: 5px 8px;
+  font: 10px ui-monospace, monospace;
+  cursor: pointer;
+}
+.viewer-close:hover, .viewer-control:hover { border-color: var(--thread); color: var(--thread); }
+.viewer-zoom { min-width: 38px; color: var(--faint); text-align: center; font: 9px ui-monospace, monospace; }
+.evidence-loading, .evidence-viewer-error > p { color: var(--muted); font-size: 12px; line-height: 1.6; }
+.evidence-stage {
+  position: relative;
+  min-height: 150px;
+  margin-top: 16px;
+  overflow: hidden;
+  border: 1px solid var(--line-strong);
+  border-radius: 8px;
+  background: #10130f;
+}
+.pdf-stage, .text-stage { padding: 28px 30px; }
+.pdf-stage { min-height: 210px; background: linear-gradient(90deg, #e4e4d9 0 8px, #f0f0e7 8px 100%); color: #20221e; }
+.pdf-page-label { color: #5d6557; font: 9px ui-monospace, monospace; text-transform: uppercase; letter-spacing: 0.08em; }
+.verified-passage { margin: 24px 0 0; border-left-color: #7b9d4e; color: #293023; font: 12px/1.7 ui-monospace, monospace; }
+.verified-passage mark { color: #293023; background: #d5ee99; border-bottom-color: #718c45; }
+.pdf-anchor-line { position: absolute; left: 29px; right: 29px; bottom: 25px; height: 2px; background: rgba(93, 119, 62, 0.45); }
+.text-stage { background: #11150f; }
+.text-stage .verified-passage { margin-top: 0; color: var(--muted); }
+.text-stage .verified-passage mark { color: #e9f7d0; }
+.image-stage { display: grid; place-items: center; padding: 14px; min-height: 220px; background: repeating-conic-gradient(#171c15 0 25%, #131711 0 50%) 50% / 22px 22px; }
+.image-evidence-map { position: relative; width: min(100%, 620px); min-height: 170px; border: 1px solid #5a6945; background: linear-gradient(135deg, #222b1f, #11160f 52%, #27351e); transition: transform 0.15s ease; }
+.image-evidence-map::before { content: "source image · original remains at verified path"; position: absolute; inset: 12px auto auto 14px; color: #82916e; font: 9px ui-monospace, monospace; text-transform: uppercase; letter-spacing: 0.06em; }
+.image-evidence-region { position: absolute; min-width: 4px; min-height: 4px; border: 2px solid var(--thread); background: rgba(198, 243, 107, 0.22); box-shadow: 0 0 0 4px rgba(198, 243, 107, 0.08), 0 0 18px rgba(198, 243, 107, 0.35); }
+.image-evidence-caption { position: absolute; right: 12px; bottom: 10px; color: #b7ca91; font: 9px ui-monospace, monospace; }
+.evidence-viewer-footer { display: flex; justify-content: space-between; align-items: center; gap: 16px; margin-top: 14px; }
+.evidence-viewer-footer > div { min-width: 0; }
+.evidence-footer-label { margin-right: 9px; color: #82916e; font: 9px ui-monospace, monospace; text-transform: uppercase; letter-spacing: 0.08em; }
+.evidence-viewer-footer code { color: #aeb89e; font: 9px ui-monospace, monospace; }
+.evidence-viewer-footer p { overflow: hidden; margin: 5px 0 0; color: var(--faint); font: 9px ui-monospace, monospace; text-overflow: ellipsis; white-space: nowrap; }
+.result-actions { display: flex; flex: none; align-items: center; gap: 13px; }
+.evidence-button { border: 0; background: transparent; color: #b5d77d; font: 10px ui-monospace, monospace; cursor: pointer; }
+.evidence-button:hover:not(:disabled) { text-decoration: underline; }
+.evidence-button:disabled, .open-button:disabled { cursor: wait; opacity: 0.5; }
+
 .results ol { list-style: none; margin: 0; padding: 0; display: grid; gap: 10px; }
 .result-card {
   display: grid;

@@ -1,6 +1,8 @@
 use std::fs;
 
-use loom_core::{EvidenceAnchor, Library, LibraryLimits, SearchRequest};
+use loom_core::{
+    EvidenceAnchor, Library, LibraryLimits, LoomError, ResolveEvidenceRequest, SearchRequest,
+};
 use tempfile::tempdir;
 
 #[test]
@@ -66,6 +68,37 @@ fn golden_pdf_records_page_anchors_warnings_and_verified_navigation() {
             .collect::<String>(),
         "third page marker"
     );
+
+    let evidence = library
+        .resolve_verified_evidence(&ResolveEvidenceRequest {
+            artifact_id: hit.artifact_id.clone(),
+            version_id: hit.version_id.clone(),
+            passage_id: hit.passage_id.clone(),
+            content_hash: hit.content_hash.clone(),
+        })
+        .unwrap();
+    assert_eq!(evidence.media_type, "application/pdf");
+    assert_eq!(
+        evidence.source_uri,
+        source.canonicalize().unwrap().to_string_lossy()
+    );
+    assert_eq!(evidence.passage_text, "LOOM third page marker");
+    assert!(matches!(
+        evidence.anchor,
+        EvidenceAnchor::PdfPage { page: 3, .. }
+    ));
+
+    fs::write(&source, build_pdf(&["LOOM changed page marker"])).unwrap();
+    assert!(matches!(
+        library.resolve_verified_evidence(&ResolveEvidenceRequest {
+            artifact_id: hit.artifact_id.clone(),
+            version_id: hit.version_id.clone(),
+            passage_id: hit.passage_id.clone(),
+            content_hash: hit.content_hash.clone(),
+        }),
+        Err(LoomError::ArtifactStale(_))
+    ));
+    fs::write(&source, &bytes).unwrap();
 
     let opened = library
         .resolve_verified_artifact_path(&hit.artifact_id, &hit.version_id, &hit.content_hash)

@@ -14,10 +14,10 @@ use uuid::Uuid;
 
 use crate::{
     domain::{
-        ArtifactObservation, EvidenceAnchor, FtsHealthReport, FtsRepairReport,
+        ArtifactObservation, EvidenceAnchor, EvidenceView, FtsHealthReport, FtsRepairReport,
         IndexCancellationToken, IndexCheckpoint, IndexFailure, IndexReport, LibraryStats,
-        ObservationReport, OcrPurgeReport, OcrStatus, PassageObservation, SearchHit, SearchRequest,
-        SourceRootInfo, SourceRootStatus,
+        ObservationReport, OcrPurgeReport, OcrStatus, PassageObservation, ResolveEvidenceRequest,
+        SearchHit, SearchRequest, SourceRootInfo, SourceRootStatus,
     },
     error::{io_error, LoomError, Result},
     ingest::{
@@ -875,6 +875,81 @@ impl Library {
             return Err(LoomError::ArtifactStale(artifact_id.to_string()));
         }
         Ok(path)
+    }
+
+    /// Verifies a search result and returns the canonical passage for the evidence viewer.
+    ///
+    /// Source bytes are checked before and the active locator/version/passage row is checked after
+    /// the hash read. If the source changed, disappeared, or the passage belongs to an older
+    /// version, the caller receives `ArtifactStale` and can offer re-index/recovery instead of
+    /// presenting misleading evidence.
+    pub fn resolve_verified_evidence(
+        &self,
+        request: &ResolveEvidenceRequest,
+    ) -> Result<EvidenceView> {
+        let _path = self.resolve_verified_artifact_path(
+            &request.artifact_id,
+            &request.version_id,
+            &request.content_hash,
+        )?;
+        Uuid::parse_str(&request.passage_id)
+            .map_err(|_| LoomError::ArtifactStale(request.artifact_id.clone()))?;
+
+        let connection = self.lock()?;
+        let view: Option<EvidenceView> = connection
+            .query_row(
+                "SELECT
+                    a.id, v.id, p.id, a.title, a.media_type, l.locator, v.content_hash,
+                    p.text, p.locator_json, v.page_count, v.extractor_id, v.extractor_version,
+                    v.extraction_metadata_json
+                 FROM artifacts a
+                 JOIN artifact_versions v ON v.id = a.active_version_id
+                 JOIN passages p ON p.artifact_version_id = v.id
+                 JOIN artifact_locators l ON l.artifact_id = a.id AND l.active = 1
+                 WHERE a.id = ?1 AND v.id = ?2 AND p.id = ?3
+                   AND v.content_hash = ?4 AND a.state = 'active' AND l.kind = 'file'",
+                params![
+                    request.artifact_id,
+                    request.version_id,
+                    request.passage_id,
+                    request.content_hash
+                ],
+                |row| {
+                    let anchor_json: String = row.get(8)?;
+                    let metadata_json: String = row.get(12)?;
+                    Ok(EvidenceView {
+                        artifact_id: row.get(0)?,
+                        version_id: row.get(1)?,
+                        passage_id: row.get(2)?,
+                        title: row.get(3)?,
+                        media_type: row.get(4)?,
+                        source_uri: row.get(5)?,
+                        content_hash: row.get(6)?,
+                        passage_text: row.get(7)?,
+                        anchor: serde_json::from_str(&anchor_json).map_err(|error| {
+                            rusqlite::Error::FromSqlConversionFailure(
+                                8,
+                                rusqlite::types::Type::Text,
+                                Box::new(error),
+                            )
+                        })?,
+                        page_count: row.get(9)?,
+                        extractor_id: row.get(10)?,
+                        extractor_version: row.get(11)?,
+                        extraction_metadata: serde_json::from_str(&metadata_json).map_err(
+                            |error| {
+                                rusqlite::Error::FromSqlConversionFailure(
+                                    12,
+                                    rusqlite::types::Type::Text,
+                                    Box::new(error),
+                                )
+                            },
+                        )?,
+                    })
+                },
+            )
+            .optional()?;
+        view.ok_or_else(|| LoomError::ArtifactStale(request.artifact_id.clone()))
     }
 
     fn start_index_job(

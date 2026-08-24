@@ -60,15 +60,20 @@ benchmark. Its default database is .loom/library.sqlite3; callers can provide an
 
 The Tauri layer opens the application-data SQLite database and exposes the narrow commands
 index_selected_folder, cancel_indexing, reconcile_approved_roots, list_source_roots,
-revoke_source_root, search, library_stats, and open_artifact. Folder selection happens inside the
+revoke_source_root, search, library_stats, resolve_evidence, and open_artifact. Folder selection happens inside the
 Rust command through the native dialog; the webview does not provide a path. Persisted roots are
 exact read-only locators with
 available/missing/denied/moved/unsafe/revoked status. Re-selection through the native picker is the
 current relaunch recovery path; a future sandboxed build must add persistent security-scoped
 bookmarks rather than widening permissions. Opening requires the artifact ID, version ID, and content
 hash returned by search, then rereads and verifies current source bytes before handing the path to the
-host. The React UI can search, inspect structured source-backed evidence, inspect/revoke scopes, and
-request that verified open operation. Tauri capability configuration is a security boundary and must
+host. `resolve_evidence` sends the result's artifact ID, version ID, passage ID, and content hash
+back to the core; the core checks the active record, rereads the source through the stable-read path,
+and returns the canonical passage, extractor metadata, and page/region anchor. The React UI renders
+that verified PDF/text evidence or a bounded OCR region map with explicit zoom/rotation state.
+Missing, changed, or mismatched bytes return an explicit stale-source error rather than showing
+different content under an old excerpt. `open_artifact` uses the same tuple for the final handoff to
+the host. Tauri capability configuration is a security boundary and must
 be reviewed with command changes. See the
 [Tauri capabilities documentation](https://v2.tauri.app/security/capabilities/).
 
