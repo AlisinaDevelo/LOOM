@@ -52,6 +52,20 @@ const hit = {
   match_reason: "SQLite FTS5 BM25 over the active source passage",
 };
 
+const pdfHit = {
+  ...hit,
+  title: "paper.pdf",
+  media_type: "application/pdf",
+  anchor: {
+    kind: "pdf_page" as const,
+    page: 2,
+    char_start: 6,
+    char_end: 25,
+    line_start: 1,
+    line_end: 1,
+  },
+};
+
 describe("desktop truth path", () => {
   afterEach(() => {
     cleanup();
@@ -111,6 +125,25 @@ describe("desktop truth path", () => {
         },
       });
     });
+  });
+
+  it("renders a PDF page anchor without collapsing it into a text-only location", async () => {
+    invokeMock.mockImplementation(async (command) => {
+      if (command === "reconcile_approved_roots") return {};
+      if (command === "list_source_roots") return [];
+      if (command === "library_stats") return readyStats;
+      if (command === "search") return [pdfHit];
+      throw new Error(`unexpected command: ${command}`);
+    });
+
+    render(<App />);
+    const input = screen.getByRole("textbox", { name: "Search your local sources" });
+    fireEvent.change(input, { target: { value: "second page marker" } });
+    fireEvent.submit(screen.getByRole("search"));
+
+    expect(await screen.findByRole("heading", { name: "Recovered sources" })).toBeInTheDocument();
+    expect(screen.getByText("PDF")).toBeInTheDocument();
+    expect(screen.getByText("page 2 · lines 1–1")).toBeInTheDocument();
   });
 
   it("announces the loading state and disables duplicate searches", async () => {

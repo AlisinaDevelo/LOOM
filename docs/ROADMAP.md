@@ -4,7 +4,7 @@ Program window: **2026-08-23 through 2031-08-23**.
 
 LOOM is planned as an evidence-first, local-first recovery system: recover the original source
 object, show why it matched, and make uncertainty visible. The current implementation is a
-pre-alpha text/Markdown slice. PDF, OCR, browser capture, semantic retrieval, sync, mobile,
+pre-alpha text/Markdown/PDF-text slice. Image OCR, browser capture, semantic retrieval, sync, mobile,
 cross-platform, and professional workflows below are plans, not supported behavior.
 
 The managed program contains **20 rolling quarterly milestones**, **154 active outcome-oriented

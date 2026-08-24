@@ -53,7 +53,10 @@ fn public_search_results_are_source_backed_and_tuple_bound() {
         char_end,
         line_start,
         line_end,
-    } = hit.anchor.clone();
+    } = hit.anchor.clone()
+    else {
+        panic!("text fixture unexpectedly returned a PDF page anchor")
+    };
     assert_eq!((line_start, line_end), (2, 2));
     let anchored: String = source_text
         .chars()

@@ -16,6 +16,14 @@ pub enum EvidenceAnchor {
         line_start: u64,
         line_end: u64,
     },
+    /// Character and line offsets within one extracted PDF page.
+    PdfPage {
+        page: u32,
+        char_start: u64,
+        char_end: u64,
+        line_start: u64,
+        line_end: u64,
+    },
 }
 
 /// One source that could not be indexed.
@@ -174,6 +182,8 @@ pub struct ArtifactObservation {
     pub content_hash: String,
     pub extractor_id: String,
     pub extractor_version: String,
+    pub page_count: Option<u32>,
+    pub parse_warnings: Vec<String>,
     pub passages: Vec<PassageObservation>,
 }
 

@@ -48,9 +48,9 @@ offsets are computed. Passages target 1,000 characters with 120 characters of ov
 
 ### loom-cli
 
-The CLI indexes a selected path, searches the configured database, reports statistics, checks or
-repairs the derived FTS5 projection, and runs the retrieval smoke benchmark. Its default database
-is .loom/library.sqlite3; callers can provide another path.
+The CLI indexes a selected path, searches the configured database, reports statistics, inspects a
+stored extraction, checks or repairs the derived FTS5 projection, and runs the retrieval smoke
+benchmark. Its default database is .loom/library.sqlite3; callers can provide another path.
 
 ### Tauri shell and UI
 
@@ -111,6 +111,13 @@ and leaves already committed versions intact.
 expected vocabulary digest, canonical passage digest, and indexed-document coverage with the
 disposable projection. `repair_fts` runs the FTS5 `rebuild` command inside one transaction and
 returns the before/after health reports; it never updates canonical source rows.
+
+PDF ingestion uses the pure-Rust `pdf-extract` provider over source bytes already admitted by the
+stable-read boundary. Each page becomes a local `pdf_page` anchor with page number, character and
+line span; parser/page warnings and page count are stored on the immutable artifact version.
+Encrypted, malformed, image-only, over-page-limit, and over-byte-limit PDFs fail closed with a
+bounded report. The original path remains the render/open authority; LOOM never copies a PDF just
+to display a page.
 
 Approved-root observation is deliberately conservative. The coalescer accepts only absolute,
 in-scope hints, debounces duplicate create/modify/remove/rename events, and turns overflow or large

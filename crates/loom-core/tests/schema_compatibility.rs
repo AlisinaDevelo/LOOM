@@ -27,6 +27,66 @@ fn populated_v2_migration_preserves_canonical_identity_and_evidence() {
 }
 
 #[test]
+fn populated_v3_migration_adds_pdf_metadata_without_rewriting_canonical_rows() {
+    let directory = tempdir().unwrap();
+    let database = directory.path().join("v3.sqlite3");
+    let connection = Connection::open(&database).unwrap();
+    connection.execute_batch(V2_FIXTURE).unwrap();
+    connection
+        .execute_batch(
+            "CREATE TABLE index_jobs(
+                id TEXT PRIMARY KEY,
+                source_root_id TEXT NOT NULL REFERENCES source_roots(id) ON DELETE CASCADE,
+                selection_locator TEXT NOT NULL,
+                discovery_fingerprint TEXT NOT NULL,
+                total_units INTEGER NOT NULL CHECK(total_units >= 0),
+                next_unit INTEGER NOT NULL CHECK(next_unit >= 0 AND next_unit <= total_units),
+                state TEXT NOT NULL CHECK(state IN ('running', 'interrupted', 'completed', 'failed')),
+                last_error TEXT,
+                started_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                completed_at TEXT,
+                UNIQUE(source_root_id, selection_locator)
+            ) STRICT;
+            UPDATE schema_meta SET value = '3' WHERE key = 'schema_version';",
+        )
+        .unwrap();
+    drop(connection);
+
+    let library = Library::open(&database).unwrap();
+    let connection = Connection::open(&database).unwrap();
+    let schema_version: String = connection
+        .query_row(
+            "SELECT value FROM schema_meta WHERE key = 'schema_version'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(schema_version, "4");
+    let (hash, warnings, page_count): (String, String, Option<i64>) = connection
+        .query_row(
+            "SELECT content_hash, parse_warnings_json, page_count
+             FROM artifact_versions WHERE id = 'version-v2'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(hash, "blake3:fixture-v2-hash");
+    assert_eq!(warnings, "[]");
+    assert_eq!(page_count, None);
+    assert_eq!(
+        library
+            .search(&SearchRequest {
+                text: "migration preserves anchors".into(),
+                limit: 10,
+            })
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
+#[test]
 fn opening_a_library_rebuilds_a_missing_derived_fts_projection() {
     let directory = tempdir().unwrap();
     let source = directory.path().join("rebuild.md");
@@ -99,7 +159,7 @@ fn assert_preserved_v2_rows(library: &Library, database: &std::path::Path) {
             |row| row.get(0),
         )
         .unwrap();
-    assert_eq!(schema_version, "3");
+    assert_eq!(schema_version, "4");
 
     let (hash, extractor_id, extractor_version): (String, String, String) = connection
         .query_row(

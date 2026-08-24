@@ -15,12 +15,15 @@ content hash, excerpt, and exact text anchor with every result.
 - An explicitly selected file or directory is indexed; directory traversal does not follow symlinks.
   The desktop picker runs in the Rust backend, so the webview cannot submit an arbitrary path to the
   index command.
-- Supported inputs are UTF-8 .txt, .md, and .markdown files. Files larger than 8 MiB and traversals
-  larger than 20,000 files are rejected or reported.
+- Supported inputs are UTF-8 .txt, .md, .markdown, and bounded text-based .pdf files. Files larger
+  than 8 MiB, PDFs over 2,048 pages, and traversals larger than 20,000 files are rejected or
+  reported with an explicit bounded outcome.
 - SQLite is the canonical store. SQLite FTS5 provides lexical retrieval over indexed passages.
 - `loom-cli fts-health` compares canonical passage hashes and tokenizer vocabulary with the
   disposable FTS5 projection; `loom-cli fts-repair` rebuilds it transactionally and reports before/
   after digests.
+- `loom-cli inspect path/to/source` prints the stored extractor identity, PDF page count/warnings,
+  and exact anchors for an indexed source.
 - Results include the original path, BLAKE3 content hash, structured excerpt, and exact
   character/line anchor. Literal source characters cannot become highlight instructions.
 - A complete rescan hides deleted or unreadable sources. Opening a result verifies its artifact,
@@ -33,7 +36,7 @@ content hash, excerpt, and exact text anchor with every result.
   durable checkpoint resumes the remainder.
 - The retrieval smoke fixture is the rights-clean synthetic corpus in benchmarks/retrieval/v0/.
 
-PDF/OCR extraction, embeddings, a semantic index, browser capture, cloud sync, accounts,
+Image OCR, embeddings, a semantic index, browser capture, cloud sync, accounts,
 multi-device sync, and mobile clients are not part of this supported slice.
 
 ## Quick start
