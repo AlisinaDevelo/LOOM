@@ -529,7 +529,7 @@
     {
       "id": "0111",
       "title": "Freeze the schema compatibility and migration contract",
-      "status": "backlog",
+      "status": "review",
       "quarter": "Q02",
       "phase": "v0.1 Thread",
       "workstream": "foundation",
@@ -556,7 +556,7 @@
     {
       "id": "0112",
       "title": "Persist user-selected roots with revocable access",
-      "status": "backlog",
+      "status": "review",
       "quarter": "Q02",
       "phase": "v0.1 Thread",
       "workstream": "privacy",
@@ -584,7 +584,7 @@
     {
       "id": "0113",
       "title": "Add bounded indexing progress and cancellation",
-      "status": "backlog",
+      "status": "review",
       "quarter": "Q02",
       "phase": "v0.1 Thread",
       "workstream": "ingestion",
@@ -612,7 +612,7 @@
     {
       "id": "0114",
       "title": "Ship FTS consistency checks and repair evidence",
-      "status": "backlog",
+      "status": "review",
       "quarter": "Q02",
       "phase": "v0.1 Thread",
       "workstream": "retrieval",

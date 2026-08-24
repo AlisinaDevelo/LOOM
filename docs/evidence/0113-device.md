@@ -4,6 +4,9 @@ This artifact records bounded indexing progress and cooperative cancellation for
 [#66](https://github.com/AlisinaDevelo/LOOM/issues/66), roadmap ID `0113`. It extends the durable
 `index_jobs` checkpoint from #0108: a report carries a stable run ID and explicit unit counts, the
 desktop can request cancellation, and the worker stops only between complete SQLite units.
+The implementation was merged through PR [#178](https://github.com/AlisinaDevelo/LOOM/pull/178);
+the merged-main reproduction is recorded below. Issue #66 remains in `review` until independent
+approval and protected-main enforcement are available.
 
 ## Device and toolchain
 
@@ -87,5 +90,26 @@ This run proves the bounded cancellation contract on the specified Mac; it does 
 OS/architecture, continuous progress streaming, cancellation inside one individual file read,
 notarization, a third-party security audit, a `cargo-audit` result, or a large-library resource
 benchmark. The current desktop stop action is cooperative and waits for the current bounded unit
-to finish. Issue 66 remains open until independent review, a protected-main merge, and the same
-reproduction against the merged `main` SHA are available.
+to finish. The post-merge reproduction below satisfies the code and target-device evidence
+portion; independent review and protected-main enforcement remain required before issue #66 can
+close.
+
+## Merged-main reproduction
+
+The same target-device harness was run against runtime-tested merged `main` commit
+`eee1236710b98375e86b12187d545ed451ee2b7c` on the Mac specified above. The current main tip
+`d4b219b0bb634054bee6ce8ad9a71a17dd8bf003` adds only documentation and roadmap metadata after
+that runtime-tested commit; no cancellation source changed.
+
+- Verification directory: `/tmp/loom-0110-main-device.QLkKl1`
+- Harness summary SHA-256: `45bc997dcb26b8bc6cbd63a09fa17aed6c5d4ae968ef349be473b0b034e94e70`
+- Commands SHA-256: `d840925fb008af9101dc3121870b79960c1b6924451df17a7851f2f6132bb209`
+- Log manifest: `/tmp/loom-0110-main-device.QLkKl1/log-sha256.txt`
+- Log manifest SHA-256: `ed539c48e8c9b648f0ae341ddf37f02107d5aacff5d5e2a19ae0d28612c57d64`
+
+The full local pipe passed. Its MSRV workspace run included both cancellation fixtures and the
+durable-index interruption/recovery tests; the reports verified stable run IDs, complete-unit
+commits, resumable checkpoints, and convergence to uninterrupted rows. Retrieval, frontend,
+security, Tauri, and mixed-corpus failure/recovery checks also passed. No hosted Actions or
+unavailable hardware substituted for this target-device evidence. Future desktop captures must
+be cropped to the relevant evidence panel.
