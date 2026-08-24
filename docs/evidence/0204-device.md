@@ -25,19 +25,19 @@ evaluation result, not a claim that hybrid ranking has shipped in the desktop de
 Command:
 
 ```text
-python3 scripts/hybrid-ablation.py > /tmp/loom-0204-hybrid-ablation-commit-v2.json
+python3 scripts/hybrid-ablation.py > /tmp/loom-0204-hybrid-ablation-final2.json
 ```
 
 The command built the local CLI, indexed the rights-clean three-file corpus, rebuilt the local
 semantic derivative, and evaluated three queries in each mode. No source content left the device.
 The retained report SHA-256 is
-`4c225305e1173d54c873b6e05b66119cf37d0842a3588b04c50d3f1a319f1fbf`.
+`09fd08b142325399314a04fc1be7ea984ddea9db74f5887909cdc738ed86ab9c`.
 
 |Mode|Recall@1|Recall@5|Anchor precision|False-positive rate|Median ms|p95 ms|
 |---|---:|---:|---:|---:|---:|---:|
-|Lexical|1.0|1.0|1.0|0.0|9.92975000000007|13.470874999999992|
-|Semantic|1.0|1.0|0.0|0.6666666667|9.232541000000039|12.680666000000063|
-|Hybrid|1.0|1.0|1.0|0.6666666667|9.582665999999907|11.94974999999998|
+|Lexical|1.0|1.0|1.0|0.0|10.508625000000048|10.548292000000071|
+|Semantic|1.0|1.0|0.0|0.6666666667|9.880749999999994|10.158541999999994|
+|Hybrid|1.0|1.0|1.0|0.6666666667|11.002375000000008|11.376082999999927|
 
 The semantic-only anchor result is intentionally coarse because semantic candidates retain the
 passage anchor rather than a lexical query span. Hybrid preserves the lexical anchor when a
@@ -47,11 +47,11 @@ That is a real gate failure, not a reason to hide candidates or lower the thresh
 ## Verification and limits
 
 The ablation indexed all three fixtures (`completeness=1.0`) before scoring. The exact-commit
-target-device run is `/tmp/loom-0204-device-commit.UR9Kzu` with status `PASS`.
+target-device run is `/tmp/loom-0204-device-final.ozZ6pE` with status `PASS`.
 Its summary SHA-256 is
-`25652334a4d4626c35a7fd543c4092f3cdfc78d2e3a59780c0b370f36d0fd3ad`, commands SHA-256 is
-`ad9970c86da66bcefa12bb51e842b7af21c3192b65137a728ec8e9ecef195389`, and log manifest SHA-256
-is `3df57c05b9f0984f3cf63d3ba00635f09e8384d30bf223b4173a73295e14d89e`. Format, warnings-denied
+`81b5e9e1f8932233dfec0b6ef723d4677ffee1461e93a26fe25c980cbc7e9247`, commands SHA-256 is
+`204379bfc3ec06edab0d8c105335a82c71846a51acb88c2ebc7a307d11e7ae97`, and log manifest SHA-256
+is `9956a235393b3592a861dcc374acec83ba0d5b8940c5dc57dc60546af77b1570`. Format, warnings-denied
 Clippy, workspace tests, Rust 1.88 check/tests, npm checks, retrieval, semantic contract,
 security, Tauri debug build, and mixed-corpus recovery all passed. The focused Rust suite has four
 passing tests covering deterministic fusion, bounded signals, invalid-query failure, and
