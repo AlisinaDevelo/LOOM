@@ -1,0 +1,28 @@
+{
+  "schema_version": 1,
+  "gate_id": "loom-v0.1-activation-recovery",
+  "status": "hypothesis",
+  "measurement_status": "not_run",
+  "fixture_manifest": "benchmarks/retrieval/v0/manifest.json",
+  "fixture_rights_clean": true,
+  "participant_study": {
+    "minimum_participants": 12,
+    "maximum_participants": 20,
+    "minimum_completed_participants": 8,
+    "minimum_returning_participants": 2,
+    "worksheet": "docs/studies/v0.1-participant-worksheet.md"
+  },
+  "thresholds": {
+    "exact_source_recall_at_1_min": 0.8,
+    "exact_source_recall_at_5_min": 0.95,
+    "evidence_open_success_min": 0.9,
+    "p95_latency_ms_max": 1000,
+    "index_completeness_min": 0.98,
+    "no_result_disclosure_min": 1.0
+  },
+  "decisions": {
+    "advance": "All numeric thresholds pass, at least 8 participants complete the known-item task set, at least 2 return unaided, and no unresolved critical privacy or source-loss issue exists.",
+    "narrow": "Retrieval and source integrity remain safe but activation, latency, capture friction, or a non-critical cohort slice misses its threshold; publish the failure and narrow scope before adding formats or capture.",
+    "stop": "Any critical privacy/source-integrity defect, fabricated or unanchored result, unrecoverable data loss, or failure of the rights-clean benchmark makes the next expansion ineligible."
+  }
+}

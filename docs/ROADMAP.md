@@ -28,6 +28,10 @@ Every active managed issue has:
 - required closure evidence: the tests, fixtures, measurements, review artifacts, or consented
   study evidence actually produced.
 
+The v0.1 activation and recovery decision contract is [ACTIVATION_GATE.md](ACTIVATION_GATE.md).
+Its numeric thresholds are hypotheses until the rights-clean fixture and privacy-safe participant
+worksheet produce measurements; a narrow or stop decision is valid.
+
 An issue is not complete because work was attempted. It is complete when its acceptance evidence
 exists. A quarter may continue, narrow, reorder, or stop later work; long-horizon items are options,
 not promises.

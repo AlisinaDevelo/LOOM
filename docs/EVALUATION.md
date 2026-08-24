@@ -3,6 +3,10 @@
 LOOM is pre-alpha. Evaluation currently verifies the exact-source path and basic regression
 behavior; it does not establish real-world retrieval quality.
 
+The v0.1 activation decision contract is [ACTIVATION_GATE.md](ACTIVATION_GATE.md). Its thresholds
+are hypotheses until a held-out rights-clean benchmark and a consented 12–20 participant study
+produce retained evidence.
+
 ## Current smoke fixture
 
 The fixture in benchmarks/retrieval/v0/ contains synthetic, rights-clean text and Markdown files,
@@ -53,7 +57,8 @@ When changing ingestion, segmentation, ranking, or evidence rendering:
 
 Future evaluation may add graded passage or region judgments, Recall@10, MRR, nDCG, p95 latency,
 index completeness, and evidence-open success. Those metrics are not implemented by the current
-fixture contract.
+fixture contract; the activation gate defines them as explicit measurement targets rather than
+claims about the current smoke fixture.
 
 ## References
 
