@@ -126,7 +126,7 @@ impl Library {
     /// Indexes one explicitly selected regular file or directory.
     pub fn index_path(&self, selected_path: impl AsRef<Path>) -> Result<IndexReport> {
         let cancellation = IndexCancellationToken::new();
-        self.index_path_with_options(selected_path, &cancellation, None, None)
+        self.index_path_with_options(selected_path, &cancellation, None, None, None)
     }
 
     /// Indexes one explicitly selected regular file or directory with cooperative cancellation.
@@ -138,7 +138,25 @@ impl Library {
         selected_path: impl AsRef<Path>,
         cancellation: &IndexCancellationToken,
     ) -> Result<IndexReport> {
-        self.index_path_with_options(selected_path, cancellation, None, None)
+        self.index_path_with_options(selected_path, cancellation, None, None, None)
+    }
+
+    /// Indexes one atomically written intentional screenshot and stores its capture provenance
+    /// before the image OCR extractor runs.
+    pub fn index_captured_image(
+        &self,
+        selected_path: impl AsRef<Path>,
+        context: &crate::CaptureContext,
+    ) -> Result<IndexReport> {
+        let path = selected_path.as_ref();
+        if !path.is_file()
+            || !matches!(ingest::supported_media_type(path), Some(media) if media.starts_with("image/"))
+        {
+            return Err(LoomError::UnsupportedSource(path.display().to_string()));
+        }
+        let cancellation = IndexCancellationToken::new();
+        let metadata = serde_json::to_value(context)?;
+        self.index_path_with_options(path, &cancellation, None, None, Some(metadata))
     }
 
     /// Reconciles an in-scope event batch against the approved root's current bytes.
@@ -321,7 +339,13 @@ impl Library {
         interrupt_after_units: Option<usize>,
     ) -> Result<IndexReport> {
         let cancellation = IndexCancellationToken::new();
-        self.index_path_with_options(selected_path, &cancellation, interrupt_after_units, None)
+        self.index_path_with_options(
+            selected_path,
+            &cancellation,
+            interrupt_after_units,
+            None,
+            None,
+        )
     }
 
     /// Deterministic cancellation hook used by integration fixtures.
@@ -332,7 +356,13 @@ impl Library {
         cancel_after_units: usize,
     ) -> Result<IndexReport> {
         let cancellation = IndexCancellationToken::new();
-        self.index_path_with_options(selected_path, &cancellation, None, Some(cancel_after_units))
+        self.index_path_with_options(
+            selected_path,
+            &cancellation,
+            None,
+            Some(cancel_after_units),
+            None,
+        )
     }
 
     fn index_path_with_options(
@@ -341,6 +371,7 @@ impl Library {
         cancellation: &IndexCancellationToken,
         interrupt_after_units: Option<usize>,
         cancel_after_units: Option<usize>,
+        capture_metadata: Option<serde_json::Value>,
     ) -> Result<IndexReport> {
         let requested_path = selected_path.as_ref();
         let requested_metadata = fs::symlink_metadata(requested_path)
@@ -443,6 +474,7 @@ impl Library {
                 self.limits.max_file_bytes,
                 self.limits.max_pdf_pages,
                 self.ocr_enabled.load(Ordering::Acquire),
+                capture_metadata.as_ref(),
             ) {
                 Ok(document) => {
                     let bytes = document.byte_size;
@@ -1378,6 +1410,55 @@ impl Library {
             parse_warnings,
             extraction_metadata,
             passages,
+        })
+    }
+
+    /// Permanently removes one exact source root and its canonical evidence rows.
+    ///
+    /// This method is intentionally locator-bound and is used by the explicit capture purge
+    /// control. It cannot broaden to a parent directory or delete another source root.
+    pub fn purge_source_root(&self, locator: &str) -> Result<crate::CapturePurgeReport> {
+        let mut connection = self.lock()?;
+        let transaction = connection.transaction()?;
+        let root_id: Option<String> = transaction
+            .query_row(
+                "SELECT id FROM source_roots WHERE locator = ?1",
+                [locator],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let Some(root_id) = root_id else {
+            return Ok(crate::CapturePurgeReport::default());
+        };
+        let artifacts_deleted: i64 = transaction.query_row(
+            "SELECT COUNT(*) FROM artifacts WHERE source_root_id = ?1",
+            [&root_id],
+            |row| row.get(0),
+        )?;
+        let versions_deleted: i64 = transaction.query_row(
+            "SELECT COUNT(*) FROM artifact_versions WHERE artifact_id IN
+                (SELECT id FROM artifacts WHERE source_root_id = ?1)",
+            [&root_id],
+            |row| row.get(0),
+        )?;
+        let passages_deleted: i64 = transaction.query_row(
+            "SELECT COUNT(*) FROM passages WHERE artifact_version_id IN
+                (SELECT id FROM artifact_versions WHERE artifact_id IN
+                    (SELECT id FROM artifacts WHERE source_root_id = ?1))",
+            [&root_id],
+            |row| row.get(0),
+        )?;
+        transaction.execute(
+            "DELETE FROM artifacts WHERE source_root_id = ?1",
+            [&root_id],
+        )?;
+        transaction.execute("DELETE FROM source_roots WHERE id = ?1", [&root_id])?;
+        transaction.commit()?;
+        rebuild_fts(&connection)?;
+        Ok(crate::CapturePurgeReport {
+            artifacts_deleted: artifacts_deleted.max(0) as u64,
+            versions_deleted: versions_deleted.max(0) as u64,
+            passages_deleted: passages_deleted.max(0) as u64,
         })
     }
 

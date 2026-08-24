@@ -223,6 +223,57 @@ pub struct OcrPurgeReport {
     pub passages_deleted: u64,
 }
 
+/// The user-selected capture surface. Capture is always an explicit command; there is no
+/// background or periodic mode in the canonical API.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CaptureMode {
+    Screen,
+    Window,
+    Region,
+}
+
+/// Pixel-space bounds retained for an intentional capture. Coordinates are relative to the
+/// captured image when the native picker does not expose the display origin.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CaptureBounds {
+    pub x: u32,
+    pub y: u32,
+    pub width: u32,
+    pub height: u32,
+}
+
+/// Provenance recorded before image OCR runs for an intentional capture.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CaptureContext {
+    pub mode: CaptureMode,
+    pub captured_at: String,
+    pub display_scale_milli: u32,
+    pub bounds: CaptureBounds,
+    pub app_name: Option<String>,
+    pub window_title: Option<String>,
+    pub source: String,
+}
+
+/// Result of one explicit capture/import operation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CaptureReport {
+    pub status: String,
+    pub source_uri: String,
+    pub content_hash: String,
+    pub byte_size: u64,
+    pub duplicate: bool,
+    pub context: CaptureContext,
+}
+
+/// Counts removed when a user purges the capture source root.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CapturePurgeReport {
+    pub artifacts_deleted: u64,
+    pub versions_deleted: u64,
+    pub passages_deleted: u64,
+}
+
 /// A user search request crossing the Tauri IPC boundary.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SearchRequest {
