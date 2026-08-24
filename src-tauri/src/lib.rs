@@ -99,3 +99,39 @@ pub fn run() {
         .run(tauri::generate_context!())
         .expect("error while running LOOM");
 }
+
+#[cfg(test)]
+mod tests {
+    const CAPABILITIES: &str = include_str!("../capabilities/default.json");
+    const TAURI_CONFIG: &str = include_str!("../tauri.conf.json");
+
+    #[test]
+    fn desktop_contract_stays_local_and_command_scoped() {
+        for permission in [
+            "allow-fs-",
+            "allow-shell-",
+            "allow-http-",
+            "allow-process-",
+            "allow-notification-",
+        ] {
+            assert!(
+                !CAPABILITIES.contains(permission),
+                "unexpected broad permission namespace: {permission}"
+            );
+        }
+        for command in [
+            "allow-index-selected-folder",
+            "allow-search",
+            "allow-library-stats",
+            "allow-open-artifact",
+        ] {
+            assert!(
+                CAPABILITIES.contains(command),
+                "missing command permission: {command}"
+            );
+        }
+        assert!(TAURI_CONFIG.contains("\"connect-src\": \"ipc: http://ipc.localhost\""));
+        assert!(!TAURI_CONFIG.contains("\"connect-src\": \"ipc: http://ipc.localhost https:"));
+        assert!(TAURI_CONFIG.contains("\"frontendDist\": \"../dist\""));
+    }
+}
