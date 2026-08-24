@@ -782,7 +782,7 @@
     {
       "id": "0204",
       "title": "Implement evaluated hybrid rank fusion and reranking",
-      "status": "in-progress",
+      "status": "done",
       "quarter": "Q03",
       "phase": "v0.2 Needle",
       "workstream": "foundation",
