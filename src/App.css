@@ -237,6 +237,8 @@ h1 { margin: 0; font: 500 clamp(34px, 5vw, 54px)/1.04 Georgia, serif; letter-spa
 }
 
 .search-form button:disabled { opacity: 0.42; cursor: not-allowed; }
+.query-hint { margin: 9px 2px 0; color: var(--faint); font-size: 10px; line-height: 1.5; }
+.query-hint code { color: var(--muted); font: 10px ui-monospace, monospace; }
 .notice {
   min-height: 35px;
   display: flex;

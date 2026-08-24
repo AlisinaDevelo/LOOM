@@ -399,5 +399,17 @@ pub struct SearchHit {
     pub content_hash: String,
     pub excerpt: EvidenceExcerpt,
     pub anchor: EvidenceAnchor,
+    /// Explainable contributions from each retrieval stage. A stage that did not participate is
+    /// reported as zero rather than omitted so callers can compare lexical and hybrid results.
+    pub contributions: RankContributions,
     pub match_reason: String,
+}
+
+/// Stable score contributions retained on every public search result.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct RankContributions {
+    pub lexical: f64,
+    pub semantic: f64,
+    pub metadata: f64,
+    pub reranker: f64,
 }

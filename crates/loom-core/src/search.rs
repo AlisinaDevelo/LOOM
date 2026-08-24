@@ -1,10 +1,142 @@
+use chrono::{DateTime, NaiveDate, TimeZone, Utc};
+
 use crate::{error::LoomError, EvidenceAnchor, EvidenceExcerpt, EvidenceSegment, Result};
+
+/// A source-type constraint understood by the user-facing query language.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SourceTypeFilter {
+    Pdf,
+    Image,
+    Text,
+    Markdown,
+    Mime(String),
+}
+
+/// The comparison used by a confidence constraint.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConfidenceOperator {
+    Equal,
+    GreaterThan,
+    GreaterThanOrEqual,
+    LessThan,
+    LessThanOrEqual,
+}
+
+/// A typed OCR/evidence confidence constraint.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ConfidenceFilter {
+    pub operator: ConfidenceOperator,
+    pub threshold: f64,
+}
+
+/// Typed constraints extracted from a search string.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct QueryFilters {
+    /// Inclusive nanosecond lower bound on the source modification time.
+    pub after_ns: Option<i64>,
+    /// Exclusive nanosecond upper bound on the source modification time.
+    pub before_ns: Option<i64>,
+    pub source_type: Option<SourceTypeFilter>,
+    /// Case-insensitive substring matched against the canonical source locator.
+    pub path_contains: Option<String>,
+    pub confidence: Option<ConfidenceFilter>,
+}
+
+impl QueryFilters {
+    pub fn is_empty(&self) -> bool {
+        self.after_ns.is_none()
+            && self.before_ns.is_none()
+            && self.source_type.is_none()
+            && self.path_contains.is_none()
+            && self.confidence.is_none()
+    }
+
+    /// Returns whether one canonical result satisfies every parsed constraint.
+    pub fn matches(
+        &self,
+        media_type: &str,
+        source_uri: &str,
+        source_modified_ns: Option<i64>,
+        anchor: &EvidenceAnchor,
+    ) -> bool {
+        if let Some(after_ns) = self.after_ns {
+            if source_modified_ns.is_none_or(|value| value < after_ns) {
+                return false;
+            }
+        }
+        if let Some(before_ns) = self.before_ns {
+            if source_modified_ns.is_none_or(|value| value >= before_ns) {
+                return false;
+            }
+        }
+        if let Some(source_type) = &self.source_type {
+            let matches = match source_type {
+                SourceTypeFilter::Pdf => media_type == "application/pdf",
+                SourceTypeFilter::Image => media_type.starts_with("image/"),
+                SourceTypeFilter::Text => media_type.starts_with("text/"),
+                SourceTypeFilter::Markdown => media_type == "text/markdown",
+                SourceTypeFilter::Mime(expected) => media_type.eq_ignore_ascii_case(expected),
+            };
+            if !matches {
+                return false;
+            }
+        }
+        if let Some(path_contains) = &self.path_contains {
+            if !source_uri
+                .to_lowercase()
+                .contains(&path_contains.to_lowercase())
+            {
+                return false;
+            }
+        }
+        if let Some(confidence) = &self.confidence {
+            if !confidence.matches(anchor_confidence(anchor)) {
+                return false;
+            }
+        }
+        true
+    }
+}
+
+impl ConfidenceFilter {
+    fn matches(&self, value: f64) -> bool {
+        match self.operator {
+            ConfidenceOperator::Equal => (value - self.threshold).abs() <= f64::EPSILON,
+            ConfidenceOperator::GreaterThan => value > self.threshold,
+            ConfidenceOperator::GreaterThanOrEqual => value >= self.threshold,
+            ConfidenceOperator::LessThan => value < self.threshold,
+            ConfidenceOperator::LessThanOrEqual => value <= self.threshold,
+        }
+    }
+}
+
+/// The safe, storage-engine-independent representation of a user query.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ParsedQuery {
+    pub text: String,
+    pub match_expression: String,
+    pub filters: QueryFilters,
+}
 
 pub(crate) struct CompiledQuery {
     pub(crate) match_expression: String,
+    pub(crate) filters: QueryFilters,
 }
 
 pub(crate) fn compile_query(query: &str) -> Result<CompiledQuery> {
+    let parsed = parse_query(query)?;
+    Ok(CompiledQuery {
+        match_expression: parsed.match_expression,
+        filters: parsed.filters,
+    })
+}
+
+/// Parses LOOM's documented query language without exposing SQLite/FTS syntax.
+///
+/// Examples: `"retry anomalies" after:2026-01-01 type:pdf`,
+/// `path:"research notes" confidence:>=0.90`. Dates without a time are UTC midnights;
+/// `after` is inclusive and `before` is exclusive. Quoted text is an exact phrase.
+pub fn parse_query(query: &str) -> Result<ParsedQuery> {
     let query = query.trim();
     if query.is_empty() {
         return Err(LoomError::InvalidQuery("query cannot be empty".into()));
@@ -15,34 +147,34 @@ pub(crate) fn compile_query(query: &str) -> Result<CompiledQuery> {
         ));
     }
 
+    let tokens = tokenize(query)?;
     let mut parts = Vec::new();
-    let mut buffer = String::new();
-    let mut quoted = false;
-    for character in query.chars() {
-        match character {
-            '"' => {
-                if quoted {
-                    push_part(&mut parts, &mut buffer);
-                    quoted = false;
-                } else {
-                    push_unquoted(&mut parts, &mut buffer);
-                    quoted = true;
-                }
+    let mut filters = QueryFilters::default();
+    for token in tokens {
+        if !token.starts_with_quote {
+            if let Some(filter) = parse_filter(&token.text)? {
+                insert_filter(&mut filters, filter)?;
+                continue;
             }
-            value if value.is_whitespace() && !quoted => push_unquoted(&mut parts, &mut buffer),
-            value => buffer.push(value),
+        }
+        let value = if token.quoted {
+            token.text.trim().to_string()
+        } else {
+            token
+                .text
+                .trim_matches(|character: char| {
+                    !character.is_alphanumeric() && character != '_' && character != '-'
+                })
+                .to_string()
+        };
+        if !value.is_empty() && value.chars().any(char::is_alphanumeric) {
+            parts.push(value);
         }
     }
-    if quoted {
-        return Err(LoomError::InvalidQuery(
-            "quoted phrase is missing its closing quote".into(),
-        ));
-    }
-    push_unquoted(&mut parts, &mut buffer);
 
     if parts.is_empty() {
         return Err(LoomError::InvalidQuery(
-            "query must contain a letter or number".into(),
+            "query must include search text in addition to any filters".into(),
         ));
     }
     let match_expression = parts
@@ -50,7 +182,230 @@ pub(crate) fn compile_query(query: &str) -> Result<CompiledQuery> {
         .map(|part| format!("\"{}\"", part.replace('"', "\"\"")))
         .collect::<Vec<_>>()
         .join(" AND ");
-    Ok(CompiledQuery { match_expression })
+    Ok(ParsedQuery {
+        text: parts.join(" "),
+        match_expression,
+        filters,
+    })
+}
+
+#[derive(Debug)]
+struct QueryToken {
+    text: String,
+    quoted: bool,
+    starts_with_quote: bool,
+}
+
+fn tokenize(query: &str) -> Result<Vec<QueryToken>> {
+    let mut characters = query.chars().peekable();
+    let mut tokens = Vec::new();
+    while characters.peek().is_some() {
+        while characters.peek().is_some_and(|value| value.is_whitespace()) {
+            characters.next();
+        }
+        if characters.peek().is_none() {
+            break;
+        }
+        let starts_with_quote = characters.peek() == Some(&'"');
+        let mut text = String::new();
+        let mut quoted = false;
+        let mut had_quote = false;
+        let mut escaped = false;
+        for character in characters.by_ref() {
+            if escaped {
+                if character != '"' && character != '\\' {
+                    return Err(LoomError::InvalidQuery(
+                        "only \\\" and \\\\ may be escaped inside a phrase".into(),
+                    ));
+                }
+                text.push(character);
+                escaped = false;
+                continue;
+            }
+            if character == '\\' && quoted {
+                escaped = true;
+                continue;
+            }
+            if character == '"' {
+                had_quote = true;
+                quoted = !quoted;
+                continue;
+            }
+            if character.is_whitespace() && !quoted {
+                break;
+            }
+            text.push(character);
+        }
+        if escaped {
+            return Err(LoomError::InvalidQuery(
+                "quoted phrase ends with an escape".into(),
+            ));
+        }
+        if quoted {
+            return Err(LoomError::InvalidQuery(
+                "quoted phrase is missing its closing quote".into(),
+            ));
+        }
+        if text.is_empty() {
+            return Err(LoomError::InvalidQuery(
+                "query tokens cannot be empty".into(),
+            ));
+        }
+        tokens.push(QueryToken {
+            text,
+            quoted: had_quote,
+            starts_with_quote,
+        });
+    }
+    Ok(tokens)
+}
+
+enum ParsedFilter {
+    After(i64),
+    Before(i64),
+    SourceType(SourceTypeFilter),
+    Path(String),
+    Confidence(ConfidenceFilter),
+}
+
+fn parse_filter(token: &str) -> Result<Option<ParsedFilter>> {
+    let Some((key, value)) = token.split_once(':') else {
+        return Ok(None);
+    };
+    let key = key.to_ascii_lowercase();
+    if !matches!(
+        key.as_str(),
+        "after" | "before" | "type" | "path" | "confidence"
+    ) {
+        return Ok(None);
+    }
+    if value.is_empty() {
+        return Err(LoomError::InvalidQuery(format!(
+            "{key}: requires a value; try {key}:HELP"
+        )));
+    }
+    let parsed = match key.as_str() {
+        "after" => ParsedFilter::After(parse_timestamp(value, "after")?),
+        "before" => ParsedFilter::Before(parse_timestamp(value, "before")?),
+        "type" => ParsedFilter::SourceType(parse_source_type(value)?),
+        "path" => ParsedFilter::Path(value.to_string()),
+        "confidence" => ParsedFilter::Confidence(parse_confidence(value)?),
+        _ => unreachable!(),
+    };
+    Ok(Some(parsed))
+}
+
+fn insert_filter(filters: &mut QueryFilters, filter: ParsedFilter) -> Result<()> {
+    let (slot, name, value) = match filter {
+        ParsedFilter::After(value) => (&mut filters.after_ns, "after", value),
+        ParsedFilter::Before(value) => (&mut filters.before_ns, "before", value),
+        ParsedFilter::SourceType(value) => {
+            if filters.source_type.is_some() {
+                return Err(LoomError::InvalidQuery(
+                    "type filter may appear only once".into(),
+                ));
+            }
+            filters.source_type = Some(value);
+            return Ok(());
+        }
+        ParsedFilter::Path(value) => {
+            if filters.path_contains.is_some() {
+                return Err(LoomError::InvalidQuery(
+                    "path filter may appear only once".into(),
+                ));
+            }
+            filters.path_contains = Some(value);
+            return Ok(());
+        }
+        ParsedFilter::Confidence(value) => {
+            if filters.confidence.is_some() {
+                return Err(LoomError::InvalidQuery(
+                    "confidence filter may appear only once".into(),
+                ));
+            }
+            filters.confidence = Some(value);
+            return Ok(());
+        }
+    };
+    if slot.is_some() {
+        return Err(LoomError::InvalidQuery(format!(
+            "{name} filter may appear only once"
+        )));
+    }
+    *slot = Some(value);
+    Ok(())
+}
+
+fn parse_timestamp(value: &str, name: &str) -> Result<i64> {
+    let timestamp = if let Ok(parsed) = DateTime::parse_from_rfc3339(value) {
+        parsed.with_timezone(&Utc)
+    } else if let Ok(date) = NaiveDate::parse_from_str(value, "%Y-%m-%d") {
+        Utc.from_utc_datetime(
+            &date
+                .and_hms_opt(0, 0, 0)
+                .expect("midnight is always a valid NaiveDate time"),
+        )
+    } else {
+        return Err(LoomError::InvalidQuery(format!(
+            "{name}: expected YYYY-MM-DD or RFC3339 timestamp"
+        )));
+    };
+    timestamp.timestamp_nanos_opt().ok_or_else(|| {
+        LoomError::InvalidQuery(format!("{name}: timestamp is outside the supported range"))
+    })
+}
+
+fn parse_source_type(value: &str) -> Result<SourceTypeFilter> {
+    let normalized = value.to_ascii_lowercase();
+    match normalized.as_str() {
+        "pdf" => Ok(SourceTypeFilter::Pdf),
+        "image" | "img" => Ok(SourceTypeFilter::Image),
+        "text" => Ok(SourceTypeFilter::Text),
+        "markdown" | "md" => Ok(SourceTypeFilter::Markdown),
+        value if value.contains('/') && !value.chars().any(char::is_whitespace) => {
+            Ok(SourceTypeFilter::Mime(normalized))
+        }
+        _ => Err(LoomError::InvalidQuery(
+            "type: expects pdf, image, text, markdown, or a MIME type".into(),
+        )),
+    }
+}
+
+fn parse_confidence(value: &str) -> Result<ConfidenceFilter> {
+    let (operator, number) = if let Some(value) = value.strip_prefix(">=") {
+        (ConfidenceOperator::GreaterThanOrEqual, value)
+    } else if let Some(value) = value.strip_prefix("<=") {
+        (ConfidenceOperator::LessThanOrEqual, value)
+    } else if let Some(value) = value.strip_prefix('>') {
+        (ConfidenceOperator::GreaterThan, value)
+    } else if let Some(value) = value.strip_prefix('<') {
+        (ConfidenceOperator::LessThan, value)
+    } else if let Some(value) = value.strip_prefix('=') {
+        (ConfidenceOperator::Equal, value)
+    } else {
+        (ConfidenceOperator::Equal, value)
+    };
+    let threshold = number.parse::<f64>().map_err(|_| {
+        LoomError::InvalidQuery("confidence: expects a number between 0 and 1".into())
+    })?;
+    if !threshold.is_finite() || !(0.0..=1.0).contains(&threshold) {
+        return Err(LoomError::InvalidQuery(
+            "confidence: expects a number between 0 and 1".into(),
+        ));
+    }
+    Ok(ConfidenceFilter {
+        operator,
+        threshold,
+    })
+}
+
+fn anchor_confidence(anchor: &EvidenceAnchor) -> f64 {
+    match anchor {
+        EvidenceAnchor::ImageRegion {
+            confidence_milli, ..
+        } => f64::from(*confidence_milli) / 1_000.0,
+        EvidenceAnchor::Text { .. } | EvidenceAnchor::PdfPage { .. } => 1.0,
+    }
 }
 
 /// Chooses markers that provably do not occur in this passage.
@@ -286,29 +641,12 @@ fn push_segment(segments: &mut Vec<EvidenceSegment>, buffer: &mut String, highli
     segments.push(EvidenceSegment { text, highlighted });
 }
 
-fn push_unquoted(parts: &mut Vec<String>, buffer: &mut String) {
-    let value = buffer
-        .trim_matches(|character: char| {
-            !character.is_alphanumeric() && character != '_' && character != '-'
-        })
-        .to_string();
-    buffer.clear();
-    if !value.is_empty() {
-        parts.push(value);
-    }
-}
-
-fn push_part(parts: &mut Vec<String>, buffer: &mut String) {
-    let value = buffer.trim().to_string();
-    buffer.clear();
-    if !value.is_empty() {
-        parts.push(value);
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{collision_free_markers, compile_query, project_fts_evidence};
+    use super::{
+        collision_free_markers, compile_query, parse_query, project_fts_evidence,
+        ConfidenceOperator, SourceTypeFilter,
+    };
     use crate::EvidenceAnchor;
 
     #[test]
@@ -324,6 +662,113 @@ mod tests {
     #[test]
     fn rejects_unclosed_phrase() {
         assert!(compile_query("\"unfinished").is_err());
+    }
+
+    #[test]
+    fn parses_typed_filters_without_leaking_fts_syntax() {
+        let parsed = parse_query(
+            r#""retry anomalies" after:2026-01-01 before:2026-02-01 type:pdf path:"Research Notes" confidence:>=0.90"#,
+        )
+        .unwrap();
+        assert_eq!(parsed.text, "retry anomalies");
+        assert_eq!(parsed.match_expression, "\"retry anomalies\"");
+        assert!(parsed.filters.after_ns.is_some());
+        assert!(parsed.filters.before_ns.is_some());
+        assert_eq!(parsed.filters.source_type, Some(SourceTypeFilter::Pdf));
+        assert_eq!(
+            parsed.filters.path_contains.as_deref(),
+            Some("Research Notes")
+        );
+        assert_eq!(
+            parsed.filters.confidence,
+            Some(super::ConfidenceFilter {
+                operator: ConfidenceOperator::GreaterThanOrEqual,
+                threshold: 0.90,
+            })
+        );
+    }
+
+    #[test]
+    fn parser_handles_unicode_escaping_and_adversarial_values() {
+        for index in 0..128 {
+            let query = format!(r#"日本語 term-{index} path:"notes {index}""#);
+            let parsed = parse_query(&query).unwrap();
+            assert!(parsed.match_expression.starts_with('"'));
+            assert!(!parsed.match_expression.contains("MATCH"));
+        }
+        let escaped = parse_query(r#"needle "quoted \"value\"""#).unwrap();
+        assert!(escaped.match_expression.contains("quoted \"\"value\"\""));
+        let injection_like = parse_query(r#"needle OR 1=1 --"#).unwrap();
+        assert_eq!(
+            injection_like.match_expression,
+            "\"needle\" AND \"OR\" AND \"1=1\""
+        );
+        assert!(parse_query("needle confidence:wat").is_err());
+        assert!(parse_query("needle after:not-a-date").is_err());
+        assert!(parse_query("needle type:sqlite").is_err());
+        assert!(parse_query("type:pdf").is_err());
+    }
+
+    #[test]
+    fn typed_filters_apply_to_time_type_path_and_confidence() {
+        let filters = parse_query(
+            "needle after:2020-01-01 before:2030-01-01 type:image path:shots confidence:>=0.80",
+        )
+        .unwrap()
+        .filters;
+        let anchor = EvidenceAnchor::ImageRegion {
+            char_start: 0,
+            char_end: 6,
+            line_start: 1,
+            line_end: 1,
+            x: 1,
+            y: 2,
+            width: 3,
+            height: 4,
+            image_width: 100,
+            image_height: 100,
+            orientation: 1,
+            scale_milli: 1_000,
+            confidence_milli: 900,
+        };
+        assert!(filters.matches(
+            "image/png",
+            "/tmp/shots/capture.png",
+            Some(1_650_000_000_000_000_000),
+            &anchor
+        ));
+        assert!(!filters.matches(
+            "text/plain",
+            "/tmp/shots/capture.txt",
+            Some(1_650_000_000_000_000_000),
+            &anchor
+        ));
+        assert!(!filters.matches(
+            "image/png",
+            "/tmp/other/capture.png",
+            Some(1_650_000_000_000_000_000),
+            &anchor
+        ));
+        assert!(!filters.matches(
+            "image/png",
+            "/tmp/shots/capture.png",
+            Some(1_650_000_000_000_000_000),
+            &EvidenceAnchor::ImageRegion {
+                char_start: 0,
+                char_end: 6,
+                line_start: 1,
+                line_end: 1,
+                x: 1,
+                y: 2,
+                width: 3,
+                height: 4,
+                image_width: 100,
+                image_height: 100,
+                orientation: 1,
+                scale_milli: 1_000,
+                confidence_milli: 700,
+            }
+        ));
     }
 
     #[test]

@@ -17,9 +17,10 @@ use crate::{
         ArtifactObservation, EvidenceAnchor, EvidenceExcerpt, EvidenceSegment, EvidenceView,
         FtsHealthReport, FtsRepairReport, IndexCancellationToken, IndexCheckpoint, IndexFailure,
         IndexReport, LibraryStats, ObservationReport, OcrPurgeReport, OcrStatus,
-        PassageObservation, ResolveEvidenceRequest, SearchHit, SearchRequest, SemanticCandidate,
-        SemanticDropReport, SemanticIndexConfig, SemanticIndexManifest, SemanticIndexStatus,
-        SemanticProviderMeasurement, SemanticRebuildReport, SourceRootInfo, SourceRootStatus,
+        PassageObservation, RankContributions, ResolveEvidenceRequest, SearchHit, SearchRequest,
+        SemanticCandidate, SemanticDropReport, SemanticIndexConfig, SemanticIndexManifest,
+        SemanticIndexStatus, SemanticProviderMeasurement, SemanticRebuildReport, SourceRootInfo,
+        SourceRootStatus,
     },
     error::{io_error, LoomError, Result},
     ingest::{
@@ -723,34 +724,75 @@ impl Library {
             let mut statement = connection.prepare_cached(
                 "SELECT
                     a.id, v.id, p.id, a.title, a.media_type, l.locator, v.content_hash,
-                    p.text, p.locator_json, bm25(passages_fts), p.rowid
+                    v.source_modified_ns, p.text, p.locator_json, bm25(passages_fts), p.rowid,
+                    p.ordinal
                  FROM passages_fts
                  JOIN passages p ON p.rowid = passages_fts.rowid
                  JOIN artifact_versions v ON v.id = p.artifact_version_id
                  JOIN artifacts a ON a.id = v.artifact_id AND a.active_version_id = v.id
                  JOIN artifact_locators l ON l.artifact_id = a.id AND l.active = 1
-                 WHERE passages_fts MATCH ?1 AND a.state = 'active'
-                 ORDER BY bm25(passages_fts), a.title, a.id, p.ordinal
-                 LIMIT ?2",
+                 WHERE passages_fts MATCH ?1 AND a.state = 'active'",
             )?;
-            let rows =
-                statement.query_map(params![compiled.match_expression.as_str(), limit], |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, String>(1)?,
-                        row.get::<_, String>(2)?,
-                        row.get::<_, String>(3)?,
-                        row.get::<_, String>(4)?,
-                        row.get::<_, String>(5)?,
-                        row.get::<_, String>(6)?,
-                        row.get::<_, String>(7)?,
-                        row.get::<_, String>(8)?,
-                        row.get::<_, f64>(9)?,
-                        row.get::<_, i64>(10)?,
-                    ))
-                })?;
+            let rows = statement.query_map(params![compiled.match_expression.as_str()], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, String>(5)?,
+                    row.get::<_, String>(6)?,
+                    row.get::<_, Option<i64>>(7)?,
+                    row.get::<_, String>(8)?,
+                    row.get::<_, String>(9)?,
+                    row.get::<_, f64>(10)?,
+                    row.get::<_, i64>(11)?,
+                    row.get::<_, i64>(12)?,
+                ))
+            })?;
             rows.collect::<rusqlite::Result<Vec<_>>>()?
         };
+        let mut candidates = candidates
+            .into_iter()
+            .filter(
+                |(
+                    _artifact_id,
+                    _version_id,
+                    _passage_id,
+                    _title,
+                    media_type,
+                    source_uri,
+                    _content_hash,
+                    source_modified_ns,
+                    _passage_text,
+                    locator_json,
+                    _raw_bm25,
+                    _passage_rowid,
+                    _ordinal,
+                )| {
+                    serde_json::from_str::<EvidenceAnchor>(locator_json)
+                        .map(|anchor| {
+                            compiled.filters.matches(
+                                media_type,
+                                source_uri,
+                                *source_modified_ns,
+                                &anchor,
+                            )
+                        })
+                        .unwrap_or(false)
+                },
+            )
+            .collect::<Vec<_>>();
+        // Filtering happens before this deterministic lexical order and page truncation. This is
+        // intentionally explicit: a filtered-out row cannot be reintroduced by a later ranker.
+        candidates.sort_by(|left, right| {
+            left.10
+                .total_cmp(&right.10)
+                .then_with(|| left.3.cmp(&right.3))
+                .then_with(|| left.0.cmp(&right.0))
+                .then_with(|| left.11.cmp(&right.11))
+        });
+        candidates.truncate(limit as usize);
         let mut highlight_statement = connection.prepare_cached(
             "SELECT highlight(passages_fts, 0, ?2, ?3)
              FROM passages_fts
@@ -767,10 +809,12 @@ impl Library {
                 media_type,
                 source_uri,
                 content_hash,
+                _source_modified_ns,
                 passage_text,
                 locator_json,
                 raw_bm25,
                 passage_rowid,
+                _ordinal,
             ) = row;
             let (start_marker, end_marker) = collision_free_markers(&passage_text);
             let highlighted: String = highlight_statement.query_row(
@@ -802,6 +846,16 @@ impl Library {
                 content_hash,
                 excerpt,
                 anchor,
+                contributions: RankContributions {
+                    lexical: 1.0 / (1.0 + raw_bm25.abs()),
+                    semantic: 0.0,
+                    metadata: if compiled.filters.is_empty() {
+                        0.0
+                    } else {
+                        1.0
+                    },
+                    reranker: 0.0,
+                },
                 match_reason: "SQLite FTS5 BM25 over the active source passage".into(),
             });
         }
@@ -814,13 +868,14 @@ impl Library {
     /// instead of silently presenting a lexical-only result as a hybrid result. This method is not
     /// wired into the desktop default until the benchmark gate in issue 0204 passes.
     pub fn hybrid_search(&self, query: &str, limit: u32) -> Result<Vec<HybridSearchHit>> {
+        let parsed = crate::search::parse_query(query)?;
         let limit = limit.clamp(1, 100);
         let candidate_limit = limit.saturating_mul(4).clamp(limit, 100);
         let lexical = self.search(&SearchRequest {
             text: query.to_string(),
             limit: candidate_limit,
         })?;
-        let semantic = self.semantic_search(query, candidate_limit)?;
+        let semantic = self.semantic_search_parsed(&parsed, candidate_limit)?;
         let mut inputs = BTreeMap::<String, HybridRankInput>::new();
 
         for hit in lexical {
@@ -882,7 +937,7 @@ impl Library {
         }
 
         let mut hits = fuse_hybrid_candidates(
-            query,
+            &parsed.text,
             inputs.into_values().collect(),
             &HybridRankConfig::default(),
         )?;
@@ -1663,6 +1718,15 @@ impl Library {
 
     /// Searches the rebuilt semantic derivative and returns only evidence-bound candidates.
     pub fn semantic_search(&self, query: &str, limit: u32) -> Result<Vec<SemanticCandidate>> {
+        let parsed = crate::search::parse_query(query)?;
+        self.semantic_search_parsed(&parsed, limit)
+    }
+
+    fn semantic_search_parsed(
+        &self,
+        parsed: &crate::search::ParsedQuery,
+        limit: u32,
+    ) -> Result<Vec<SemanticCandidate>> {
         let status = self.semantic_status()?;
         if !status.healthy {
             return Err(LoomError::SemanticIndexUnavailable(
@@ -1675,12 +1739,12 @@ impl Library {
             LoomError::SemanticIndexUnavailable("semantic index has not been built".into())
         })?;
         let provider = HashEmbeddingProvider::default();
-        let query_vector = provider.embed(query);
+        let query_vector = provider.embed(&parsed.text);
         let connection = self.lock()?;
         let mut statement = connection.prepare(
             "SELECT e.passage_id, e.passage_hash, e.vector_blob, e.model_id, e.index_revision,
-                    a.id, v.id, a.title, a.media_type, l.locator, v.content_hash, p.text,
-                    p.locator_json
+                    a.id, v.id, a.title, a.media_type, l.locator, v.content_hash,
+                    v.source_modified_ns, p.text, p.locator_json
              FROM semantic_embeddings e
              JOIN passages p ON p.id = e.passage_id
              JOIN artifact_versions v ON v.id = p.artifact_version_id
@@ -1702,8 +1766,9 @@ impl Library {
                 row.get::<_, String>(8)?,
                 row.get::<_, String>(9)?,
                 row.get::<_, String>(10)?,
-                row.get::<_, String>(11)?,
+                row.get::<_, Option<i64>>(11)?,
                 row.get::<_, String>(12)?,
+                row.get::<_, String>(13)?,
             ))
         })?;
         let rows = rows.collect::<rusqlite::Result<Vec<_>>>()?;
@@ -1720,6 +1785,7 @@ impl Library {
             media_type,
             source_uri,
             content_hash,
+            source_modified_ns,
             passage_text,
             locator_json,
         ) in rows
@@ -1732,6 +1798,12 @@ impl Library {
                 })?;
             let score = cosine_similarity(&query_vector, &vector).unwrap_or(0.0);
             let anchor = serde_json::from_str(&locator_json)?;
+            if !parsed
+                .filters
+                .matches(&media_type, &source_uri, source_modified_ns, &anchor)
+            {
+                continue;
+            }
             candidates.push(SemanticCandidate {
                 rank: 0,
                 score,
