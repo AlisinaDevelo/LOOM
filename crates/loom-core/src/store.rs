@@ -28,7 +28,7 @@ use crate::{
         PDF_EXTRACTOR_VERSION,
     },
     observe::{self, ObservationEvent},
-    ocr::IMAGE_OCR_EXTRACTOR_ID,
+    ocr::{anchor_confidence_state, IMAGE_OCR_EXTRACTOR_ID},
     ranking::{fuse_hybrid_candidates, HybridRankConfig, HybridRankInput, HybridSearchHit},
     search::{collision_free_markers, compile_query, project_fts_evidence},
     semantic::{
@@ -866,6 +866,7 @@ impl Library {
                 &start_marker,
                 &end_marker,
             )?;
+            let confidence_state = anchor_confidence_state(&anchor);
             hits.push(SearchHit {
                 rank: index as u32 + 1,
                 score: 1.0 / (1.0 + raw_bm25.abs()),
@@ -878,6 +879,7 @@ impl Library {
                 content_hash,
                 excerpt,
                 anchor,
+                confidence_state,
                 contributions: RankContributions {
                     lexical: 1.0 / (1.0 + raw_bm25.abs()),
                     semantic: 0.0,
@@ -1097,6 +1099,14 @@ impl Library {
                 |row| {
                     let anchor_json: String = row.get(8)?;
                     let metadata_json: String = row.get(12)?;
+                    let anchor: EvidenceAnchor =
+                        serde_json::from_str(&anchor_json).map_err(|error| {
+                            rusqlite::Error::FromSqlConversionFailure(
+                                8,
+                                rusqlite::types::Type::Text,
+                                Box::new(error),
+                            )
+                        })?;
                     Ok(EvidenceView {
                         artifact_id: row.get(0)?,
                         version_id: row.get(1)?,
@@ -1106,13 +1116,8 @@ impl Library {
                         source_uri: row.get(5)?,
                         content_hash: row.get(6)?,
                         passage_text: row.get(7)?,
-                        anchor: serde_json::from_str(&anchor_json).map_err(|error| {
-                            rusqlite::Error::FromSqlConversionFailure(
-                                8,
-                                rusqlite::types::Type::Text,
-                                Box::new(error),
-                            )
-                        })?,
+                        confidence_state: anchor_confidence_state(&anchor),
+                        anchor,
                         page_count: row.get(9)?,
                         extractor_id: row.get(10)?,
                         extractor_version: row.get(11)?,

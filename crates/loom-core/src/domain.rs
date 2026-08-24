@@ -45,6 +45,25 @@ pub enum EvidenceAnchor {
     },
 }
 
+/// Confidence outcome exposed by OCR-backed evidence and indexing failures.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OcrConfidenceState {
+    Confirmed,
+    LowConfidence,
+    NoReadableText,
+}
+
+impl OcrConfidenceState {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Confirmed => "confirmed",
+            Self::LowConfidence => "low_confidence",
+            Self::NoReadableText => "no_readable_text",
+        }
+    }
+}
+
 /// One source that could not be indexed.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IndexFailure {
@@ -339,6 +358,7 @@ pub struct EvidenceView {
     pub content_hash: String,
     pub passage_text: String,
     pub anchor: EvidenceAnchor,
+    pub confidence_state: OcrConfidenceState,
     pub page_count: Option<u32>,
     pub extractor_id: String,
     pub extractor_version: String,
@@ -450,6 +470,7 @@ pub struct SearchHit {
     pub content_hash: String,
     pub excerpt: EvidenceExcerpt,
     pub anchor: EvidenceAnchor,
+    pub confidence_state: OcrConfidenceState,
     /// Explainable contributions from each retrieval stage. A stage that did not participate is
     /// reported as zero rather than omitted so callers can compare lexical and hybrid results.
     pub contributions: RankContributions,

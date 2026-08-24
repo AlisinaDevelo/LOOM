@@ -15,8 +15,9 @@ For a selected file or directory, the current path may store:
 - a BLAKE3 content hash;
 - normalized passage text and exact character/line anchors;
 - extractor identity and version;
-- for images, derived OCR text, pixel-region anchors, provider/model identity, confidence, EXIF
-  orientation, and fixed-point display scale;
+- for images, derived OCR text, pixel-region anchors, provider/model identity, automatic-language
+  mode, confidence and its confirmed/low-confidence state, image hash, EXIF orientation, and
+  fixed-point display scale;
 - for an explicitly rebuilt semantic derivative, passage hashes, provider/model identity, vector
   dimensions/revision, and encoded local vectors;
 - local timestamps and indexing statistics.

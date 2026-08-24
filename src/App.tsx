@@ -69,6 +69,7 @@ type SearchHit = {
     scale_milli?: number;
     confidence_milli?: number;
   };
+  confidence_state: "confirmed" | "low_confidence" | "no_readable_text";
   contributions: {
     lexical: number;
     semantic: number;
@@ -88,6 +89,7 @@ type EvidenceView = {
   content_hash: string;
   passage_text: string;
   anchor: SearchHit["anchor"];
+  confidence_state: "confirmed" | "low_confidence" | "no_readable_text";
   page_count?: number;
   extractor_id: string;
   extractor_version: string;
@@ -235,6 +237,11 @@ function EvidenceViewer({
     : anchor.kind === "image_region"
       ? `Image region ${anchor.x ?? 0},${anchor.y ?? 0} · ${anchor.width ?? 0}×${anchor.height ?? 0}px`
       : `Text lines ${anchor.line_start}–${anchor.line_end}`;
+  const confidenceLabel = view.confidence_state === "low_confidence"
+    ? "Low-confidence text"
+    : view.confidence_state === "confirmed"
+      ? "Confirmed text"
+      : "No readable text";
 
   return (
     <section className="evidence-viewer" aria-labelledby="evidence-viewer-title" aria-describedby="evidence-viewer-description" role="region">
@@ -282,7 +289,7 @@ function EvidenceViewer({
                 height: `${imageProjection.heightPercent}%`,
               }}
             />
-            <span className="image-evidence-caption">OCR region · confidence {((anchor.confidence_milli ?? 0) / 10).toFixed(1)}%</span>
+            <span className="image-evidence-caption">{confidenceLabel} · OCR region · confidence {((anchor.confidence_milli ?? 0) / 10).toFixed(1)}%</span>
           </div>
         </div>
       ) : (
@@ -493,9 +500,10 @@ function App() {
         return;
       }
       const failed = report.failures.length;
+      const noReadableText = report.failures.some((item) => item.reason.includes("no-readable-text"));
       setNotice(report.cancelled
         ? `Cancelled run ${report.run_id.slice(0, 8)}… after ${report.attempted} unit${report.attempted === 1 ? "" : "s"}; ${report.cancelled} remain resumable.`
-        : `Indexed ${report.indexed}; ${report.unchanged} unchanged; ${report.skipped} unsupported${failed ? `; ${failed} failed` : ""}.`);
+        : `Indexed ${report.indexed}; ${report.unchanged} unchanged; ${report.skipped} unsupported${failed ? `; ${failed} failed` : ""}${noReadableText ? "; no readable text reported for one or more sources" : ""}.`);
       if (failed) {
         setError(report.failures.map((item) => `${item.source}: ${item.reason}`).join("\n"));
       }
@@ -929,6 +937,9 @@ function App() {
                       <span>score {hit.score.toFixed(4)}</span>
                       <span title={hit.content_hash}>{hit.content_hash.slice(0, 21)}…</span>
                       <span className="evidence-ok">evidence attached</span>
+                      <span>
+                        {hit.confidence_state === "low_confidence" ? "low-confidence OCR" : hit.confidence_state === "confirmed" ? "confirmed text" : "no readable text"}
+                      </span>
                     </div>
                   </div>
                 </li>
