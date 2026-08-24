@@ -11,7 +11,7 @@ reproduction is rerun against the merged `main` SHA and the resulting evidence i
 - Native toolchain: `rustc 1.96.0` / Cargo 1.96.0, Node v26.7.0, npm 11.19.0
 - Declared MSRV toolchain: `rustc 1.88.0` (`6b00bc3880198600130e1cf62b8f8a93494488cc`),
   Cargo 1.88.0
-- Source under test: `babc49325df18d4424ec64b46909633f90d495a5`
+- Source under test: `609f61c4223e4453d66a6f6bb1e8108daf7cffa0`
   (`feature/issue-11-device-evidence`; merge SHA to be recorded after review)
 - Fixture: `benchmarks/retrieval/v0/manifest.json`
 
@@ -45,10 +45,10 @@ The repeatable local harness is [scripts/verify-device.sh](../../scripts/verify-
 records one log per command, the exact toolchain and source SHA, and a SHA-256 manifest:
 
 ```text
-bash scripts/verify-device.sh /tmp/loom-device-verify.UBvd0k
+bash scripts/verify-device.sh /tmp/loom-0102-device-rerun.ttqOOm
 ```
 
-The retained pushed-tip run is `/tmp/loom-device-verify.UBvd0k` with `status=PASS`.
+The retained pushed-tip run is `/tmp/loom-0102-device-rerun.ttqOOm` with `status=PASS`.
 
 Observed results:
 
@@ -57,7 +57,7 @@ Observed results:
   no failures.
 - Format, clippy, MSRV check, frontend lint/typecheck/Vitest/build, and Tauri debug build passed.
 - Retrieval benchmark: 3/3 indexed, completeness 1.0, Recall@1 1.0, Recall@5 1.0, anchor
-  precision 1.0, false-positive rate 0.0, median 0.224208 ms, p95 0.403500 ms.
+  precision 1.0, false-positive rate 0.0, median 0.191667 ms, p95 0.393667 ms.
 
 The mixed-corpus run included a supported Markdown file, an unsupported binary, an 8,388,609-byte
 Markdown file, and a symlink to a file outside the selected root. Initial indexing reported
@@ -68,19 +68,19 @@ searchable. Replacing the oversized file with valid text produced `indexed=1`, `
 
 ## Log and digest record
 
-The pushed-tip harness log manifest is `/tmp/loom-device-verify.UBvd0k/log-sha256.txt`:
+The pushed-tip harness log manifest is `/tmp/loom-0102-device-rerun.ttqOOm/log-sha256.txt`:
 
 ```text
-clippy.log             sha256:6867d59394fddf01cc4c5298662108a6d2c2b3662bf86f6d8416cec00acfbe1b
+clippy.log             sha256:40d632405763050ffb47ebf1857f094617f02af036f60154d69b9a60e3d15158
 fmt.log                sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
-mixed-corpus.log       sha256:64c7fd548af981d9db448f02b2e3456a7e4a1f16c454706ee313e726f3b69da5
-npm-check.log          sha256:5b225bba9dbd9f21ee35615621060326e122ffa5d13b3b16a8c6d8e2a7a8e4c8
+mixed-corpus.log       sha256:5eb8b3a8b2762f981b39e576b78ceed59ecb755893ef1a62c041a8214a45b9f1
+npm-check.log          sha256:df2855af05008a3c099dbec95db1e994aae376196b55d260d8a64bb33be04394
 npm-install.log        sha256:bbacb689fb0c829145033c5a0e39bff2b1fcb458b993473ecadaf839f978c9c0
-retrieval-benchmark.log sha256:da5ef124f1bdc24a6c2ddac5742217d139b3b841b8a4df6779a5fd4ce0ac8146
-rust-msrv-check.log    sha256:e736d608af4933d92144949c87701ac8f4de67b152ddfb1a7507d4d66022e032
-rust-msrv-tests.log    sha256:7e69c3b553c48e7976e34b32f50e85f95f204f62a68a02eabec350fe1d13d642
-rust-workspace.log     sha256:bf9b501daea6f9e09604c58a5865f1d0a4568346d9440460824eb24f0d60ed04
-tauri-build.log        sha256:d7909739b13c84913eb3eca3005c18b09e8796f76e8b6d0d042dcab7cac340f1
+retrieval-benchmark.log sha256:36eb6f2c7f7ad2c6dfb7a8bf536e53f223b8b5592a7c73426ce4bf480477f15c
+rust-msrv-check.log    sha256:71be71ce1096fa54a430e2f093e56b9a0d465042fe1cd51cd830e4696359f23c
+rust-msrv-tests.log    sha256:0bd4961cdc6dbd1a4b50199bf7b11709b3b2728f98784d335830e85a6fc52064
+rust-workspace.log     sha256:013c60dbf9a82d27c27c4e78a7637ed8bedebc5de56cfa15ceec2a389961e275
+tauri-build.log        sha256:612e6da938b44acd697e62b65be772eb0380897f2ef5dffc4c014b2811a79756
 ```
 
 The focused Rust 1.88 log was retained locally as `/tmp/loom-0102-focused.log`:
