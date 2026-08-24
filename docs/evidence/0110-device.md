@@ -75,5 +75,47 @@ This run proves the contract is explicit, privacy-safe by construction, and repr
 specified Mac. It does not claim that the activation gate has passed: no 12–20 participant study,
 returning-participant observation, capture-friction aggregate, or held-out personal corpus has
 been collected. It also does not claim another OS/architecture, notarization, a third-party
-security audit, or a cargo-audit result. Issue 63 remains open until independent review, a
-protected-main merge, and the same reproduction against the merged `main` SHA are available.
+security audit, or a cargo-audit result. The post-merge reproduction below satisfies the code and
+device-evidence portion of the gate; Issue 63 remains open until independent review and a
+protected-main policy are available.
+
+## Merged-main reproduction
+
+The same `scripts/verify-device.sh` harness was rerun against the current merged `main` commit
+`eee1236710b98375e86b12187d545ed451ee2b7c` on the target Mac. This is a documentation-only merge
+after the runtime-tested code commit `ae102616700a0913f21af118609e727df9617e26`; no runtime source
+changed between the tested code and the current main tip.
+
+- Verification directory: `/tmp/loom-0110-main-device.QLkKl1`
+- Target: MacBook Pro 17,1, Apple M1, 8 GB; macOS 26.6.2 (25G83); arm64
+- Toolchains: Rust/Cargo 1.96.0; Rust/Cargo 1.88.0 MSRV; Node v26.7.0; npm 11.19.0
+- Harness summary SHA-256: `45bc997dcb26b8bc6cbd63a09fa17aed6c5d4ae968ef349be473b0b034e94e70`
+- Commands SHA-256: `d840925fb008af9101dc3121870b79960c1b6924451df17a7851f2f6132bb209`
+- Semantic summary SHA-256: `918a467ce0c167d6c5c7c4b58a6abe4d86800d2dd249834334c3e5161bcb049f`
+- Log manifest: `/tmp/loom-0110-main-device.QLkKl1/log-sha256.txt`
+- Log manifest SHA-256: `ed539c48e8c9b648f0ae341ddf37f02107d5aacff5d5e2a19ae0d28612c57d64`
+- Semantic digest manifest SHA-256: `0362c5d85828e233a1ecd960ca5df369b4925396d975eb8e77a32d220f155b41`
+- Python contract/roadmap suite: 19 tests passed; output SHA-256:
+  `9c807693c7739522372f08678fc1caf623fd2c5faff97ae29aaec4176e636be5`
+
+The full target-device pipe passed: format, warnings-denied Clippy, workspace tests, Rust 1.88
+MSRV check/tests, `npm ci`, `npm run check`, retrieval benchmark, semantic contract, local
+security scan, Tauri debug build, and mixed-corpus failure/recovery. Retrieval measured Recall@1/5
+1.0, anchor precision 1.0, false-positive rate 0.0, completeness 1.0, median latency 0.185 ms,
+and p95 latency 0.518041 ms. Semantic rebuild took 0.55 s end-to-end with a 13,369,344-byte
+maximum resident set size; the derivative reported `rebuild_repeatable: true`,
+`drop_fails_closed: true`, and `evidence_bound_search: true`. The synthetic fixture remained
+three passages/533 bytes and the benchmark binary was 18,853,720 bytes.
+
+The mixed corpus exercised a supported Markdown file, an unsupported binary, an 8,388,609-byte
+file, and an outside-root symlink. The first index reported `discovered=4`, `indexed=2`,
+`skipped=1`, and one bounded-size failure; the outside marker stayed unreachable. Replacing the
+oversized file recovered it on the next index with `indexed=1`, `unchanged=2`, `skipped=1`, no
+failures, and final stats of 3 artifacts, 3 versions, 3 passages, and 250 indexed bytes.
+
+One earlier post-merge attempt at `/tmp/loom-0110-main-device.YSik8I` was stopped by the device's
+full disk during the Rust linker (`errno=28`, no space left on device); its result is not counted
+as a test failure. After removing only task-owned generated caches and preserving unrelated Trash
+entries, the complete rerun above passed. No hosted CI or unavailable hardware substituted for
+this target-device evidence. No screenshot was needed; any future desktop capture must be cropped
+to the relevant result/evidence panel.
