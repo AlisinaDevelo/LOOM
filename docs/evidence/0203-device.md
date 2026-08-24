@@ -71,3 +71,23 @@ linear scan is appropriate only for the bounded MVP corpus. A neural model, appr
 browser capture, or sync layer requires a separate measured decision and privacy review. This issue
 is implementation/device-verified locally; it is not independently reviewed or merged to protected
 main yet.
+
+## Promotion-branch reproduction
+
+The stacked feature branches were merged in order and reconciled with the then-current main
+snapshot. The resulting local promotion commit was
+b563a9b5606f6d7688200160bea6806b220ae121. The same complete device harness was rerun against that
+exact source commit before publishing the promotion PR.
+
+- Verification directory: /tmp/loom-0203-integration-device.OHFaWh
+- Summary SHA-256: 255f0d3f96d72540748f00d65494790ab6c628572322dbf651818d5b94142e11
+- Log manifest: /tmp/loom-0203-integration-device.OHFaWh/log-sha256.txt
+- Semantic summary SHA-256: cf558b82cc559be99de64bf1dd1a2edcf3ba4ef07e6dcb0141df39028599dc46
+- Semantic rebuild timing: 0.69 s; maximum resident set size 13,336,576 bytes
+- Retrieval benchmark: Recall@1/5 1.0, anchor precision 1.0, false-positive rate 0.0,
+  completeness 1.0, median latency 0.192042 ms, p95 latency 0.57425 ms
+
+All device steps passed again, including native Vision, MSRV, npm, semantic drop/rebuild,
+security, Tauri, and mixed-corpus recovery. This is a promotion-branch reproduction, not yet a
+reproduction against a commit on main; the promotion PR must still receive the repository's
+independent review and merge gate.
