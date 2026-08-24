@@ -48,9 +48,9 @@ offsets are computed. Passages target 1,000 characters with 120 characters of ov
 
 ### loom-cli
 
-The CLI indexes a selected path, searches the configured database, reports statistics, and runs the
-retrieval smoke benchmark. Its default database is .loom/library.sqlite3; callers can provide
-another path.
+The CLI indexes a selected path, searches the configured database, reports statistics, checks or
+repairs the derived FTS5 projection, and runs the retrieval smoke benchmark. Its default database
+is .loom/library.sqlite3; callers can provide another path.
 
 ### Tauri shell and UI
 
@@ -82,10 +82,11 @@ databases migrate transactionally by adding the checkpoint table while preservin
 canonical rows; see [SCHEMA_COMPATIBILITY.md](SCHEMA_COMPATIBILITY.md).
 
 SQLite FTS5 is an external-content virtual table over passages. Insert, update, and delete triggers
-keep the lexical index synchronized with canonical passage rows. Search uses sanitized FTS5 terms
-and phrases and BM25 ranking, then projects matches into structured source-text segments and exact
-character/line anchors. Highlight state is data, not an in-band source-text marker. See the
-[SQLite FTS5 reference](https://www.sqlite.org/fts5.html).
+keep the lexical index synchronized with canonical passage rows. The disposable `fts5vocab` row and
+instance projections provide term and indexed-document digests for the health command. Search uses
+sanitized FTS5 terms and phrases and BM25 ranking, then projects matches into structured source-text
+segments and exact character/line anchors. Highlight state is data, not an in-band source-text
+marker. See the [SQLite FTS5 reference](https://www.sqlite.org/fts5.html).
 
 The connection uses foreign keys, a five-second busy timeout, WAL journaling, NORMAL synchronous
 mode, in-memory temporary storage, and SQLite trusted-schema hardening. These are operational
@@ -105,6 +106,11 @@ The returned report carries the durable job ID plus discovered, attempted, index
 skipped, failed, and cancelled counts. The desktop stop command sets a cooperative token; the
 worker observes it between units, marks the checkpoint interrupted with `cancelled by request`,
 and leaves already committed versions intact.
+
+`fts_health` creates a scratch FTS5 tokenizer projection from canonical passages and compares its
+expected vocabulary digest, canonical passage digest, and indexed-document coverage with the
+disposable projection. `repair_fts` runs the FTS5 `rebuild` command inside one transaction and
+returns the before/after health reports; it never updates canonical source rows.
 
 Approved-root observation is deliberately conservative. The coalescer accepts only absolute,
 in-scope hints, debounces duplicate create/modify/remove/rename events, and turns overflow or large

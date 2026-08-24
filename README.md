@@ -18,6 +18,9 @@ content hash, excerpt, and exact text anchor with every result.
 - Supported inputs are UTF-8 .txt, .md, and .markdown files. Files larger than 8 MiB and traversals
   larger than 20,000 files are rejected or reported.
 - SQLite is the canonical store. SQLite FTS5 provides lexical retrieval over indexed passages.
+- `loom-cli fts-health` compares canonical passage hashes and tokenizer vocabulary with the
+  disposable FTS5 projection; `loom-cli fts-repair` rebuilds it transactionally and reports before/
+  after digests.
 - Results include the original path, BLAKE3 content hash, structured excerpt, and exact
   character/line anchor. Literal source characters cannot become highlight instructions.
 - A complete rescan hides deleted or unreadable sources. Opening a result verifies its artifact,

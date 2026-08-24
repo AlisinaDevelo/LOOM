@@ -8,7 +8,7 @@ derived or diagnostic and may be rebuilt.
 
 |Database state|Open behavior|Data guarantee|Recovery path|
 |---|---|---|---|
-|No database or empty SQLite file|Create schema version 3 transactionally|Creates the canonical tables, FTS5 projection, triggers, and `schema_meta` marker|Index explicitly selected sources|
+|No database or empty SQLite file|Create schema version 3 transactionally|Creates the canonical tables, FTS5/vocabulary projections, triggers, and `schema_meta` marker|Index explicitly selected sources|
 |Schema version 3 with the expected shape|Open without changing canonical rows|Validate required tables/columns; rebuild FTS5 only when its row count is inconsistent|Reopen, then re-index approved roots if source files are available|
 |Schema version 2 with the expected shape|Run the reviewed v2→v3 transaction|Preserve hashes, extractor identity/version, anchors, relationship rows, and source identity; add `index_jobs`|Reopen and re-index approved roots|
 |Schema version 1|Reject before migration|The marker is not overwritten because its content-version uniqueness contract is incompatible|Rebuild from the original source files or export outside LOOM|
@@ -23,9 +23,10 @@ derived or diagnostic and may be rebuilt.
 - Opening a version-2 fixture creates `index_jobs` and records version 3 in one transaction. The
   migration never recomputes or replaces canonical hashes, extractor identity, anchors, or
   relationships.
-- The FTS5 table is a disposable projection. On open, LOOM deterministically issues the FTS5
-  `rebuild` command from canonical passages. A full source re-index remains the recovery path for
-  missing canonical records.
+- The FTS5 table and its vocabulary projections are disposable. On open, LOOM deterministically
+  issues the FTS5 `rebuild` command from canonical passages. `fts-health` compares a fresh scratch
+  tokenizer projection with the current vocabulary; `fts-repair` rebuilds only derived state. A
+  full source re-index remains the recovery path for missing canonical records.
 - A malformed version-2 marker fails with a named reason such as `schema version 2 is missing
   required table \`source_roots\`` before any new table is created. Unknown and pre-alpha versions
   remain untouched.
