@@ -443,4 +443,51 @@ describe("desktop truth path", () => {
     });
     expect(await screen.findByText("disabled")).toBeInTheDocument();
   });
+
+  it("keeps intentional capture explicit, pausable, excluded, and purgeable", async () => {
+    const captureStatus = { paused: false, excluded_apps: [], capture_root: "/Users/test/Library/Application Support/LOOM/captures" };
+    invokeMock.mockImplementation(async (command, args) => {
+      if (command === "reconcile_approved_roots") return {};
+      if (command === "list_source_roots") return [];
+      if (command === "library_stats") return emptyStats;
+      if (command === "capture_status") return captureStatus;
+      if (command === "set_capture_exclusions") {
+        expect(args).toEqual({ excludedApps: ["Safari"] });
+        return { ...captureStatus, excluded_apps: ["safari"] };
+      }
+      if (command === "set_capture_paused") {
+        expect(args).toEqual({ paused: true });
+        return { ...captureStatus, paused: true };
+      }
+      if (command === "capture_intentional") return {
+        status: "captured",
+        source_uri: "/Users/test/captures/hash.png",
+        content_hash: "blake3:capture",
+        byte_size: 120,
+        duplicate: false,
+        context: {
+          mode: "region",
+          captured_at: "2026-08-24T20:00:00Z",
+          display_scale_milli: 1000,
+          bounds: { x: 0, y: 0, width: 1200, height: 600 },
+          app_name: "Safari",
+          window_title: null,
+          source: "macOS screencapture",
+        },
+      };
+      if (command === "purge_captures") return { artifacts_deleted: 1, versions_deleted: 1, passages_deleted: 2 };
+      throw new Error(`unexpected command: ${command}`);
+    });
+
+    render(<App />);
+    expect(await screen.findByRole("button", { name: "Capture region" })).toBeEnabled();
+    fireEvent.change(screen.getByRole("textbox", { name: "Exclude an app" }), { target: { value: "Safari" } });
+    fireEvent.click(screen.getByRole("button", { name: "Exclude app" }));
+    expect(await screen.findByText("Excluded: safari")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Pause capture" }));
+    expect(await screen.findByRole("button", { name: "Resume capture" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Capture region" })).toBeDisabled();
+    fireEvent.click(screen.getByRole("button", { name: "Purge captures" }));
+    expect(await screen.findByRole("status")).toHaveTextContent("Purged 1 capture");
+  });
 });

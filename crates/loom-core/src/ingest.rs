@@ -120,7 +120,7 @@ pub(crate) fn read_stable_with_limits(
     max_bytes: u64,
     max_pdf_pages: usize,
 ) -> Result<StableDocument> {
-    read_stable_with_limits_and_ocr(path, root, max_bytes, max_pdf_pages, true)
+    read_stable_with_limits_and_ocr(path, root, max_bytes, max_pdf_pages, true, None)
 }
 
 pub(crate) fn read_stable_with_limits_and_ocr(
@@ -129,6 +129,7 @@ pub(crate) fn read_stable_with_limits_and_ocr(
     max_bytes: u64,
     max_pdf_pages: usize,
     ocr_enabled: bool,
+    capture_metadata: Option<&serde_json::Value>,
 ) -> Result<StableDocument> {
     let media_type = supported_media_type(path)
         .ok_or_else(|| LoomError::UnsupportedSource(path.display().to_string()))?;
@@ -171,7 +172,7 @@ pub(crate) fn read_stable_with_limits_and_ocr(
             page_count: None,
             parse_warnings: extraction.warnings,
             image_regions: Some(extraction.regions),
-            extraction_metadata: extraction.metadata,
+            extraction_metadata: with_capture_metadata(extraction.metadata, capture_metadata),
         });
     }
     let text = String::from_utf8(stable.bytes).map_err(|_| {
@@ -190,6 +191,24 @@ pub(crate) fn read_stable_with_limits_and_ocr(
         image_regions: None,
         extraction_metadata: serde_json::json!({}),
     })
+}
+
+fn with_capture_metadata(
+    mut extraction_metadata: serde_json::Value,
+    capture_metadata: Option<&serde_json::Value>,
+) -> serde_json::Value {
+    let Some(capture_metadata) = capture_metadata else {
+        return extraction_metadata;
+    };
+    if let Some(object) = extraction_metadata.as_object_mut() {
+        object.insert("capture".into(), capture_metadata.clone());
+        extraction_metadata
+    } else {
+        serde_json::json!({
+            "extractor": extraction_metadata,
+            "capture": capture_metadata,
+        })
+    }
 }
 
 struct PdfExtraction {

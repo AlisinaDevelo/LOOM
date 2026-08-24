@@ -11,9 +11,10 @@ mod semantic;
 mod store;
 
 pub use domain::{
-    ArtifactObservation, EvidenceAnchor, EvidenceExcerpt, EvidenceSegment, EvidenceView,
-    FtsHealthReport, FtsRepairReport, IndexCancellationToken, IndexCheckpoint, IndexFailure,
-    IndexReport, LibraryStats, ObservationReport, OcrPurgeReport, OcrStatus, OpenArtifactRequest,
+    ArtifactObservation, CaptureBounds, CaptureContext, CaptureMode, CapturePurgeReport,
+    CaptureReport, EvidenceAnchor, EvidenceExcerpt, EvidenceSegment, EvidenceView, FtsHealthReport,
+    FtsRepairReport, IndexCancellationToken, IndexCheckpoint, IndexFailure, IndexReport,
+    LibraryStats, ObservationReport, OcrPurgeReport, OcrStatus, OpenArtifactRequest,
     PassageObservation, RankContributions, ResolveEvidenceRequest, SearchHit, SearchRequest,
     SemanticCandidate, SemanticDropReport, SemanticIndexConfig, SemanticIndexManifest,
     SemanticIndexStatus, SemanticProviderMeasurement, SemanticRebuildReport, SourceRootInfo,

@@ -107,6 +107,37 @@ type OcrStatus = {
   derived_passages: number;
 };
 
+type CaptureMode = "screen" | "window" | "region";
+
+type CapturePolicyStatus = {
+  paused: boolean;
+  excluded_apps: string[];
+  capture_root: string;
+};
+
+type CaptureReport = {
+  status: "captured" | "duplicate" | "paused" | "excluded_app";
+  source_uri: string;
+  content_hash: string;
+  byte_size: number;
+  duplicate: boolean;
+  context: {
+    mode: CaptureMode;
+    captured_at: string;
+    display_scale_milli: number;
+    bounds: { x: number; y: number; width: number; height: number };
+    app_name: string | null;
+    window_title: string | null;
+    source: string;
+  };
+};
+
+type CapturePurgeReport = {
+  artifacts_deleted: number;
+  versions_deleted: number;
+  passages_deleted: number;
+};
+
 const emptyStats: LibraryStats = {
   source_roots: 0,
   artifacts: 0,
@@ -293,6 +324,12 @@ function App() {
   const [evidenceRotation, setEvidenceRotation] = useState(0);
   const [notice, setNotice] = useState("Ready. LOOM does not upload your library.");
   const [error, setError] = useState<string | null>(null);
+  const [capturePaused, setCapturePaused] = useState(false);
+  const [captureExcludedApps, setCaptureExcludedApps] = useState<string[]>([]);
+  const [captureAppName, setCaptureAppName] = useState("");
+  const [captureWindowTitle, setCaptureWindowTitle] = useState("");
+  const [captureExclusionInput, setCaptureExclusionInput] = useState("");
+  const [captureBusy, setCaptureBusy] = useState<CaptureMode | "purge" | null>(null);
   const searchInputRef = useRef<HTMLInputElement>(null);
   const resultsHeadingRef = useRef<HTMLHeadingElement>(null);
   const noResultsHeadingRef = useRef<HTMLHeadingElement>(null);
@@ -314,9 +351,19 @@ function App() {
     }
   }, []);
 
+  const refreshCaptureStatus = useCallback(async () => {
+    try {
+      const status = await invoke<CapturePolicyStatus>("capture_status");
+      setCapturePaused(status.paused);
+      setCaptureExcludedApps(status.excluded_apps);
+    } catch {
+      // Keep the controls at their safe defaults if the desktop bridge is still starting.
+    }
+  }, []);
+
   const refreshLibrary = useCallback(async () => {
-    await Promise.all([refreshStats(), refreshSourceRoots()]);
-  }, [refreshSourceRoots, refreshStats]);
+    await Promise.all([refreshStats(), refreshSourceRoots(), refreshCaptureStatus()]);
+  }, [refreshCaptureStatus, refreshSourceRoots, refreshStats]);
 
   useEffect(() => {
     let active = true;
@@ -357,6 +404,83 @@ function App() {
     focusResultsAfterSearchRef.current = false;
     (hits.length > 0 ? resultsHeadingRef : noResultsHeadingRef).current?.focus();
   }, [busy, hits.length, searched]);
+
+  const captureIntentional = async (mode: CaptureMode) => {
+    setError(null);
+    setCaptureBusy(mode);
+    setNotice(`Preparing ${mode} capture; LOOM will save only after your explicit selection…`);
+    try {
+      const report = await invoke<CaptureReport>("capture_intentional", {
+        request: {
+          mode,
+          display_scale_milli: Math.round((window.devicePixelRatio || 1) * 1_000),
+          bounds: { x: 0, y: 0, width: 0, height: 0 },
+          app_name: captureAppName.trim() || null,
+          window_title: captureWindowTitle.trim() || null,
+        },
+      });
+      if (report.status === "paused") {
+        setNotice("Capture is paused. Resume it before saving a screen, window, or region.");
+      } else if (report.status === "excluded_app") {
+        setNotice("Capture skipped because the supplied app is excluded.");
+      } else if (report.status === "duplicate") {
+        setNotice("Duplicate pixels detected; the existing capture was kept and no second copy was added.");
+      } else {
+        setNotice(`Captured ${mode}; original pixels and provenance are indexed locally before OCR.`);
+        await refreshLibrary();
+      }
+    } catch (caught) {
+      setError(errorMessage(caught));
+      setNotice("Capture stopped safely. Check Screen Recording permission or cancel the picker, then retry.");
+    } finally {
+      setCaptureBusy(null);
+    }
+  };
+
+  const toggleCapturePaused = async () => {
+    setError(null);
+    try {
+      const status = await invoke<CapturePolicyStatus>("set_capture_paused", { paused: !capturePaused });
+      setCapturePaused(status.paused);
+      setNotice(status.paused ? "Intentional capture is paused." : "Intentional capture is enabled.");
+    } catch (caught) {
+      setError(errorMessage(caught));
+      setNotice("Capture policy did not change.");
+    }
+  };
+
+  const addCaptureExclusion = async () => {
+    const app = captureExclusionInput.trim();
+    if (!app) return;
+    setError(null);
+    try {
+      const status = await invoke<CapturePolicyStatus>("set_capture_exclusions", {
+        excludedApps: [...captureExcludedApps, app],
+      });
+      setCaptureExcludedApps(status.excluded_apps);
+      setCaptureExclusionInput("");
+      setNotice(`Excluding ${app} from future intentional captures.`);
+    } catch (caught) {
+      setError(errorMessage(caught));
+      setNotice("Capture exclusion did not change.");
+    }
+  };
+
+  const purgeCaptures = async () => {
+    setError(null);
+    setCaptureBusy("purge");
+    setNotice("Purging captured pixels and their indexed evidence…");
+    try {
+      const report = await invoke<CapturePurgeReport>("purge_captures");
+      setNotice(`Purged ${report.artifacts_deleted} capture${report.artifacts_deleted === 1 ? "" : "s"}; originals and evidence rows are gone.`);
+      await refreshLibrary();
+    } catch (caught) {
+      setError(errorMessage(caught));
+      setNotice("Capture purge stopped safely.");
+    } finally {
+      setCaptureBusy(null);
+    }
+  };
 
   const addSource = async () => {
     setError(null);
@@ -576,6 +700,66 @@ function App() {
             <button type="button" className="scope-action" onClick={purgeOcr} disabled={busy !== null}>
               Purge derived OCR now
             </button>
+          </section>
+          <section className="capture-controls" aria-labelledby="capture-heading">
+            <div className="section-label" id="capture-heading">Intentional capture</div>
+            <p className="scope-note">Nothing records in the background. Choose one screen, window, or region only when you press a button.</p>
+            <div className="capture-button-grid">
+              {(["region", "window", "screen"] as CaptureMode[]).map((mode) => (
+                <button
+                  key={mode}
+                  type="button"
+                  className="scope-action capture-action"
+                  onClick={() => captureIntentional(mode)}
+                  disabled={captureBusy !== null || capturePaused}
+                >
+                  {captureBusy === mode ? "Selecting…" : `Capture ${mode}`}
+                </button>
+              ))}
+            </div>
+            <div className="capture-context-fields">
+              <label htmlFor="capture-app-name">App context (optional)</label>
+              <input
+                id="capture-app-name"
+                value={captureAppName}
+                onChange={(event) => setCaptureAppName(event.target.value)}
+                placeholder="e.g. Safari"
+                autoComplete="off"
+              />
+              <label htmlFor="capture-window-title">Window context (optional)</label>
+              <input
+                id="capture-window-title"
+                value={captureWindowTitle}
+                onChange={(event) => setCaptureWindowTitle(event.target.value)}
+                placeholder="e.g. Research notes"
+                autoComplete="off"
+              />
+            </div>
+            <div className="capture-policy-row">
+              <button type="button" className="scope-action" onClick={toggleCapturePaused} disabled={captureBusy !== null}>
+                {capturePaused ? "Resume capture" : "Pause capture"}
+              </button>
+              <button type="button" className="scope-action scope-revoke" onClick={purgeCaptures} disabled={captureBusy !== null}>
+                {captureBusy === "purge" ? "Purging…" : "Purge captures"}
+              </button>
+            </div>
+            <div className="capture-exclusion-row">
+              <label className="sr-only" htmlFor="capture-exclusion">Exclude an app</label>
+              <input
+                id="capture-exclusion"
+                value={captureExclusionInput}
+                onChange={(event) => setCaptureExclusionInput(event.target.value)}
+                placeholder="App to exclude"
+                autoComplete="off"
+              />
+              <button type="button" className="scope-action" onClick={addCaptureExclusion} disabled={!captureExclusionInput.trim()}>
+                Exclude app
+              </button>
+            </div>
+            {captureExcludedApps.length > 0 && (
+              <p className="capture-exclusions" aria-label="Excluded apps">Excluded: {captureExcludedApps.join(", ")}</p>
+            )}
+            <p className="scope-note">If macOS denies Screen Recording, LOOM stores nothing and explains how to retry in System Settings.</p>
           </section>
           <section className="scope-list" aria-labelledby="scope-heading">
             <div className="section-label" id="scope-heading">Saved scopes</div>
