@@ -62,6 +62,17 @@ A pull request should state:
 Keep public text factual and concise. Do not include assistant, model, bot, or generated-by
 metadata in commits or documentation.
 
+## Completion evidence contract
+
+An issue is not complete because CI is green. Before closure, the pull request and issue must
+link every acceptance criterion to a retained evidence or artifact ID, record the exact commit,
+device, OS, architecture, and toolchain, and include the relevant happy-path, negative/privacy,
+failure, recovery, and resource checks performed on the target device. The change must be pushed,
+reviewed, and merged to protected `main`; the same reproduction must then be rerun against the
+merged SHA. Record logs, measurements, artifact digests, limitations, and the merged SHA. If
+required hardware or a platform surface is unavailable, record an explicit blocked/no-go result;
+do not substitute a CI result.
+
 ## License
 
 By contributing, you agree that your contribution is provided under the

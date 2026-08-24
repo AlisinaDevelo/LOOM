@@ -852,9 +852,6 @@ mod tests {
 
         let first = library.index_path(&source).unwrap();
         assert_eq!(first.indexed, 1);
-        let second = library.index_path(&source).unwrap();
-        assert_eq!(second.unchanged, 1);
-        assert_eq!(second.bytes_read, fs::metadata(&source).unwrap().len());
 
         let hits = library
             .search(&SearchRequest {
@@ -864,6 +861,24 @@ mod tests {
             .unwrap();
         assert_eq!(hits.len(), 1);
         let hit = hits[0].clone();
+
+        let second = library.index_path(&source).unwrap();
+        assert_eq!(second.unchanged, 1);
+        assert_eq!(second.bytes_read, fs::metadata(&source).unwrap().len());
+        let unchanged_hit = library
+            .search(&SearchRequest {
+                text: "\"retry anomalies\"".into(),
+                limit: 10,
+            })
+            .unwrap()
+            .remove(0);
+        assert_eq!(unchanged_hit.artifact_id, hit.artifact_id);
+        assert_eq!(unchanged_hit.version_id, hit.version_id);
+        let unchanged_stats = library.stats().unwrap();
+        assert_eq!(unchanged_stats.artifacts, 1);
+        assert_eq!(unchanged_stats.versions, 1);
+        assert_eq!(unchanged_stats.passages, 1);
+
         assert_eq!(
             library
                 .resolve_verified_artifact_path(
@@ -916,6 +931,184 @@ mod tests {
             .unwrap();
         assert_eq!(updated.len(), 1);
         assert_eq!(updated[0].artifact_id, hit.artifact_id);
+        assert_ne!(updated[0].version_id, hit.version_id);
+    }
+
+    #[test]
+    fn empty_database_migration_records_schema_and_runtime_guards() {
+        let directory = tempdir().unwrap();
+        let database = directory.path().join("empty.sqlite3");
+        let library = Library::open(&database).unwrap();
+        let connection = library.lock().unwrap();
+
+        let schema_version: String = connection
+            .query_row(
+                "SELECT value FROM schema_meta WHERE key = 'schema_version'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(schema_version, "2");
+
+        let foreign_keys: i64 = connection
+            .query_row("PRAGMA foreign_keys", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(foreign_keys, 1);
+        let journal_mode: String = connection
+            .query_row("PRAGMA journal_mode", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(journal_mode.to_ascii_lowercase(), "wal");
+        let busy_timeout_ms: i64 = connection
+            .query_row("PRAGMA busy_timeout", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(busy_timeout_ms, 5_000);
+        let trusted_schema: i64 = connection
+            .query_row("PRAGMA trusted_schema", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(trusted_schema, 0);
+
+        for table in [
+            "source_roots",
+            "artifacts",
+            "artifact_locators",
+            "artifact_versions",
+            "passages",
+            "relationships",
+        ] {
+            let exists: bool = connection
+                .query_row(
+                    "SELECT EXISTS(
+                        SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1
+                    )",
+                    [table],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert!(exists, "migration did not create {table}");
+        }
+        for table in [
+            "source_roots",
+            "artifacts",
+            "artifact_locators",
+            "artifact_versions",
+            "passages",
+            "relationships",
+        ] {
+            let rows: i64 = connection
+                .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                    row.get(0)
+                })
+                .unwrap();
+            assert_eq!(rows, 0, "empty migration populated {table}");
+        }
+    }
+
+    #[test]
+    fn deleting_an_artifact_cascades_canonical_rows_and_fts_state() {
+        let directory = tempdir().unwrap();
+        let removed = directory.path().join("removed.md");
+        let retained = directory.path().join("retained.md");
+        fs::write(&removed, "private marker to remove").unwrap();
+        fs::write(&retained, "public marker to retain").unwrap();
+        let library = Library::open_in_memory().unwrap();
+        library.index_path(directory.path()).unwrap();
+
+        let removed_hit = library
+            .search(&SearchRequest {
+                text: "\"private marker\"".into(),
+                limit: 10,
+            })
+            .unwrap()
+            .remove(0);
+        let retained_hit = library
+            .search(&SearchRequest {
+                text: "\"public marker\"".into(),
+                limit: 10,
+            })
+            .unwrap()
+            .remove(0);
+
+        {
+            let connection = library.lock().unwrap();
+            connection
+                .execute(
+                    "INSERT INTO relationships(
+                        id, source_artifact_id, target_artifact_id, kind, method, created_at
+                     ) VALUES (?1, ?2, ?3, 'related', 'test', '2026-01-01T00:00:00Z')",
+                    rusqlite::params![
+                        "relationship-under-test",
+                        removed_hit.artifact_id,
+                        retained_hit.artifact_id,
+                    ],
+                )
+                .unwrap();
+            let relationship_count: i64 = connection
+                .query_row("SELECT COUNT(*) FROM relationships", [], |row| row.get(0))
+                .unwrap();
+            assert_eq!(relationship_count, 1);
+        }
+
+        {
+            let connection = library.lock().unwrap();
+            connection
+                .execute(
+                    "DELETE FROM artifacts WHERE id = ?1",
+                    [&removed_hit.artifact_id],
+                )
+                .unwrap();
+            let orphan_count: i64 = connection
+                .query_row(
+                    "SELECT COUNT(*) FROM artifact_locators WHERE artifact_id = ?1",
+                    [&removed_hit.artifact_id],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(orphan_count, 0);
+            let version_count: i64 = connection
+                .query_row(
+                    "SELECT COUNT(*) FROM artifact_versions WHERE artifact_id = ?1",
+                    [&removed_hit.artifact_id],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(version_count, 0);
+            let passage_count: i64 = connection
+                .query_row(
+                    "SELECT COUNT(*) FROM passages WHERE artifact_version_id = ?1",
+                    [&removed_hit.version_id],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(passage_count, 0);
+            let relationship_count: i64 = connection
+                .query_row("SELECT COUNT(*) FROM relationships", [], |row| row.get(0))
+                .unwrap();
+            assert_eq!(relationship_count, 0);
+            let foreign_key_errors: i64 = connection
+                .query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |row| {
+                    row.get(0)
+                })
+                .unwrap();
+            assert_eq!(foreign_key_errors, 0);
+        }
+
+        assert!(library
+            .search(&SearchRequest {
+                text: "\"private marker\"".into(),
+                limit: 10,
+            })
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            library
+                .search(&SearchRequest {
+                    text: "\"public marker\"".into(),
+                    limit: 10,
+                })
+                .unwrap()
+                .len(),
+            1
+        );
     }
 
     #[test]
