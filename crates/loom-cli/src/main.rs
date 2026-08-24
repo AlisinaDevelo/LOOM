@@ -33,6 +33,10 @@ enum Command {
     },
     /// Print canonical library counts.
     Stats,
+    /// Compare canonical passages with the derived FTS5 projection.
+    FtsHealth,
+    /// Repair the derived FTS5 projection and print before/after evidence.
+    FtsRepair,
     /// Evaluate exact-artifact recovery on a rights-clean JSONL query set.
     Benchmark {
         #[arg(long)]
@@ -176,6 +180,14 @@ fn main() -> Result<(), Box<dyn Error>> {
         Command::Stats => {
             let library = Library::open(arguments.database)?;
             println!("{}", serde_json::to_string_pretty(&library.stats()?)?);
+        }
+        Command::FtsHealth => {
+            let library = Library::open(arguments.database)?;
+            println!("{}", serde_json::to_string_pretty(&library.fts_health()?)?);
+        }
+        Command::FtsRepair => {
+            let library = Library::open(arguments.database)?;
+            println!("{}", serde_json::to_string_pretty(&library.repair_fts()?)?);
         }
         Command::Benchmark { corpus, queries } => run_benchmark(&corpus, &queries)?,
     }

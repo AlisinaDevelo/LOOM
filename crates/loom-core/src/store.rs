@@ -11,9 +11,10 @@ use uuid::Uuid;
 
 use crate::{
     domain::{
-        ArtifactObservation, EvidenceAnchor, IndexCancellationToken, IndexCheckpoint, IndexFailure,
-        IndexReport, LibraryStats, ObservationReport, PassageObservation, SearchHit, SearchRequest,
-        SourceRootInfo, SourceRootStatus,
+        ArtifactObservation, EvidenceAnchor, FtsHealthReport, FtsRepairReport,
+        IndexCancellationToken, IndexCheckpoint, IndexFailure, IndexReport, LibraryStats,
+        ObservationReport, PassageObservation, SearchHit, SearchRequest, SourceRootInfo,
+        SourceRootStatus,
     },
     error::{io_error, LoomError, Result},
     ingest::{self, PassageDraft, StableDocument, EXTRACTOR_ID, EXTRACTOR_VERSION},
@@ -1071,6 +1072,29 @@ impl Library {
         })
     }
 
+    /// Compares canonical passage content with the derived FTS5 vocabulary and row coverage.
+    pub fn fts_health(&self) -> Result<FtsHealthReport> {
+        let connection = self.lock()?;
+        fts_health(&connection)
+    }
+
+    /// Rebuilds the disposable FTS5 projection in one transaction and retains before/after proof.
+    ///
+    /// Canonical passage rows are read for the health comparison but are never updated by this
+    /// operation. Re-running repair on a healthy projection is a no-op with the same digest.
+    pub fn repair_fts(&self) -> Result<FtsRepairReport> {
+        let mut connection = self.lock()?;
+        let before = fts_health(&connection)?;
+        let transaction = connection.transaction()?;
+        transaction.execute(
+            "INSERT INTO passages_fts(passages_fts) VALUES ('rebuild')",
+            [],
+        )?;
+        transaction.commit()?;
+        let after = fts_health(&connection)?;
+        Ok(FtsRepairReport { before, after })
+    }
+
     /// Returns canonical record counts and source byte totals.
     pub fn stats(&self) -> Result<LibraryStats> {
         let connection = self.lock()?;
@@ -1312,6 +1336,10 @@ fn migrate(connection: &mut Connection) -> Result<()> {
             content_rowid = 'rowid',
             tokenize = 'unicode61 remove_diacritics 2'
          );
+         CREATE VIRTUAL TABLE IF NOT EXISTS passages_fts_vocab
+           USING fts5vocab(passages_fts, 'row');
+         CREATE VIRTUAL TABLE IF NOT EXISTS passages_fts_instances
+           USING fts5vocab(passages_fts, 'instance');
 
          CREATE TRIGGER IF NOT EXISTS passages_ai AFTER INSERT ON passages BEGIN
             INSERT INTO passages_fts(rowid, text) VALUES (new.rowid, new.text);
@@ -1444,6 +1472,100 @@ fn rebuild_fts(connection: &Connection) -> Result<()> {
         [],
     )?;
     Ok(())
+}
+
+fn fts_health(connection: &Connection) -> Result<FtsHealthReport> {
+    let canonical_passages: i64 =
+        connection.query_row("SELECT COUNT(*) FROM passages", [], |row| row.get(0))?;
+    let indexed_passages: i64 = connection.query_row(
+        "SELECT COUNT(DISTINCT doc) FROM passages_fts_instances",
+        [],
+        |row| row.get(0),
+    )?;
+    let canonical_digest = canonical_passage_digest(connection)?;
+    let expected_derivative_digest = expected_fts_digest(connection)?;
+    let derivative_digest = vocabulary_digest(connection, "passages_fts_vocab")?;
+    let integrity_error = connection
+        .execute(
+            "INSERT INTO passages_fts(passages_fts) VALUES ('integrity-check')",
+            [],
+        )
+        .err()
+        .map(|error| error.to_string());
+    let healthy = canonical_passages.max(0) as u64 == indexed_passages.max(0) as u64
+        && expected_derivative_digest == derivative_digest
+        && integrity_error.is_none();
+    Ok(FtsHealthReport {
+        canonical_passages: canonical_passages.max(0) as u64,
+        indexed_passages: indexed_passages.max(0) as u64,
+        canonical_digest,
+        expected_derivative_digest,
+        derivative_digest,
+        integrity_ok: integrity_error.is_none(),
+        integrity_error,
+        healthy,
+    })
+}
+
+fn canonical_passage_digest(connection: &Connection) -> Result<String> {
+    let mut hasher = blake3::Hasher::new();
+    let mut statement =
+        connection.prepare("SELECT rowid, text_hash FROM passages ORDER BY rowid")?;
+    let rows = statement.query_map([], |row| {
+        Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+    })?;
+    for row in rows {
+        let (rowid, text_hash) = row?;
+        hasher.update(&rowid.to_le_bytes());
+        hasher.update(text_hash.as_bytes());
+        hasher.update(&[0]);
+    }
+    Ok(format!("blake3:{}", hasher.finalize().to_hex()))
+}
+
+fn expected_fts_digest(connection: &Connection) -> Result<String> {
+    connection.execute_batch(
+        "DROP TABLE IF EXISTS temp.loom_expected_fts_vocab;
+         DROP TABLE IF EXISTS temp.loom_expected_fts;
+         CREATE VIRTUAL TABLE temp.loom_expected_fts USING fts5(
+             text, tokenize = 'unicode61 remove_diacritics 2'
+         );
+         INSERT INTO temp.loom_expected_fts(rowid, text)
+             SELECT rowid, text FROM passages;
+         CREATE VIRTUAL TABLE temp.loom_expected_fts_vocab
+             USING fts5vocab(loom_expected_fts, 'row');",
+    )?;
+    let result = vocabulary_digest(connection, "temp.loom_expected_fts_vocab");
+    connection.execute_batch(
+        "DROP TABLE IF EXISTS temp.loom_expected_fts_vocab;
+         DROP TABLE IF EXISTS temp.loom_expected_fts;",
+    )?;
+    result
+}
+
+fn vocabulary_digest(connection: &Connection, table: &str) -> Result<String> {
+    debug_assert!(matches!(
+        table,
+        "passages_fts_vocab" | "temp.loom_expected_fts_vocab"
+    ));
+    let mut hasher = blake3::Hasher::new();
+    let query = format!("SELECT term, doc, cnt FROM {table} ORDER BY term");
+    let mut statement = connection.prepare(&query)?;
+    let rows = statement.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, i64>(1)?,
+            row.get::<_, i64>(2)?,
+        ))
+    })?;
+    for row in rows {
+        let (term, doc, count) = row?;
+        hasher.update(term.as_bytes());
+        hasher.update(&[0]);
+        hasher.update(&doc.to_le_bytes());
+        hasher.update(&count.to_le_bytes());
+    }
+    Ok(format!("blake3:{}", hasher.finalize().to_hex()))
 }
 
 fn stored_schema_version(connection: &Connection) -> Result<Option<i64>> {
@@ -1710,6 +1832,8 @@ mod tests {
             "passages",
             "relationships",
             "index_jobs",
+            "passages_fts_vocab",
+            "passages_fts_instances",
         ] {
             let exists: bool = connection
                 .query_row(
@@ -1730,6 +1854,8 @@ mod tests {
             "passages",
             "relationships",
             "index_jobs",
+            "passages_fts_vocab",
+            "passages_fts_instances",
         ] {
             let rows: i64 = connection
                 .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {

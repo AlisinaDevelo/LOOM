@@ -32,7 +32,8 @@ service attack. There is no supported remote service in this slice.
 2. Persisted roots retain only the exact selected locator and a read-only contract. Missing, denied,
    moved, unsafe, and revoked states are visible; no fallback path is inferred.
 3. The indexer traverses and reads local files, then writes normalized text and metadata to SQLite.
-4. FTS5 derives a lexical search structure from canonical passage rows.
+4. FTS5 and its vocabulary projections derive a lexical search structure from canonical passage
+   rows; health/repair diagnostics never promote derived state to authority.
 5. Tauri IPC exposes indexing, cooperative cancellation, scope status/revocation, search,
    statistics, and source opening to the UI.
 6. The host external application receives an original path when the user requests opening it.

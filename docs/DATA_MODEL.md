@@ -48,13 +48,20 @@ the normalized text stored in the passage.
 
 passages_fts is an SQLite FTS5 external-content virtual table over passages. It indexes the passage
 text with the unicode61 tokenizer and diacritic removal. Triggers mirror passage inserts, updates,
-and deletes into the FTS5 table.
+and deletes into the FTS5 table. The derived `passages_fts_vocab` and `passages_fts_instances`
+projections expose tokenizer terms and indexed document IDs for health checks; all three projections
+are rebuildable.
 
 The FTS5 row is not an independent source of truth. Search joins it back to canonical passages,
 versions, artifacts, and active locators before returning a result. BM25 rank is ordering data, not
 evidence identity. Match display is projected from canonical passage text into structured
 highlighted/unhighlighted segments, so characters in source text cannot be interpreted as formatting
 instructions. See the [SQLite FTS5 reference](https://www.sqlite.org/fts5.html).
+
+`fts_health` reports canonical passage count/digest, indexed-document count, expected vocabulary
+digest, actual vocabulary digest, and the SQLite FTS5 integrity result. `repair_fts` reports the
+before/after health objects after a transactional rebuild. Neither operation changes passages,
+versions, anchors, or source identity.
 
 ## Search result contract
 

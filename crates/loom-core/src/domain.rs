@@ -71,6 +71,29 @@ impl Default for IndexCancellationToken {
     }
 }
 
+/// Consistency evidence for the canonical passage rows and derived FTS5 projection.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FtsHealthReport {
+    pub canonical_passages: u64,
+    pub indexed_passages: u64,
+    /// BLAKE3 over ordered canonical passage row IDs and text hashes.
+    pub canonical_digest: String,
+    /// BLAKE3 over the tokenizer vocabulary expected from canonical passage text.
+    pub expected_derivative_digest: String,
+    /// BLAKE3 over the vocabulary currently present in the FTS5 projection.
+    pub derivative_digest: String,
+    pub integrity_ok: bool,
+    pub integrity_error: Option<String>,
+    pub healthy: bool,
+}
+
+/// Before/after evidence for one transactional FTS5 repair.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FtsRepairReport {
+    pub before: FtsHealthReport,
+    pub after: FtsHealthReport,
+}
+
 /// Durable progress for the most recent indexing job for an explicitly selected root.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IndexCheckpoint {
