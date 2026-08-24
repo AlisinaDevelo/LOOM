@@ -56,6 +56,13 @@ tauri-build.log  01f2d7c1200dce5528714e2bd254b24e8d93709725651285624c1b46b343a92
 mixed-corpus.log  a8ef3b30789d2ba86a947c3fb9191a6aebb5ad19d16fcaa17c0fbe218ff867d6
 ```
 
+## MVP demo smoke
+
+`./scripts/demo-mvp.sh /tmp/loom-mvp-demo-final` completed on the same Mac. It indexed three
+selected sources, recovered the exact Markdown phrase and the native Vision OCR region, reported
+one derived OCR version with two passages, and printed the Tauri viewer steps. The retained demo
+log SHA-256 is `9bb1b8adebf7556051c3aa7bae9c5ced421e37c50450438bf46cf1c3fb01c6d4`.
+
 ## Limitations and decision
 
 The evidence panel renders the exact canonical passage, PDF page label, and OCR-region geometry;
