@@ -373,8 +373,12 @@ pub struct EvidenceView {
 pub struct SemanticIndexConfig {
     pub provider_id: String,
     pub model_id: String,
+    /// Tokenization contract used to turn source passages into provider inputs.
+    pub tokenizer: String,
     pub dimension: u32,
     pub normalization: String,
+    /// Canonical, versioned build parameters for the derived vector representation.
+    pub build_parameters: String,
     pub index_revision: String,
 }
 
@@ -383,8 +387,10 @@ impl Default for SemanticIndexConfig {
         Self {
             provider_id: "loom.hash-embedding".into(),
             model_id: "hashed-tokens-v1".into(),
+            tokenizer: "unicode-alnum-lower-v1".into(),
             dimension: 128,
             normalization: "l2".into(),
+            build_parameters: "hash-token=1.0;hash-bigram=0.5;vector=float32-le-v1".into(),
             index_revision: "semantic-v1".into(),
         }
     }
