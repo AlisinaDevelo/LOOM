@@ -32,6 +32,8 @@ pub struct OcrResult {
     pub provider_id: String,
     pub provider_version: String,
     pub model_version: String,
+    /// Vision is configured for automatic language detection in this release.
+    pub language: String,
     pub regions: Vec<OcrRegion>,
     pub warnings: Vec<String>,
 }
@@ -174,6 +176,7 @@ mod native {
             provider_id: PROVIDER_ID.into(),
             provider_version: PROVIDER_VERSION.into(),
             model_version,
+            language: "auto".into(),
             regions,
             warnings,
         })

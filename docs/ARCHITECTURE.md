@@ -148,13 +148,15 @@ bounded report. The original path remains the render/open authority; LOOM never 
 to display a page.
 
 Image ingestion uses macOS Vision through the isolated `loom-ocr-macos` crate. The provider
-returns owned Rust values only: OCR text, confidence, provider/model identity, and normalized
-lower-left rectangles. The core converts rectangles once into clamped top-left pixel bounds after
-EXIF orientation, stores fixed-point confidence/scale and extraction metadata, and never stores
+returns owned Rust values only: OCR text, confidence, provider/model identity, automatic-language
+mode, and normalized lower-left rectangles. The core converts rectangles once into clamped
+top-left pixel bounds after EXIF orientation, stores fixed-point confidence/scale, an image hash,
+and an explicit `confirmed`/`low_confidence` state in extraction metadata, and never stores
 Objective-C objects or source image bytes. OCR is an explicit local policy: disabling it
 transactionally deletes every `loom.ocr` version and passage while retaining the source locator;
 re-enabling and re-indexing recovers the derived records. Malformed images, empty OCR results, and
-non-macOS provider absence fail closed with a visible bounded report.
+non-macOS provider absence fail closed with a visible bounded report; empty results carry the
+machine-readable `no-readable-text` outcome.
 
 Approved-root observation is deliberately conservative. The coalescer accepts only absolute,
 in-scope hints, debounces duplicate create/modify/remove/rename events, and turns overflow or large

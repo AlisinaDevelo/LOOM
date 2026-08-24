@@ -1,4 +1,4 @@
-use std::fs;
+use std::{fs, io::Cursor};
 
 use loom_core::{EvidenceAnchor, Library, ResolveEvidenceRequest, SearchRequest};
 use rusqlite::Connection;
@@ -39,9 +39,19 @@ fn native_vision_ocr_records_provider_metadata_and_pixel_evidence() {
         observation.extraction_metadata["model_version"],
         "VNRecognizeTextRequestRevision3"
     );
+    assert_eq!(observation.extraction_metadata["language"], "auto");
+    assert_eq!(
+        observation.extraction_metadata["image_hash"],
+        observation.content_hash
+    );
+    assert_eq!(
+        observation.extraction_metadata["confidence_threshold_milli"],
+        800
+    );
     assert_eq!(observation.extraction_metadata["image_width"], 1200);
     assert_eq!(observation.extraction_metadata["image_height"], 600);
     assert_eq!(observation.passages.len(), 2);
+    let mut low_confidence_regions = 0;
     for passage in &observation.passages {
         let EvidenceAnchor::ImageRegion {
             x,
@@ -65,7 +75,22 @@ fn native_vision_ocr_records_provider_metadata_and_pixel_evidence() {
         assert_eq!(orientation, 1);
         assert_eq!(scale_milli, 1_000);
         assert!(confidence_milli > 0);
+        if confidence_milli < 800 {
+            low_confidence_regions += 1;
+        }
     }
+    assert_eq!(
+        observation.extraction_metadata["low_confidence_regions"],
+        low_confidence_regions
+    );
+    assert_eq!(
+        observation.extraction_metadata["confidence_state"],
+        if low_confidence_regions == 0 {
+            "confirmed"
+        } else {
+            "low_confidence"
+        }
+    );
 
     let hit = library
         .search(&SearchRequest {
@@ -137,6 +162,25 @@ fn malformed_image_fails_closed_then_recovers_without_stale_ocr() {
         .unwrap()
         .iter()
         .any(|hit| matches!(hit.anchor, EvidenceAnchor::ImageRegion { .. })));
+}
+
+#[test]
+fn blank_image_reports_a_machine_readable_no_text_outcome() {
+    if !cfg!(target_os = "macos") {
+        return;
+    }
+    let directory = tempdir().unwrap();
+    let source = directory.path().join("blank.png");
+    let database = directory.path().join("library.sqlite3");
+    let blank = image::DynamicImage::ImageLuma8(image::GrayImage::new(96, 96));
+    let mut bytes = Cursor::new(Vec::new());
+    blank.write_to(&mut bytes, image::ImageFormat::Png).unwrap();
+    fs::write(&source, bytes.into_inner()).unwrap();
+
+    let library = Library::open(&database).unwrap();
+    let report = library.index_path(&source).unwrap();
+    assert_eq!(report.failed, 1);
+    assert!(report.failures[0].reason.contains("no-readable-text"));
 }
 
 #[test]

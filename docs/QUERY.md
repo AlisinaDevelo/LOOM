@@ -10,7 +10,7 @@ be appended to the same query:
 | \`before:\` | \`before:2026-02-01\` | Exclusive UTC source modification upper bound |
 | \`type:\` | \`type:pdf\`, \`type:image\`, \`type:markdown\` | Source family; an exact MIME type such as \`image/png\` is also accepted |
 | \`path:\` | \`path:"research notes"\` | Case-insensitive substring of the canonical source locator |
-| \`confidence:\` | \`confidence:>=0.90\` | OCR/evidence confidence in the inclusive range \`0..1\`; text and PDF anchors have confidence \`1.0\` |
+| \`confidence:\` | \`confidence:>=0.90\` | OCR/evidence confidence in the inclusive range \`0..1\`; text and PDF anchors have confidence \`1.0\`. OCR results also expose `confirmed` or `low_confidence`; no-readable-text inputs are indexing failures. |
 
 RFC3339 timestamps are accepted in addition to \`YYYY-MM-DD\`, for example
 \`after:2026-01-01T09:30:00Z\`. A filter may appear once per key. Queries must include

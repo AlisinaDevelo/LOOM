@@ -49,6 +49,7 @@ const hit = {
     line_start: 2,
     line_end: 2,
   },
+  confidence_state: "confirmed" as const,
   match_reason: "SQLite FTS5 BM25 over the active source passage",
 };
 
@@ -85,6 +86,15 @@ const imageHit = {
     orientation: 1,
     scale_milli: 1000,
     confidence_milli: 990,
+  },
+};
+
+const lowConfidenceImageHit = {
+  ...imageHit,
+  confidence_state: "low_confidence" as const,
+  anchor: {
+    ...imageHit.anchor,
+    confidence_milli: 600,
   },
 };
 
@@ -270,6 +280,30 @@ describe("desktop truth path", () => {
     expect(stage).toHaveAttribute("data-rotation", "90");
   });
 
+  it("labels low-confidence OCR evidence", async () => {
+    invokeMock.mockImplementation(async (command) => {
+      if (command === "reconcile_approved_roots") return {};
+      if (command === "list_source_roots") return [];
+      if (command === "library_stats") return readyStats;
+      if (command === "search") return [lowConfidenceImageHit];
+      if (command === "resolve_evidence") return {
+        ...lowConfidenceImageHit,
+        passage_text: "uncertain OCR",
+        extractor_id: "loom.ocr",
+        extractor_version: "0.1.0",
+        extraction_metadata: { provider_id: "macos.vision", confidence_state: "low_confidence" },
+      };
+      throw new Error(`unexpected command: ${command}`);
+    });
+
+    render(<App />);
+    fireEvent.change(screen.getByRole("textbox", { name: "Search your local sources" }), { target: { value: "uncertain OCR" } });
+    fireEvent.submit(screen.getByRole("search"));
+    expect(await screen.findByText("low-confidence OCR")).toBeInTheDocument();
+    fireEvent.click(await screen.findByRole("button", { name: "View evidence" }));
+    expect(await screen.findByText(/Low-confidence text · OCR region/)).toBeInTheDocument();
+  });
+
   it("discloses stale evidence instead of showing an unverified passage", async () => {
     invokeMock.mockImplementation(async (command) => {
       if (command === "reconcile_approved_roots") return {};
@@ -339,6 +373,34 @@ describe("desktop truth path", () => {
     expect(await screen.findByRole("alert")).toHaveTextContent("source exceeds limit");
     expect(screen.getByRole("status")).toHaveTextContent("Indexed 1; 0 unchanged; 1 unsupported; 1 failed.");
     expect(screen.getByText("1 original source ready to recover.")).toBeInTheDocument();
+  });
+
+  it("names a no-readable-text OCR outcome in the index notice", async () => {
+    invokeMock.mockImplementation(async (command) => {
+      if (command === "reconcile_approved_roots") return {};
+      if (command === "list_source_roots") return [];
+      if (command === "library_stats") return readyStats;
+      if (command === "index_selected_folder") {
+        return {
+          run_id: "run-no-text",
+          discovered: 1,
+          attempted: 1,
+          indexed: 0,
+          unchanged: 0,
+          skipped: 0,
+          failed: 1,
+          cancelled: 0,
+          bytes_read: 96,
+          failures: [{ source: "/Users/test/blank.png", reason: "image extraction failed: no-readable-text: provider returned no text regions" }],
+        };
+      }
+      throw new Error(`unexpected command: ${command}`);
+    });
+
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "Add a folder" }));
+    expect(await screen.findByRole("status")).toHaveTextContent("no readable text reported");
+    expect(screen.getByRole("alert")).toHaveTextContent("no-readable-text");
   });
 
   it("requests bounded cancellation and reports the resumable run", async () => {

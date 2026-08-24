@@ -162,6 +162,10 @@ pub(crate) fn read_stable_with_limits_and_ocr(
             return Err(LoomError::OcrDisabled);
         }
         let extraction = ocr::extract_image(&stable.bytes)?;
+        let mut extraction_metadata = with_capture_metadata(extraction.metadata, capture_metadata);
+        if let Some(object) = extraction_metadata.as_object_mut() {
+            object.insert("image_hash".into(), serde_json::json!(raw_hash.clone()));
+        }
         return Ok(StableDocument {
             raw_hash,
             byte_size: stable.bytes.len() as u64,
@@ -172,7 +176,7 @@ pub(crate) fn read_stable_with_limits_and_ocr(
             page_count: None,
             parse_warnings: extraction.warnings,
             image_regions: Some(extraction.regions),
-            extraction_metadata: with_capture_metadata(extraction.metadata, capture_metadata),
+            extraction_metadata,
         });
     }
     let text = String::from_utf8(stable.bytes).map_err(|_| {

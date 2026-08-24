@@ -11,11 +11,15 @@ use exif::{In, Reader as ExifReader, Tag};
 use image::ImageReader;
 use serde_json::json;
 
-use crate::error::{LoomError, Result};
+use crate::{
+    domain::{EvidenceAnchor, OcrConfidenceState},
+    error::{LoomError, Result},
+};
 
 pub(crate) const IMAGE_OCR_EXTRACTOR_ID: &str = "loom.ocr";
 pub(crate) const IMAGE_OCR_EXTRACTOR_VERSION: &str = "0.1.0";
 pub(crate) const DEFAULT_SCALE_MILLI: u32 = 1_000;
+pub(crate) const LOW_CONFIDENCE_THRESHOLD_MILLI: u32 = 800;
 const MAX_IMAGE_PIXELS: u64 = 100_000_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -47,6 +51,25 @@ pub(crate) struct ImageExtraction {
     pub(crate) regions: Vec<ImageOcrRegion>,
     pub(crate) metadata: serde_json::Value,
     pub(crate) warnings: Vec<String>,
+}
+
+pub(crate) fn confidence_state(confidence_milli: u32) -> OcrConfidenceState {
+    if confidence_milli >= LOW_CONFIDENCE_THRESHOLD_MILLI {
+        OcrConfidenceState::Confirmed
+    } else {
+        OcrConfidenceState::LowConfidence
+    }
+}
+
+pub(crate) fn anchor_confidence_state(anchor: &EvidenceAnchor) -> OcrConfidenceState {
+    match anchor {
+        EvidenceAnchor::ImageRegion {
+            confidence_milli, ..
+        } => confidence_state(*confidence_milli),
+        EvidenceAnchor::Text { .. } | EvidenceAnchor::PdfPage { .. } => {
+            OcrConfidenceState::Confirmed
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -187,7 +210,7 @@ pub(crate) fn extract_image(bytes: &[u8]) -> Result<ImageExtraction> {
         })?;
     if provider.regions.is_empty() {
         return Err(LoomError::OcrExtraction(
-            "provider returned no text regions".into(),
+            "no-readable-text: provider returned no text regions".into(),
         ));
     }
 
@@ -195,6 +218,7 @@ pub(crate) fn extract_image(bytes: &[u8]) -> Result<ImageExtraction> {
         oriented_dimensions(properties.width, properties.height, properties.orientation);
     let mut normalized_text = String::new();
     let mut regions = Vec::with_capacity(provider.regions.len());
+    let mut low_confidence_regions = 0u64;
     for (index, region) in provider.regions.into_iter().enumerate() {
         if index > 0 {
             normalized_text.push('\n');
@@ -208,9 +232,16 @@ pub(crate) fn extract_image(bytes: &[u8]) -> Result<ImageExtraction> {
             properties.height,
             properties.orientation,
         )?;
+        let confidence_milli = (region.confidence.clamp(0.0, 1.0) * 1_000.0).round() as u32;
+        if matches!(
+            confidence_state(confidence_milli),
+            OcrConfidenceState::LowConfidence
+        ) {
+            low_confidence_regions += 1;
+        }
         regions.push(ImageOcrRegion {
             text: region.text,
-            confidence_milli: (region.confidence.clamp(0.0, 1.0) * 1_000.0).round() as u32,
+            confidence_milli,
             bounds,
             char_start,
             char_end,
@@ -228,6 +259,7 @@ pub(crate) fn extract_image(bytes: &[u8]) -> Result<ImageExtraction> {
         "provider_id": provider.provider_id,
         "provider_version": provider.provider_version,
         "model_version": provider.model_version,
+        "language": provider.language,
         "image_width": image_width,
         "image_height": image_height,
         "encoded_width": properties.width,
@@ -235,6 +267,13 @@ pub(crate) fn extract_image(bytes: &[u8]) -> Result<ImageExtraction> {
         "orientation": properties.orientation,
         "scale_milli": DEFAULT_SCALE_MILLI,
         "region_count": regions.len(),
+        "confidence_threshold_milli": LOW_CONFIDENCE_THRESHOLD_MILLI,
+        "low_confidence_regions": low_confidence_regions,
+        "confidence_state": if low_confidence_regions == 0 {
+            OcrConfidenceState::Confirmed.as_str()
+        } else {
+            OcrConfidenceState::LowConfidence.as_str()
+        },
     });
     Ok(ImageExtraction {
         normalized_text,
@@ -247,8 +286,10 @@ pub(crate) fn extract_image(bytes: &[u8]) -> Result<ImageExtraction> {
 #[cfg(test)]
 mod tests {
     use super::{
-        normalized_to_pixel_bounds, oriented_dimensions, scaled_pixel_bounds, ImagePixelBounds,
+        confidence_state, normalized_to_pixel_bounds, oriented_dimensions, scaled_pixel_bounds,
+        ImagePixelBounds, LOW_CONFIDENCE_THRESHOLD_MILLI,
     };
+    use crate::domain::OcrConfidenceState;
     use loom_ocr_macos::NormalizedBounds;
 
     #[test]
@@ -322,5 +363,69 @@ mod tests {
                 height: 26,
             }
         );
+    }
+
+    #[test]
+    fn confidence_state_has_a_documented_inclusive_threshold() {
+        assert_eq!(LOW_CONFIDENCE_THRESHOLD_MILLI, 800);
+        assert_eq!(confidence_state(799), OcrConfidenceState::LowConfidence);
+        assert_eq!(confidence_state(800), OcrConfidenceState::Confirmed);
+        assert_eq!(confidence_state(1_000), OcrConfidenceState::Confirmed);
+    }
+
+    #[test]
+    fn geometry_contract_covers_orientation_and_retina_scale() {
+        let portrait = normalized_to_pixel_bounds(
+            NormalizedBounds {
+                x: 0.1,
+                y: 0.2,
+                width: 0.3,
+                height: 0.4,
+            },
+            1_200,
+            600,
+            1,
+        )
+        .unwrap();
+        assert_eq!(
+            portrait,
+            ImagePixelBounds {
+                x: 120,
+                y: 240,
+                width: 360,
+                height: 240
+            }
+        );
+        let rotated = normalized_to_pixel_bounds(
+            NormalizedBounds {
+                x: 0.1,
+                y: 0.2,
+                width: 0.3,
+                height: 0.4,
+            },
+            1_200,
+            600,
+            6,
+        )
+        .unwrap();
+        assert_eq!(
+            rotated,
+            ImagePixelBounds {
+                x: 60,
+                y: 480,
+                width: 180,
+                height: 480
+            }
+        );
+        assert_eq!(
+            scaled_pixel_bounds(portrait, 2_000),
+            ImagePixelBounds {
+                x: 240,
+                y: 480,
+                width: 720,
+                height: 480
+            }
+        );
+        assert_eq!(oriented_dimensions(1_200, 600, 6), (600, 1_200));
     }
 }
