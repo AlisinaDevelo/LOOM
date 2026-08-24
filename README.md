@@ -89,6 +89,8 @@ without private routing metadata.
 - [Privacy](docs/PRIVACY.md)
 - [Threat model](docs/THREAT_MODEL.md)
 - [Evaluation](docs/EVALUATION.md)
+- [v0.1 activation gate](docs/ACTIVATION_GATE.md)
+- [Participant worksheet](docs/studies/v0.1-participant-worksheet.md)
 - [Architecture decision records](docs/adr/README.md)
 - [Product direction](docs/PRODUCT.md)
 - [Research direction](docs/RESEARCH.md)
