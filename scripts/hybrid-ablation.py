@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import os
 import subprocess
 import tempfile
 import time
@@ -162,8 +163,14 @@ def main() -> int:
 
     with tempfile.TemporaryDirectory(prefix="loom-hybrid-ablation-") as temporary:
         database = Path(temporary) / "library.sqlite3"
-        subprocess.run(["cargo", "build", "--locked", "-q", "-p", "loom-cli"], cwd=root, check=True)
-        binary = root / "target" / "debug" / "loom"
+        configured_binary = os.environ.get("LOOM_BINARY")
+        if configured_binary:
+            binary = Path(configured_binary).resolve()
+            if not binary.is_file():
+                raise RuntimeError(f"LOOM_BINARY does not point to a file: {binary}")
+        else:
+            subprocess.run(["cargo", "build", "--locked", "-q", "-p", "loom-cli"], cwd=root, check=True)
+            binary = root / "target" / "debug" / "loom"
         index, _ = command(binary, database, "index", str(corpus))
         if index["failures"]:
             raise RuntimeError(f"benchmark index failed: {index['failures']}")

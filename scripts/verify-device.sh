@@ -59,22 +59,26 @@ run_mixed_corpus() {
   record_command "mixed corpus at $run_dir"
   {
     printf 'run_dir=%s\n' "$run_dir"
-    cargo run --locked -q -p loom-cli -- --database "$database" index "$corpus"
-    cargo run --locked -q -p loom-cli -- --database "$database" search '"retry anomalies"' --limit 5
-    if cargo run --locked -q -p loom-cli -- --database "$database" search '"must never enter selected root"' --limit 5 | grep -q 'must never enter selected root'; then
+    loom_cli "$database" index "$corpus"
+    loom_cli "$database" search '"retry anomalies"' --limit 5
+    if loom_cli "$database" search '"must never enter selected root"' --limit 5 | grep -q 'must never enter selected root'; then
       printf 'outside-root symlink was indexed\n' >&2
       return 1
     fi
     printf '%s\n' 'outside-root symlink remained unreachable'
     printf '%s\n' 'recovered after bounded failure' > "$corpus/oversized.md"
-    cargo run --locked -q -p loom-cli -- --database "$database" index "$corpus"
-    cargo run --locked -q -p loom-cli -- --database "$database" search '"recovered after bounded failure"' --limit 5
-    cargo run --locked -q -p loom-cli -- --database "$database" stats
+    loom_cli "$database" index "$corpus"
+    loom_cli "$database" search '"recovered after bounded failure"' --limit 5
+    loom_cli "$database" stats
   } >"$log" 2>&1 || mixed_status=1
   if [[ "$mixed_status" -ne 0 ]]; then
     STATUS=1
   fi
   printf 'MIXED %-23s %s\n' "$([ "$mixed_status" -eq 0 ] && printf PASS || printf FAIL)" "$log"
+}
+
+loom_cli() {
+  "$LOOM_BINARY" --database "$1" "${@:2}"
 }
 
 clear_rust_outputs() {
@@ -92,6 +96,7 @@ stage_cli_binary() {
   local staged_binary="$EVIDENCE_DIR/loom"
   cp "$ROOT/target/debug/loom" "$staged_binary"
   chmod +x "$staged_binary"
+  export LOOM_BINARY="$staged_binary"
   printf 'staged=%s\n' "$staged_binary"
 }
 
@@ -115,15 +120,15 @@ run_step clippy cargo clippy --workspace --all-targets --locked -- -D warnings
 run_step rust-workspace cargo test --workspace --locked
 run_step rust-msrv-check cargo +1.88.0 check --workspace --all-targets --locked
 run_step rust-msrv-tests cargo +1.88.0 test -p loom-core --lib --tests -- --nocapture
-run_step retrieval-benchmark cargo run --locked -q -p loom-cli -- benchmark --corpus benchmarks/retrieval/v0/corpus --queries benchmarks/retrieval/v0/queries.jsonl
-run_step retrieval-benchmark-v1 cargo run --locked -q -p loom-cli -- benchmark --corpus benchmarks/retrieval/v1/corpus --queries benchmarks/retrieval/v1/queries.jsonl
+run_step performance-build cargo build --locked -q -p loom-cli
+run_step stage-cli-binary stage_cli_binary
+run_step clear-rust-target clear_rust_outputs
+run_step retrieval-benchmark "$EVIDENCE_DIR/loom" benchmark --corpus benchmarks/retrieval/v0/corpus --queries benchmarks/retrieval/v0/queries.jsonl
+run_step retrieval-benchmark-v1 "$EVIDENCE_DIR/loom" benchmark --corpus benchmarks/retrieval/v1/corpus --queries benchmarks/retrieval/v1/queries.jsonl
 run_step hybrid-ablation python3 scripts/hybrid-ablation.py
 run_step semantic-contract bash scripts/verify-semantic-contract.sh "$EVIDENCE_DIR/semantic"
 run_step performance-budget-tests python3 scripts/test-performance-budget.py
 run_mixed_corpus
-run_step performance-build cargo build --locked -q -p loom-cli
-run_step stage-cli-binary stage_cli_binary
-run_step clear-rust-target clear_rust_outputs
 run_step performance-budget python3 scripts/performance-budget.py --evidence-dir "$EVIDENCE_DIR/performance" --loom "$EVIDENCE_DIR/loom"
 run_step npm-install npm ci
 run_step npm-check npm run check
