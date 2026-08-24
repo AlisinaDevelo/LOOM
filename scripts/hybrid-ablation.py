@@ -167,6 +167,12 @@ def main() -> int:
         index, _ = command(binary, database, "index", str(corpus))
         if index["failures"]:
             raise RuntimeError(f"benchmark index failed: {index['failures']}")
+        supported = max(int(index["discovered"]) - int(index["skipped"]), 0)
+        completeness = (
+            (int(index["indexed"]) + int(index.get("unchanged", 0))) / supported
+            if supported
+            else 1.0
+        )
         command(binary, database, "semantic-rebuild")
         results: dict[str, list[tuple[list[dict[str, object]], float]]] = {
             "lexical": [],
@@ -192,7 +198,9 @@ def main() -> int:
     accuracy_pass = all(
         hybrid[key] >= thresholds[key]
         for key in ("exact_source_recall_at_1", "exact_source_recall_at_5", "anchor_precision")
-    ) and hybrid["false_positive_rate"] <= thresholds["false_positive_rate"]
+    ) and hybrid["false_positive_rate"] <= thresholds["false_positive_rate"] and completeness >= thresholds[
+        "index_completeness"
+    ]
     latency_pass = hybrid["p95_latency_ms"] <= P95_LATENCY_MAX_MS
     non_regression = hybrid["exact_source_recall_at_1"] >= lexical["exact_source_recall_at_1"]
     gate_pass = accuracy_pass and latency_pass and non_regression and not hybrid["failures"]
@@ -217,6 +225,12 @@ def main() -> int:
             "non_regression_pass": non_regression,
             "hybrid_p95_latency_ms_max": P95_LATENCY_MAX_MS,
             "manifest_thresholds": thresholds,
+        },
+        "index": {
+            "discovered": index["discovered"],
+            "indexed": index["indexed"],
+            "skipped": index["skipped"],
+            "completeness": completeness,
         },
         "modes": report,
     }

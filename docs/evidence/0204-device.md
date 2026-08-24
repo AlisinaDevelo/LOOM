@@ -10,7 +10,7 @@ evaluation result, not a claim that hybrid ranking has shipped in the desktop de
 - OS: macOS 26.6.2 (25G83), `aarch64-apple-darwin` / arm64
 - Native toolchain: `rustc 1.96.0` / Cargo 1.96.0, Node v26.7.0, npm 11.19.0
 - Declared MSRV: `rustc 1.88.0` / Cargo 1.88.0
-- Runtime-tested source baseline: `eee1236710b98375e86b12187d545ed451ee2b7c`
+- Runtime-tested source commit: `edfe25d19a088688f9c6e4c645341d7ed2826717`
 
 ## Acceptance-criterion evidence map
 
@@ -25,19 +25,19 @@ evaluation result, not a claim that hybrid ranking has shipped in the desktop de
 Command:
 
 ```text
-python3 scripts/hybrid-ablation.py > /tmp/loom-0204-hybrid-ablation-final.json
+python3 scripts/hybrid-ablation.py > /tmp/loom-0204-hybrid-ablation-commit-v2.json
 ```
 
 The command built the local CLI, indexed the rights-clean three-file corpus, rebuilt the local
 semantic derivative, and evaluated three queries in each mode. No source content left the device.
 The retained report SHA-256 is
-`7066bbdebeba07038db56097b58494922b17820f952725f91321ac3c967bc599`.
+`4c225305e1173d54c873b6e05b66119cf37d0842a3588b04c50d3f1a319f1fbf`.
 
 |Mode|Recall@1|Recall@5|Anchor precision|False-positive rate|Median ms|p95 ms|
 |---|---:|---:|---:|---:|---:|---:|
-|Lexical|1.0|1.0|1.0|0.0|9.029875000000075|10.002834000000016|
-|Semantic|1.0|1.0|0.0|0.6666666667|8.583750000000002|10.692915999999997|
-|Hybrid|1.0|1.0|1.0|0.6666666667|9.004124999999918|10.515625000000028|
+|Lexical|1.0|1.0|1.0|0.0|9.92975000000007|13.470874999999992|
+|Semantic|1.0|1.0|0.0|0.6666666667|9.232541000000039|12.680666000000063|
+|Hybrid|1.0|1.0|1.0|0.6666666667|9.582665999999907|11.94974999999998|
 
 The semantic-only anchor result is intentionally coarse because semantic candidates retain the
 passage anchor rather than a lexical query span. Hybrid preserves the lexical anchor when a
@@ -46,11 +46,19 @@ That is a real gate failure, not a reason to hide candidates or lower the thresh
 
 ## Verification and limits
 
-The focused Rust suite has four passing tests covering deterministic fusion, bounded signals,
-invalid-query failure, and evidence-bound `Library::hybrid_search`. Workspace compilation and the
-Python ablation script passed; the script exits `2` for the expected `hold` decision. Hybrid search
-requires a healthy semantic derivative and is not wired into the desktop default. Large-corpus
-quality, multilingual ranking, learned reranking, and participant evidence remain future work.
+The ablation indexed all three fixtures (`completeness=1.0`) before scoring. The exact-commit
+target-device run is `/tmp/loom-0204-device-commit.UR9Kzu` with status `PASS`.
+Its summary SHA-256 is
+`25652334a4d4626c35a7fd543c4092f3cdfc78d2e3a59780c0b370f36d0fd3ad`, commands SHA-256 is
+`ad9970c86da66bcefa12bb51e842b7af21c3192b65137a728ec8e9ecef195389`, and log manifest SHA-256
+is `3df57c05b9f0984f3cf63d3ba00635f09e8384d30bf223b4173a73295e14d89e`. Format, warnings-denied
+Clippy, workspace tests, Rust 1.88 check/tests, npm checks, retrieval, semantic contract,
+security, Tauri debug build, and mixed-corpus recovery all passed. The focused Rust suite has four
+passing tests covering deterministic fusion, bounded signals, invalid-query failure, and
+evidence-bound `Library::hybrid_search`. The Python ablation script passes its own execution but
+exits `2` for the expected `hold` decision. Hybrid search requires a healthy semantic derivative
+and is not wired into the desktop default. Large-corpus quality, multilingual ranking, learned
+reranking, and participant evidence remain future work.
 
 No screenshot was needed as acceptance evidence. If a future desktop capture is added, it must be
 cropped to the relevant result/evidence panel.
