@@ -17,10 +17,11 @@ use crate::{
         ArtifactObservation, EvidenceAnchor, EvidenceExcerpt, EvidenceSegment, EvidenceView,
         FtsHealthReport, FtsRepairReport, IndexCancellationToken, IndexCheckpoint, IndexFailure,
         IndexReport, LibraryStats, ObservationReport, OcrPurgeReport, OcrStatus,
-        PassageObservation, RankContributions, ResolveEvidenceRequest, SearchHit, SearchRequest,
-        SemanticCandidate, SemanticDropReport, SemanticIndexConfig, SemanticIndexManifest,
-        SemanticIndexStatus, SemanticProviderMeasurement, SemanticRebuildReport, SourceRootInfo,
-        SourceRootStatus,
+        PassageObservation, RankContributions, RelationshipEndpoint, RelationshipInput,
+        RelationshipKind, RelationshipOrigin, RelationshipRecord, RelationshipView,
+        ResolveEvidenceRequest, SearchHit, SearchRequest, SemanticCandidate, SemanticDropReport,
+        SemanticIndexConfig, SemanticIndexManifest, SemanticIndexStatus,
+        SemanticProviderMeasurement, SemanticRebuildReport, SourceRootInfo, SourceRootStatus,
     },
     error::{io_error, LoomError, Result},
     ingest::{
@@ -36,9 +37,10 @@ use crate::{
     },
 };
 
-const SCHEMA_VERSION: i64 = 5;
-const PREVIOUS_SCHEMA_VERSION: i64 = 4;
-const PREVIOUS_PREVIOUS_SCHEMA_VERSION: i64 = 3;
+const SCHEMA_VERSION: i64 = 6;
+const PREVIOUS_SCHEMA_VERSION: i64 = 5;
+const PREVIOUS_PREVIOUS_SCHEMA_VERSION: i64 = 4;
+const V3_SCHEMA_VERSION: i64 = 3;
 const LEGACY_SCHEMA_VERSION: i64 = 2;
 const LEGACY_SCHEMA_TABLES: &[&str] = &[
     "source_roots",
@@ -297,6 +299,126 @@ impl Library {
                     "source root disappeared during revocation: {locator}"
                 ))
             })
+    }
+
+    /// Adds one typed, evidence-bearing relationship and returns the durable record.
+    ///
+    /// Relationship identity is the source/target/kind/origin/method tuple. Repeating the same
+    /// observation is idempotent and never overwrites a prior evidence record.
+    pub fn add_relationship(&self, input: &RelationshipInput) -> Result<RelationshipRecord> {
+        let metadata_json = validate_relationship_input(input)?;
+        let mut connection = self.lock()?;
+        let transaction = connection.transaction()?;
+        for artifact_id in [&input.source_artifact_id, &input.target_artifact_id] {
+            let exists: bool = transaction.query_row(
+                "SELECT EXISTS(SELECT 1 FROM artifacts WHERE id = ?1)",
+                [artifact_id],
+                |row| row.get(0),
+            )?;
+            if !exists {
+                return Err(LoomError::ArtifactNotFound(artifact_id.to_string()));
+            }
+        }
+        if let Some(passage_id) = input.evidence_passage_id.as_deref() {
+            let belongs: bool = transaction.query_row(
+                "SELECT EXISTS(
+                    SELECT 1 FROM passages p
+                    JOIN artifact_versions v ON v.id = p.artifact_version_id
+                    WHERE p.id = ?1
+                      AND v.artifact_id IN (?2, ?3)
+                )",
+                params![
+                    passage_id,
+                    input.source_artifact_id,
+                    input.target_artifact_id
+                ],
+                |row| row.get(0),
+            )?;
+            if !belongs {
+                return Err(LoomError::InvalidPath(format!(
+                    "evidence passage is not attached to either relationship endpoint: {passage_id}"
+                )));
+            }
+        }
+        let existing: Option<String> = transaction
+            .query_row(
+                "SELECT id FROM relationships
+                 WHERE source_artifact_id = ?1 AND target_artifact_id = ?2
+                   AND kind = ?3 AND origin = ?4 AND method = ?5
+                 ORDER BY created_at, id LIMIT 1",
+                params![
+                    input.source_artifact_id,
+                    input.target_artifact_id,
+                    input.kind.as_str(),
+                    input.origin.as_str(),
+                    input.method.trim()
+                ],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if let Some(id) = existing {
+            transaction.commit()?;
+            return relationship_by_id(&connection, &id)?
+                .ok_or_else(|| LoomError::ArtifactStale(id));
+        }
+        let id = Uuid::new_v4().to_string();
+        let created_at = Utc::now().to_rfc3339();
+        transaction.execute(
+            "INSERT INTO relationships(
+                id, source_artifact_id, target_artifact_id, kind, evidence_passage_id,
+                confidence, method, relationship_schema_version, origin, metadata_json, created_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 1, ?8, ?9, ?10)",
+            params![
+                id,
+                input.source_artifact_id,
+                input.target_artifact_id,
+                input.kind.as_str(),
+                input.evidence_passage_id,
+                input.confidence,
+                input.method.trim(),
+                input.origin.as_str(),
+                metadata_json,
+                created_at,
+            ],
+        )?;
+        transaction.commit()?;
+        relationship_by_id(&connection, &id)?.ok_or_else(|| LoomError::ArtifactStale(id))
+    }
+
+    /// Lists bounded source-backed relationships touching an artifact, including active endpoint
+    /// version/hash projections for UI traversal.
+    pub fn list_relationships(
+        &self,
+        artifact_id: &str,
+        limit: u32,
+    ) -> Result<Vec<RelationshipView>> {
+        validate_relationship_id(artifact_id, "artifact")?;
+        let limit = limit.clamp(1, 100);
+        let connection = self.lock()?;
+        let mut statement = connection.prepare(
+            "SELECT id, source_artifact_id, target_artifact_id, kind, evidence_passage_id,
+                    confidence, method, relationship_schema_version, origin, metadata_json,
+                    created_at
+             FROM relationships
+             WHERE source_artifact_id = ?1 OR target_artifact_id = ?1
+             ORDER BY created_at, id
+             LIMIT ?2",
+        )?;
+        let records = statement
+            .query_map(params![artifact_id, limit], relationship_from_row)?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        records
+            .into_iter()
+            .map(|relationship| {
+                let source = relationship_endpoint(&connection, &relationship.source_artifact_id)?;
+                let target = relationship_endpoint(&connection, &relationship.target_artifact_id)?;
+                Ok(RelationshipView {
+                    relationship,
+                    source,
+                    target,
+                })
+            })
+            .collect()
     }
 
     /// Returns the durable checkpoint for a selected file or directory, when one exists.
@@ -2078,6 +2200,171 @@ fn discovery_fingerprint(paths: &[PathBuf]) -> String {
     format!("blake3:{}", hasher.finalize().to_hex())
 }
 
+fn validate_relationship_id(value: &str, label: &str) -> Result<()> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() || trimmed.len() > 256 || trimmed.chars().any(char::is_control) {
+        return Err(LoomError::InvalidPath(format!(
+            "{label} relationship identifier is empty, too long, or contains control characters"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_relationship_input(input: &RelationshipInput) -> Result<String> {
+    validate_relationship_id(&input.source_artifact_id, "source artifact")?;
+    validate_relationship_id(&input.target_artifact_id, "target artifact")?;
+    if input.source_artifact_id.trim() == input.target_artifact_id.trim() {
+        return Err(LoomError::InvalidPath(
+            "relationship endpoints must be different artifacts".into(),
+        ));
+    }
+    let kind = input.kind.as_str();
+    if kind.is_empty()
+        || kind.len() > 128
+        || kind
+            .chars()
+            .any(|value| value.is_control() || value.is_whitespace())
+    {
+        return Err(LoomError::InvalidPath(
+            "relationship kind is empty, too long, or contains whitespace".into(),
+        ));
+    }
+    if input.method.trim().is_empty()
+        || input.method.trim().len() > 256
+        || input.method.chars().any(char::is_control)
+    {
+        return Err(LoomError::InvalidPath(
+            "relationship method is empty, too long, or contains control characters".into(),
+        ));
+    }
+    if input.origin == RelationshipOrigin::Inferred
+        && (input.evidence_passage_id.is_none() || input.confidence.is_none())
+    {
+        return Err(LoomError::InvalidPath(
+            "inferred relationships require evidence and confidence".into(),
+        ));
+    }
+    if let Some(confidence) = input.confidence {
+        if !confidence.is_finite() || !(0.0..=1.0).contains(&confidence) {
+            return Err(LoomError::InvalidPath(
+                "relationship confidence must be finite and between 0 and 1".into(),
+            ));
+        }
+    }
+    if !input.metadata.is_object() {
+        return Err(LoomError::InvalidPath(
+            "relationship metadata must be a JSON object".into(),
+        ));
+    }
+    let metadata_json = serde_json::to_string(&input.metadata)?;
+    if metadata_json.len() > 16 * 1024 {
+        return Err(LoomError::InvalidPath(
+            "relationship metadata exceeds the 16 KiB limit".into(),
+        ));
+    }
+    if let Some(passage_id) = input.evidence_passage_id.as_deref() {
+        validate_relationship_id(passage_id, "evidence passage")?;
+    }
+    Ok(metadata_json)
+}
+
+fn relationship_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<RelationshipRecord> {
+    let origin: String = row.get(8)?;
+    let origin = match origin.as_str() {
+        "observed" => RelationshipOrigin::Observed,
+        "inferred" => RelationshipOrigin::Inferred,
+        "user_confirmed" => RelationshipOrigin::UserConfirmed,
+        _ => {
+            return Err(rusqlite::Error::FromSqlConversionFailure(
+                8,
+                rusqlite::types::Type::Text,
+                Box::new(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "unknown relationship origin",
+                )),
+            ))
+        }
+    };
+    let metadata_json: String = row.get(9)?;
+    let metadata = serde_json::from_str(&metadata_json).map_err(|error| {
+        rusqlite::Error::FromSqlConversionFailure(9, rusqlite::types::Type::Text, Box::new(error))
+    })?;
+    Ok(RelationshipRecord {
+        id: row.get(0)?,
+        source_artifact_id: row.get(1)?,
+        target_artifact_id: row.get(2)?,
+        kind: RelationshipKind::from_value(row.get::<_, String>(3)?),
+        evidence_passage_id: row.get(4)?,
+        confidence: row.get(5)?,
+        method: row.get(6)?,
+        schema_version: row.get::<_, i64>(7)?.max(1) as u32,
+        origin,
+        metadata,
+        created_at: row.get(10)?,
+    })
+}
+
+fn relationship_by_id(connection: &Connection, id: &str) -> Result<Option<RelationshipRecord>> {
+    connection
+        .query_row(
+            "SELECT id, source_artifact_id, target_artifact_id, kind, evidence_passage_id,
+                    confidence, method, relationship_schema_version, origin, metadata_json,
+                    created_at
+             FROM relationships WHERE id = ?1",
+            [id],
+            relationship_from_row,
+        )
+        .optional()
+        .map_err(Into::into)
+}
+
+fn relationship_endpoint(
+    connection: &Connection,
+    artifact_id: &str,
+) -> Result<RelationshipEndpoint> {
+    connection
+        .query_row(
+            "SELECT a.id, a.title, a.media_type, l.locator, v.id, v.content_hash, a.state
+             FROM artifacts a
+             LEFT JOIN artifact_locators l ON l.artifact_id = a.id AND l.active = 1
+             LEFT JOIN artifact_versions v ON v.id = a.active_version_id
+             WHERE a.id = ?1",
+            [artifact_id],
+            |row| {
+                Ok(RelationshipEndpoint {
+                    artifact_id: row.get(0)?,
+                    title: row.get(1)?,
+                    media_type: row.get(2)?,
+                    source_uri: row.get(3)?,
+                    version_id: row.get(4)?,
+                    content_hash: row.get(5)?,
+                    state: row.get(6)?,
+                })
+            },
+        )
+        .optional()?
+        .ok_or_else(|| LoomError::ArtifactNotFound(artifact_id.to_string()))
+}
+
+fn ensure_relationship_column(
+    transaction: &Transaction<'_>,
+    column: &str,
+    definition: &str,
+) -> Result<()> {
+    let exists: bool = transaction.query_row(
+        "SELECT EXISTS(
+            SELECT 1 FROM pragma_table_info('relationships') WHERE name = ?1
+         )",
+        [column],
+        |row| row.get(0),
+    )?;
+    if !exists {
+        let statement = format!("ALTER TABLE relationships ADD COLUMN {column} {definition}");
+        transaction.execute(&statement, [])?;
+    }
+    Ok(())
+}
+
 fn configure(connection: &Connection) -> Result<()> {
     connection.busy_timeout(std::time::Duration::from_secs(5))?;
     connection.execute_batch(
@@ -2208,6 +2495,7 @@ fn migrate(connection: &mut Connection) -> Result<()> {
             SCHEMA_VERSION
                 | PREVIOUS_SCHEMA_VERSION
                 | PREVIOUS_PREVIOUS_SCHEMA_VERSION
+                | V3_SCHEMA_VERSION
                 | LEGACY_SCHEMA_VERSION
         ) {
             return Err(LoomError::UnsupportedSchemaVersion(version.to_string()));
@@ -2296,8 +2584,15 @@ fn migrate(connection: &mut Connection) -> Result<()> {
             evidence_passage_id TEXT REFERENCES passages(id) ON DELETE SET NULL,
             confidence REAL,
             method TEXT NOT NULL,
+            relationship_schema_version INTEGER NOT NULL DEFAULT 1
+              CHECK(relationship_schema_version >= 1),
+            origin TEXT NOT NULL DEFAULT 'observed'
+              CHECK(origin IN ('observed', 'inferred', 'user_confirmed')),
+            metadata_json TEXT NOT NULL DEFAULT '{}'
+              CHECK(json_valid(metadata_json)),
             created_at TEXT NOT NULL,
-            CHECK(source_artifact_id <> target_artifact_id)
+            CHECK(source_artifact_id <> target_artifact_id),
+            CHECK(confidence IS NULL OR (confidence >= 0.0 AND confidence <= 1.0))
          ) STRICT;
 
          CREATE TABLE IF NOT EXISTS index_jobs(
@@ -2339,9 +2634,9 @@ fn migrate(connection: &mut Connection) -> Result<()> {
             INSERT INTO passages_fts(rowid, text) VALUES (new.rowid, new.text);
          END;",
     )?;
-    if existing_version.is_some_and(|version| {
-        version == PREVIOUS_PREVIOUS_SCHEMA_VERSION || version == LEGACY_SCHEMA_VERSION
-    }) {
+    if existing_version
+        .is_some_and(|version| version == V3_SCHEMA_VERSION || version == LEGACY_SCHEMA_VERSION)
+    {
         transaction.execute_batch(
             "ALTER TABLE artifact_versions
                 ADD COLUMN parse_warnings_json TEXT NOT NULL DEFAULT '[]'
@@ -2350,11 +2645,24 @@ fn migrate(connection: &mut Connection) -> Result<()> {
                 ADD COLUMN page_count INTEGER CHECK(page_count IS NULL OR page_count >= 0);",
         )?;
     }
-    if existing_version.is_some_and(|version| version < SCHEMA_VERSION) {
+    if existing_version.is_some_and(|version| version < PREVIOUS_SCHEMA_VERSION) {
         transaction.execute_batch(
             "ALTER TABLE artifact_versions
                 ADD COLUMN extraction_metadata_json TEXT NOT NULL DEFAULT '{}'
                   CHECK(json_valid(extraction_metadata_json));",
+        )?;
+    }
+    if existing_version.is_some_and(|version| version < SCHEMA_VERSION) {
+        ensure_relationship_column(
+            &transaction,
+            "relationship_schema_version",
+            "INTEGER NOT NULL DEFAULT 1",
+        )?;
+        ensure_relationship_column(&transaction, "origin", "TEXT NOT NULL DEFAULT 'observed'")?;
+        ensure_relationship_column(
+            &transaction,
+            "metadata_json",
+            "TEXT NOT NULL DEFAULT '{}' CHECK(json_valid(metadata_json))",
         )?;
     }
     transaction.execute(
@@ -2447,11 +2755,20 @@ fn validate_schema_shape(connection: &Connection, version: i64) -> Result<()> {
     ]
     .into_iter()
     .chain(
-        (version >= PREVIOUS_SCHEMA_VERSION)
+        (version >= PREVIOUS_PREVIOUS_SCHEMA_VERSION)
             .then_some(("artifact_versions", "parse_warnings_json")),
     )
-    .chain((version >= PREVIOUS_SCHEMA_VERSION).then_some(("artifact_versions", "page_count")))
-    .chain((version >= SCHEMA_VERSION).then_some(("artifact_versions", "extraction_metadata_json")))
+    .chain(
+        (version >= PREVIOUS_PREVIOUS_SCHEMA_VERSION)
+            .then_some(("artifact_versions", "page_count")),
+    )
+    .chain(
+        (version >= PREVIOUS_SCHEMA_VERSION)
+            .then_some(("artifact_versions", "extraction_metadata_json")),
+    )
+    .chain((version >= SCHEMA_VERSION).then_some(("relationships", "relationship_schema_version")))
+    .chain((version >= SCHEMA_VERSION).then_some(("relationships", "origin")))
+    .chain((version >= SCHEMA_VERSION).then_some(("relationships", "metadata_json")))
     .chain((version != LEGACY_SCHEMA_VERSION).then_some(("index_jobs", "id")))
     .chain((version != LEGACY_SCHEMA_VERSION).then_some(("index_jobs", "source_root_id")))
     .chain((version != LEGACY_SCHEMA_VERSION).then_some(("index_jobs", "selection_locator")))
@@ -2880,7 +3197,7 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(schema_version, "5");
+        assert_eq!(schema_version, "6");
 
         let foreign_keys: i64 = connection
             .query_row("PRAGMA foreign_keys", [], |row| row.get(0))
@@ -2978,7 +3295,7 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(schema_version, "5");
+        assert_eq!(schema_version, "6");
         let checkpoint_table: bool = connection
             .query_row(
                 "SELECT EXISTS(

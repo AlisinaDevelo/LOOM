@@ -15,10 +15,11 @@ pub use domain::{
     CaptureReport, EvidenceAnchor, EvidenceExcerpt, EvidenceSegment, EvidenceView, FtsHealthReport,
     FtsRepairReport, IndexCancellationToken, IndexCheckpoint, IndexFailure, IndexReport,
     LibraryStats, ObservationReport, OcrConfidenceState, OcrPurgeReport, OcrStatus,
-    OpenArtifactRequest, PassageObservation, RankContributions, ResolveEvidenceRequest, SearchHit,
-    SearchRequest, SemanticCandidate, SemanticDropReport, SemanticIndexConfig,
-    SemanticIndexManifest, SemanticIndexStatus, SemanticProviderMeasurement, SemanticRebuildReport,
-    SourceRootInfo, SourceRootStatus,
+    OpenArtifactRequest, PassageObservation, RankContributions, RelationshipEndpoint,
+    RelationshipInput, RelationshipKind, RelationshipOrigin, RelationshipRecord, RelationshipView,
+    ResolveEvidenceRequest, SearchHit, SearchRequest, SemanticCandidate, SemanticDropReport,
+    SemanticIndexConfig, SemanticIndexManifest, SemanticIndexStatus, SemanticProviderMeasurement,
+    SemanticRebuildReport, SourceRootInfo, SourceRootStatus,
 };
 pub use error::{LoomError, Result};
 pub use observe::{coalesce_events, ObservationEvent, ObservationEventKind, ObservationPlan};

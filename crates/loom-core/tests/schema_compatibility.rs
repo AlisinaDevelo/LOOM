@@ -62,7 +62,7 @@ fn populated_v3_migration_adds_pdf_metadata_without_rewriting_canonical_rows() {
             |row| row.get(0),
         )
         .unwrap();
-    assert_eq!(schema_version, "5");
+    assert_eq!(schema_version, "6");
     let (hash, warnings, page_count): (String, String, Option<i64>) = connection
         .query_row(
             "SELECT content_hash, parse_warnings_json, page_count
@@ -134,7 +134,7 @@ fn populated_v4_migration_adds_extraction_metadata_without_rewriting_rows() {
             |row| row.get(0),
         )
         .unwrap();
-    assert_eq!(schema_version, "5");
+    assert_eq!(schema_version, "6");
     let metadata: String = connection
         .query_row(
             "SELECT extraction_metadata_json FROM artifact_versions",
@@ -147,6 +147,72 @@ fn populated_v4_migration_adds_extraction_metadata_without_rewriting_rows() {
         library
             .search(&SearchRequest {
                 text: "v4 migration marker".into(),
+                limit: 5,
+            })
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
+#[test]
+fn populated_v5_migration_adds_relationship_envelope_without_rewriting_rows() {
+    let directory = tempdir().unwrap();
+    let database = directory.path().join("v5.sqlite3");
+    let connection = Connection::open(&database).unwrap();
+    connection.execute_batch(V2_FIXTURE).unwrap();
+    connection
+        .execute_batch(
+            "ALTER TABLE artifact_versions
+                ADD COLUMN parse_warnings_json TEXT NOT NULL DEFAULT '[]'
+                  CHECK(json_valid(parse_warnings_json));
+             ALTER TABLE artifact_versions
+                ADD COLUMN page_count INTEGER CHECK(page_count IS NULL OR page_count >= 0);
+             ALTER TABLE artifact_versions
+                ADD COLUMN extraction_metadata_json TEXT NOT NULL DEFAULT '{}'
+                  CHECK(json_valid(extraction_metadata_json));
+             CREATE TABLE index_jobs(
+                id TEXT PRIMARY KEY,
+                source_root_id TEXT NOT NULL REFERENCES source_roots(id) ON DELETE CASCADE,
+                selection_locator TEXT NOT NULL,
+                discovery_fingerprint TEXT NOT NULL,
+                total_units INTEGER NOT NULL CHECK(total_units >= 0),
+                next_unit INTEGER NOT NULL CHECK(next_unit >= 0 AND next_unit <= total_units),
+                state TEXT NOT NULL CHECK(state IN ('running', 'interrupted', 'completed', 'failed')),
+                last_error TEXT,
+                started_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                completed_at TEXT,
+                UNIQUE(source_root_id, selection_locator)
+            ) STRICT;
+             UPDATE schema_meta SET value = '5' WHERE key = 'schema_version';",
+        )
+        .unwrap();
+    drop(connection);
+
+    let library = Library::open(&database).unwrap();
+    let connection = Connection::open(&database).unwrap();
+    let schema_version: String = connection
+        .query_row(
+            "SELECT value FROM schema_meta WHERE key = 'schema_version'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(schema_version, "6");
+    let columns: (i64, String, String) = connection
+        .query_row(
+            "SELECT relationship_schema_version, origin, metadata_json
+             FROM relationships WHERE id = 'relationship-v2'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(columns, (1, "observed".into(), "{}".into()));
+    assert_eq!(
+        library
+            .search(&SearchRequest {
+                text: "migration preserves anchors".into(),
                 limit: 5,
             })
             .unwrap()
@@ -208,7 +274,7 @@ fn assert_preserved_v2_rows(library: &Library, database: &std::path::Path) {
             |row| row.get(0),
         )
         .unwrap();
-    assert_eq!(schema_version, "5");
+    assert_eq!(schema_version, "6");
 
     let (hash, extractor_id, extractor_version): (String, String, String) = connection
         .query_row(
@@ -250,12 +316,23 @@ fn assert_preserved_v2_rows(library: &Library, database: &std::path::Path) {
     );
     assert_eq!((char_start, char_end, line_start, line_end), (0, 34, 1, 1));
 
-    let relationship: (String, String, String, f64) = connection
+    let relationship: (String, String, String, f64, i64, String, String) = connection
         .query_row(
-            "SELECT source_artifact_id, target_artifact_id, evidence_passage_id, confidence
+            "SELECT source_artifact_id, target_artifact_id, evidence_passage_id, confidence,
+                    relationship_schema_version, origin, metadata_json
              FROM relationships WHERE id = 'relationship-v2'",
             [],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                    row.get(6)?,
+                ))
+            },
         )
         .unwrap();
     assert_eq!(
@@ -264,7 +341,10 @@ fn assert_preserved_v2_rows(library: &Library, database: &std::path::Path) {
             "artifact-v2".into(),
             "artifact-v2-target".into(),
             "passage-v2".into(),
-            0.75
+            0.75,
+            1,
+            "observed".into(),
+            "{}".into()
         )
     );
 

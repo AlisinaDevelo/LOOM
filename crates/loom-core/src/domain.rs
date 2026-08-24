@@ -293,6 +293,137 @@ pub struct CapturePurgeReport {
     pub passages_deleted: u64,
 }
 
+/// Stable relationship vocabulary. Unknown values are preserved so a newer connector can be
+/// opened by an older reader without silently changing the graph.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RelationshipKind {
+    SavedFrom,
+    ScreenshotOf,
+    DuplicateOf,
+    PreviousVersionOf,
+    Related,
+    Unknown(String),
+}
+
+impl RelationshipKind {
+    pub fn as_str(&self) -> &str {
+        match self {
+            Self::SavedFrom => "saved_from",
+            Self::ScreenshotOf => "screenshot_of",
+            Self::DuplicateOf => "duplicate_of",
+            Self::PreviousVersionOf => "previous_version_of",
+            Self::Related => "related",
+            Self::Unknown(value) => value.as_str(),
+        }
+    }
+
+    pub fn from_value(value: impl Into<String>) -> Self {
+        let value = value.into();
+        match value.as_str() {
+            "saved_from" => Self::SavedFrom,
+            "screenshot_of" => Self::ScreenshotOf,
+            "duplicate_of" => Self::DuplicateOf,
+            "previous_version_of" => Self::PreviousVersionOf,
+            "related" => Self::Related,
+            _ => Self::Unknown(value),
+        }
+    }
+}
+
+impl Serialize for RelationshipKind {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for RelationshipKind {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Ok(Self::from_value(value))
+    }
+}
+
+/// How a relationship entered the local graph. Inferred edges never masquerade as user
+/// confirmation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RelationshipOrigin {
+    Observed,
+    Inferred,
+    UserConfirmed,
+}
+
+impl RelationshipOrigin {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Observed => "observed",
+            Self::Inferred => "inferred",
+            Self::UserConfirmed => "user_confirmed",
+        }
+    }
+}
+
+/// Request to create or retrieve one source-backed relationship.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RelationshipInput {
+    pub source_artifact_id: String,
+    pub target_artifact_id: String,
+    pub kind: RelationshipKind,
+    pub origin: RelationshipOrigin,
+    pub evidence_passage_id: Option<String>,
+    pub confidence: Option<f64>,
+    pub method: String,
+    #[serde(default = "empty_metadata")]
+    pub metadata: serde_json::Value,
+}
+
+fn empty_metadata() -> serde_json::Value {
+    serde_json::json!({})
+}
+
+/// Canonical relationship row. The schema version versions the relationship envelope independently
+/// from the SQLite migration marker.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RelationshipRecord {
+    pub id: String,
+    pub schema_version: u32,
+    pub source_artifact_id: String,
+    pub target_artifact_id: String,
+    pub kind: RelationshipKind,
+    pub origin: RelationshipOrigin,
+    pub evidence_passage_id: Option<String>,
+    pub confidence: Option<f64>,
+    pub method: String,
+    pub metadata: serde_json::Value,
+    pub created_at: String,
+}
+
+/// Endpoint projection used by the UI to traverse a relationship without a graph database.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RelationshipEndpoint {
+    pub artifact_id: String,
+    pub title: String,
+    pub media_type: String,
+    pub source_uri: Option<String>,
+    pub version_id: Option<String>,
+    pub content_hash: Option<String>,
+    pub state: String,
+}
+
+/// One relationship with both source-backed endpoint projections.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RelationshipView {
+    pub relationship: RelationshipRecord,
+    pub source: RelationshipEndpoint,
+    pub target: RelationshipEndpoint,
+}
+
 /// A user search request crossing the Tauri IPC boundary.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SearchRequest {

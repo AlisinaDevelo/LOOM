@@ -11,8 +11,8 @@ use chrono::Utc;
 use loom_core::{
     CaptureBounds, CaptureContext, CaptureMode, CapturePurgeReport, CaptureReport,
     IndexCancellationToken, IndexReport, Library, LibraryStats, ObservationReport, OcrPurgeReport,
-    OcrStatus, OpenArtifactRequest, ResolveEvidenceRequest, SearchHit, SearchRequest,
-    SourceRootInfo,
+    OcrStatus, OpenArtifactRequest, RelationshipView, ResolveEvidenceRequest, SearchHit,
+    SearchRequest, SourceRootInfo,
 };
 use serde::{Deserialize, Serialize};
 use tauri::{Manager, State};
@@ -231,6 +231,17 @@ fn list_source_roots(state: State<'_, AppState>) -> CommandResult<Vec<SourceRoot
     state
         .library
         .source_roots()
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn list_relationships(
+    state: State<'_, AppState>,
+    artifact_id: String,
+) -> CommandResult<Vec<RelationshipView>> {
+    state
+        .library
+        .list_relationships(&artifact_id, 50)
         .map_err(|error| error.to_string())
 }
 
@@ -506,6 +517,7 @@ pub fn run() {
             purge_captures,
             reconcile_approved_roots,
             list_source_roots,
+            list_relationships,
             revoke_source_root,
             search,
             library_stats,

@@ -69,7 +69,8 @@ default database is .loom/library.sqlite3; callers can provide another path.
 
 The Tauri layer opens the application-data SQLite database and exposes the narrow commands
 index_selected_folder, cancel_indexing, reconcile_approved_roots, list_source_roots,
-revoke_source_root, search, library_stats, resolve_evidence, and open_artifact. Folder selection
+revoke_source_root, search, library_stats, list_relationships, resolve_evidence, and open_artifact.
+Folder selection
 happens inside the
 Rust command through the native dialog; the webview does not provide a path. Persisted roots are
 exact read-only locators with
@@ -94,8 +95,8 @@ from user data and is not a claim about production retrieval quality.
 
 ## Persistence
 
-SQLite is the canonical store. The current schema is version 5 and contains source roots, logical
-artifacts, locators, content versions, passages, reserved relationships, durable indexing-job
+SQLite is the canonical store. The current schema is version 6 and contains source roots, logical
+artifacts, locators, content versions, passages, typed provenance relationships, durable indexing-job
 checkpoints, and extraction metadata. Each passage has a JSON text, PDF-page, or image-region
 anchor plus scalar offsets. Versions 2–4 migrate transactionally while preserving populated
 canonical rows; see [SCHEMA_COMPATIBILITY.md](SCHEMA_COMPATIBILITY.md).
@@ -112,7 +113,7 @@ mode, in-memory temporary storage, and SQLite trusted-schema hardening. These ar
 choices for the local database, not a promise of crash-proof or encrypted storage. SQLite documents
 the WAL trade-offs in its [WAL reference](https://www.sqlite.org/wal.html).
 
-The current schema is version 5. Opening validates a known marker's required tables and columns,
+The current schema is version 6. Opening validates a known marker's required tables and columns,
 refuses a missing, malformed, or unknown version marker instead of rewriting it, and supports
 reviewed versions 2–4 transactional migrations. The disposable FTS5 projection is rebuilt from
 canonical passages on open; canonical rows are never reconstructed from FTS5. Pre-alpha version 1

@@ -8,7 +8,7 @@ boundaries and known limitations; it is not a security certification.
 - source file contents and the user's source paths;
 - canonical SQLite records, WAL files, and temporary database state;
 - content hashes, passage anchors, and search excerpts;
-- source-to-source relationships reserved by the schema;
+- source-to-source relationship records and their evidence metadata;
 - the Tauri command surface and the ability to open an original path.
 
 ## Actors and assumptions
@@ -40,7 +40,9 @@ service attack. There is no supported remote service in this slice.
 5. Tauri IPC exposes indexing, cooperative cancellation, scope status/revocation, search,
    statistics, and source opening to the UI.
 6. The host external application receives an original path when the user requests opening it.
-7. A future semantic index or connector would be a new boundary and requires a separate review.
+7. Relationship creation validates both artifact endpoints and optional passage evidence before
+   writing the canonical graph row; the bounded read API exposes endpoint versions and hashes.
+8. A future semantic index or connector would be a new boundary and requires a separate review.
 
 ## Current risks and mitigations
 
@@ -56,6 +58,7 @@ service attack. There is no supported remote service in this slice.
 |Persisted scope drift|Exact locators, status inspection, explicit re-selection, and revocation hide active artifacts|Direct-distribution build lacks security-scoped bookmarks|
 |Tauri command overreach|Narrow command set; backend-owned selection; no arbitrary path command; hash-bound open|Capabilities and host permissions need release hardening|
 |Dependency compromise|Locked dependency resolution and ordinary build review|No reproducible-build or signed-release guarantee yet|
+|Relationship spoofing or graph disclosure|Typed known kinds, preserved unknown strings, explicit origin/method/confidence, endpoint existence checks, endpoint-bound passage evidence, bounded reads, and no relationship write command in the webview|A compromised local process can still write SQLite directly; independent audit and encrypted storage are not implemented|
 |Browser connector over-collection|`activeTab` plus explicit command only; no host permissions, history listeners, or network path; sanitized attributes are discarded|A consented Chrome/Firefox permission session and paired native host remain unverified|
 
 ## Security requirements for extensions
