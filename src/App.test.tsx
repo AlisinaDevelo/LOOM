@@ -116,6 +116,24 @@ describe("desktop truth path", () => {
     expect(screen.getByRole("button", { name: "Add a folder" })).toBeEnabled();
   });
 
+  it("focuses search from the global shortcut and announces the next action", async () => {
+    invokeMock.mockImplementation(async (command) => {
+      if (command === "reconcile_approved_roots") return {};
+      if (command === "list_source_roots") return [];
+      if (command === "library_stats") return emptyStats;
+      throw new Error(`unexpected command: ${command}`);
+    });
+
+    render(<App />);
+    const input = screen.getByRole("textbox", { name: "Search your local sources" });
+    expect(input).toHaveAttribute("aria-keyshortcuts", "Control+K Meta+K");
+    fireEvent.keyDown(window, { key: "k", code: "KeyK", ctrlKey: true });
+
+    expect(input).toHaveFocus();
+    expect(screen.getByRole("status")).toHaveTextContent("Search focused. Type a query and press Enter.");
+    expect(screen.getByRole("link", { name: "Skip to search and results" })).toHaveAttribute("href", "#main-content");
+  });
+
   it("runs the primary keyboard retrieval flow and opens the bound original", async () => {
     invokeMock.mockImplementation(async (command) => {
       if (command === "reconcile_approved_roots") return {};
@@ -133,7 +151,10 @@ describe("desktop truth path", () => {
     fireEvent.submit(screen.getByRole("search"));
 
     expect(await screen.findByRole("heading", { name: "Recovered sources" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Recovered sources" })).toHaveFocus();
     expect(screen.getByText("retry anomalies")).toBeInTheDocument();
+    expect(screen.getByText("Why this matched")).toBeInTheDocument();
+    expect(screen.getByText(hit.match_reason)).toBeInTheDocument();
     expect(screen.getByText("lines 2–2")).toBeInTheDocument();
     expect(screen.getByText("evidence attached")).toBeInTheDocument();
 
@@ -200,6 +221,7 @@ describe("desktop truth path", () => {
     fireEvent.click(await screen.findByRole("button", { name: "View evidence" }));
 
     expect(await screen.findByRole("heading", { name: "paper.pdf" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "paper.pdf", level: 2 })).toHaveFocus();
     expect(screen.getByText("PDF page 2 · loom.pdf 0.1.0")).toBeInTheDocument();
     expect(screen.getByText("Page 2 of 3")).toBeInTheDocument();
     expect(screen.getByText("Second page marker")).toBeInTheDocument();
@@ -241,6 +263,9 @@ describe("desktop truth path", () => {
     expect(screen.getByText(/Image region 100,50 · 200×100px/)).toBeInTheDocument();
     const stage = screen.getByTestId("image-evidence-stage");
     expect(stage).toHaveAttribute("data-rotation", "0");
+    expect(screen.getByRole("img", { name: "Image evidence canvas at 0 degrees" })).toHaveAttribute("tabindex", "0");
+    fireEvent.click(screen.getByRole("button", { name: "Zoom in" }));
+    expect(stage).toHaveAttribute("data-zoom", "1.25");
     fireEvent.click(screen.getByRole("button", { name: "Rotate evidence" }));
     expect(stage).toHaveAttribute("data-rotation", "90");
   });
@@ -369,6 +394,7 @@ describe("desktop truth path", () => {
     fireEvent.submit(screen.getByRole("search"));
 
     expect(await screen.findByRole("heading", { name: "No matching evidence" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "No matching evidence" })).toHaveFocus();
     expect(screen.getByRole("status")).toHaveTextContent("No evidence met this lexical query.");
   });
 
