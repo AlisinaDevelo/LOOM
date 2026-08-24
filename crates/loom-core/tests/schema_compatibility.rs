@@ -62,7 +62,7 @@ fn populated_v3_migration_adds_pdf_metadata_without_rewriting_canonical_rows() {
             |row| row.get(0),
         )
         .unwrap();
-    assert_eq!(schema_version, "6");
+    assert_eq!(schema_version, "7");
     let (hash, warnings, page_count): (String, String, Option<i64>) = connection
         .query_row(
             "SELECT content_hash, parse_warnings_json, page_count
@@ -134,7 +134,7 @@ fn populated_v4_migration_adds_extraction_metadata_without_rewriting_rows() {
             |row| row.get(0),
         )
         .unwrap();
-    assert_eq!(schema_version, "6");
+    assert_eq!(schema_version, "7");
     let metadata: String = connection
         .query_row(
             "SELECT extraction_metadata_json FROM artifact_versions",
@@ -199,7 +199,7 @@ fn populated_v5_migration_adds_relationship_envelope_without_rewriting_rows() {
             |row| row.get(0),
         )
         .unwrap();
-    assert_eq!(schema_version, "6");
+    assert_eq!(schema_version, "7");
     let columns: (i64, String, String) = connection
         .query_row(
             "SELECT relationship_schema_version, origin, metadata_json
@@ -213,6 +213,65 @@ fn populated_v5_migration_adds_relationship_envelope_without_rewriting_rows() {
         library
             .search(&SearchRequest {
                 text: "migration preserves anchors".into(),
+                limit: 5,
+            })
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
+#[test]
+fn populated_v6_migration_adds_bookmark_tables_without_rewriting_canonical_rows() {
+    let directory = tempdir().unwrap();
+    let database = directory.path().join("v6.sqlite3");
+    let source = directory.path().join("v6.md");
+    fs::write(&source, "v6 bookmark migration marker").unwrap();
+    {
+        let library = Library::open(&database).unwrap();
+        library.index_path(&source).unwrap();
+    }
+    let connection = Connection::open(&database).unwrap();
+    connection
+        .execute_batch(
+            "DROP TABLE bookmark_import_items;
+             DROP TABLE bookmark_records;
+             DROP TABLE bookmark_imports;
+             UPDATE schema_meta SET value = '6' WHERE key = 'schema_version';",
+        )
+        .unwrap();
+    drop(connection);
+
+    let library = Library::open(&database).unwrap();
+    let connection = Connection::open(&database).unwrap();
+    let schema_version: String = connection
+        .query_row(
+            "SELECT value FROM schema_meta WHERE key = 'schema_version'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(schema_version, "7");
+    for table in [
+        "bookmark_imports",
+        "bookmark_records",
+        "bookmark_import_items",
+    ] {
+        let exists: bool = connection
+            .query_row(
+                "SELECT EXISTS(
+                    SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1
+                )",
+                [table],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(exists, "migration did not create {table}");
+    }
+    assert_eq!(
+        library
+            .search(&SearchRequest {
+                text: "v6 bookmark migration".into(),
                 limit: 5,
             })
             .unwrap()
@@ -274,7 +333,7 @@ fn assert_preserved_v2_rows(library: &Library, database: &std::path::Path) {
             |row| row.get(0),
         )
         .unwrap();
-    assert_eq!(schema_version, "6");
+    assert_eq!(schema_version, "7");
 
     let (hash, extractor_id, extractor_version): (String, String, String) = connection
         .query_row(

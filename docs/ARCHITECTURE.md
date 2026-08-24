@@ -27,6 +27,15 @@ artifact version -> passages with text/page/pixel anchors
               (path, hash, excerpt, anchor)
 ```
 
+explicit local Chrome/Firefox HTML export
+        |
+        v
+bounded Netscape parser -> bookmark metadata + export hash (no URL fetch)
+        |
+        +--> bookmark import/record history + text/x-bookmark artifact
+        |
+        +--> same FTS5 evidence path (URL, folder, title, import provenance)
+
 The source file remains the authority for opening the original. LOOM stores extracted passage text
 and metadata in the local database so searches can run without rereading every source file. The
 current file ingestion path does not upload, copy, or synchronize source content to a service.
@@ -47,7 +56,7 @@ explicit unavailable error until it is rebuilt.
 
 The Rust core owns ingestion, passage segmentation, the SQLite schema, FTS5 queries, statistics, and
 evidence-bearing search results. Text uses `loom.text` 0.1.0; PDF uses `loom.pdf` 0.1.0; image OCR
-uses `loom.ocr` 0.1.0 with a native provider boundary.
+uses `loom.ocr` 0.1.0 with a native provider boundary; bookmark metadata uses `loom.bookmark` 0.1.0.
 
 Ingestion accepts an explicitly selected regular file or directory, supports UTF-8 .txt/.md/.markdown,
 bounded text-based PDFs, and common PNG/JPEG/GIF/WebP images, does not follow symlinks, limits a file
@@ -62,14 +71,16 @@ offsets are computed. Passages target 1,000 characters with 120 characters of ov
 
 The CLI indexes a selected path, searches the configured database, reports statistics, inspects a
 stored extraction, checks or repairs the derived FTS5 projection, runs the retrieval smoke
-benchmark, and exposes the explicit semantic status/rebuild/benchmark/drop/search commands. Its
-default database is .loom/library.sqlite3; callers can provide another path.
+benchmark, imports a local Chrome/Firefox Netscape HTML export without fetching URLs, lists
+bookmark provenance, and exposes the explicit semantic status/rebuild/benchmark/drop/search
+commands. Its default database is .loom/library.sqlite3; callers can provide another path.
 
 ### Tauri shell and UI
 
 The Tauri layer opens the application-data SQLite database and exposes the narrow commands
 index_selected_folder, cancel_indexing, reconcile_approved_roots, list_source_roots,
-revoke_source_root, search, library_stats, list_relationships, resolve_evidence, and open_artifact.
+revoke_source_root, import_bookmarks, search, library_stats, list_relationships, resolve_evidence,
+and open_artifact.
 Folder selection
 happens inside the
 Rust command through the native dialog; the webview does not provide a path. Persisted roots are
@@ -95,10 +106,11 @@ from user data and is not a claim about production retrieval quality.
 
 ## Persistence
 
-SQLite is the canonical store. The current schema is version 6 and contains source roots, logical
-artifacts, locators, content versions, passages, typed provenance relationships, durable indexing-job
-checkpoints, and extraction metadata. Each passage has a JSON text, PDF-page, or image-region
-anchor plus scalar offsets. Versions 2–4 migrate transactionally while preserving populated
+SQLite is the canonical store. The current schema is version 7 and contains source roots, logical
+artifacts, locators, content versions, passages, typed provenance relationships, bookmark import and
+record history, durable indexing-job checkpoints, and extraction metadata. Each passage has a JSON
+text, PDF-page, image-region, or bookmark-text anchor plus scalar offsets. Versions 2–6 migrate
+transactionally while preserving populated
 canonical rows; see [SCHEMA_COMPATIBILITY.md](SCHEMA_COMPATIBILITY.md).
 
 SQLite FTS5 is an external-content virtual table over passages. Insert, update, and delete triggers
@@ -113,9 +125,9 @@ mode, in-memory temporary storage, and SQLite trusted-schema hardening. These ar
 choices for the local database, not a promise of crash-proof or encrypted storage. SQLite documents
 the WAL trade-offs in its [WAL reference](https://www.sqlite.org/wal.html).
 
-The current schema is version 6. Opening validates a known marker's required tables and columns,
+The current schema is version 7. Opening validates a known marker's required tables and columns,
 refuses a missing, malformed, or unknown version marker instead of rewriting it, and supports
-reviewed versions 2–4 transactional migrations. The disposable FTS5 projection is rebuilt from
+reviewed versions 2–6 transactional migrations. The disposable FTS5 projection is rebuilt from
 canonical passages on open; canonical rows are never reconstructed from FTS5. Pre-alpha version 1
 databases are explicitly rejected because their content-version uniqueness contract did not include
 extractor identity. A content observation is keyed by source artifact, byte hash, extractor, and
@@ -140,6 +152,13 @@ and recreates only these derived rows in one transaction, so a failed rebuild ca
 partially published manifest. The current provider is a deterministic BLAKE3 token-and-bigram
 hash baseline chosen for reproducibility; a future neural provider must preserve this metadata
 boundary and add a measured licensing/model-size decision.
+
+Bookmark imports are deliberately narrower than web archiving. The native dialog selects one
+regular HTML file; the parser accepts the shared Netscape export format used by Chrome and Firefox,
+preserves folder/title/URL/timestamp metadata, records a content hash and per-entry outcome, and
+returns `remote_fetches: 0`. URLs are searchable locators and evidence text, not fetch instructions;
+any future live-page or snapshot action must be a separate explicit command with its own consent,
+capture status, and failure metadata.
 
 PDF ingestion uses the pure-Rust `pdf-extract` provider over source bytes already admitted by the
 stable-read boundary. Each page becomes a local `pdf_page` anchor with page number, character and

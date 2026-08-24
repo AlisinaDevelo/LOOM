@@ -9,6 +9,7 @@ boundaries and known limitations; it is not a security certification.
 - canonical SQLite records, WAL files, and temporary database state;
 - content hashes, passage anchors, and search excerpts;
 - source-to-source relationship records and their evidence metadata;
+- bookmark URLs, folder/title metadata, export hashes, and import outcome history;
 - the Tauri command surface and the ability to open an original path.
 
 ## Actors and assumptions
@@ -37,12 +38,14 @@ service attack. There is no supported remote service in this slice.
    metadata remain inspectable. FTS5 and its vocabulary projections derive a lexical search
    structure from canonical passage rows; health/repair diagnostics never promote derived state to
    authority.
-5. Tauri IPC exposes indexing, cooperative cancellation, scope status/revocation, search,
+5. The bookmark parser accepts only a selected local Netscape export, validates URL schemes, and
+   writes metadata plus an explicit no-fetch outcome; it has no network boundary.
+6. Tauri IPC exposes indexing, cooperative cancellation, scope status/revocation, bookmark import, search,
    statistics, and source opening to the UI.
-6. The host external application receives an original path when the user requests opening it.
-7. Relationship creation validates both artifact endpoints and optional passage evidence before
+7. The host external application receives an original path when the user requests opening it.
+8. Relationship creation validates both artifact endpoints and optional passage evidence before
    writing the canonical graph row; the bounded read API exposes endpoint versions and hashes.
-8. A future semantic index or connector would be a new boundary and requires a separate review.
+9. A future semantic index or connector would be a new boundary and requires a separate review.
 
 ## Current risks and mitigations
 
@@ -60,6 +63,7 @@ service attack. There is no supported remote service in this slice.
 |Dependency compromise|Locked dependency resolution and ordinary build review|No reproducible-build or signed-release guarantee yet|
 |Relationship spoofing or graph disclosure|Typed known kinds, preserved unknown strings, explicit origin/method/confidence, endpoint existence checks, endpoint-bound passage evidence, bounded reads, and no relationship write command in the webview|A compromised local process can still write SQLite directly; independent audit and encrypted storage are not implemented|
 |Browser connector over-collection|`activeTab` plus explicit command only; no host permissions, history listeners, or network path; sanitized attributes are discarded|A consented Chrome/Firefox permission session and paired native host remain unverified|
+|Bookmark export HTML or URL abuse|Bounded local parser, regular-file/symlink checks, UTF-8 and size limits, executable-scheme rejection, no network client|Malformed HTML and unusual schemes remain user-visible import failures; live-page archiving is separate and unimplemented|
 
 ## Security requirements for extensions
 

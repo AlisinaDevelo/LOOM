@@ -1,5 +1,6 @@
 //! Canonical local storage, explicit-source ingestion, and evidence-first retrieval.
 
+mod bookmarks;
 mod domain;
 mod error;
 mod ingest;
@@ -10,13 +11,15 @@ mod search;
 mod semantic;
 mod store;
 
+pub use bookmarks::parse_bookmark_export;
 pub use domain::{
-    ArtifactObservation, CaptureBounds, CaptureContext, CaptureMode, CapturePurgeReport,
-    CaptureReport, EvidenceAnchor, EvidenceExcerpt, EvidenceSegment, EvidenceView, FtsHealthReport,
-    FtsRepairReport, IndexCancellationToken, IndexCheckpoint, IndexFailure, IndexReport,
-    LibraryStats, ObservationReport, OcrConfidenceState, OcrPurgeReport, OcrStatus,
-    OpenArtifactRequest, PassageObservation, RankContributions, RelationshipEndpoint,
-    RelationshipInput, RelationshipKind, RelationshipOrigin, RelationshipRecord, RelationshipView,
+    ArtifactObservation, BookmarkEntry, BookmarkExport, BookmarkImportReport, BookmarkRecord,
+    CaptureBounds, CaptureContext, CaptureMode, CapturePurgeReport, CaptureReport, EvidenceAnchor,
+    EvidenceExcerpt, EvidenceSegment, EvidenceView, FtsHealthReport, FtsRepairReport,
+    IndexCancellationToken, IndexCheckpoint, IndexFailure, IndexReport, LibraryStats,
+    ObservationReport, OcrConfidenceState, OcrPurgeReport, OcrStatus, OpenArtifactRequest,
+    PassageObservation, RankContributions, RelationshipEndpoint, RelationshipInput,
+    RelationshipKind, RelationshipOrigin, RelationshipRecord, RelationshipView,
     ResolveEvidenceRequest, SearchHit, SearchRequest, SemanticCandidate, SemanticDropReport,
     SemanticIndexConfig, SemanticIndexManifest, SemanticIndexStatus, SemanticProviderMeasurement,
     SemanticRebuildReport, SourceRootInfo, SourceRootStatus,

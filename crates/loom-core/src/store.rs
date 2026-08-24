@@ -13,15 +13,17 @@ use rusqlite::{params, Connection, OptionalExtension, Transaction};
 use uuid::Uuid;
 
 use crate::{
+    bookmarks::{self, BOOKMARK_EXTRACTOR_ID, BOOKMARK_EXTRACTOR_VERSION},
     domain::{
-        ArtifactObservation, EvidenceAnchor, EvidenceExcerpt, EvidenceSegment, EvidenceView,
-        FtsHealthReport, FtsRepairReport, IndexCancellationToken, IndexCheckpoint, IndexFailure,
-        IndexReport, LibraryStats, ObservationReport, OcrPurgeReport, OcrStatus,
-        PassageObservation, RankContributions, RelationshipEndpoint, RelationshipInput,
-        RelationshipKind, RelationshipOrigin, RelationshipRecord, RelationshipView,
-        ResolveEvidenceRequest, SearchHit, SearchRequest, SemanticCandidate, SemanticDropReport,
-        SemanticIndexConfig, SemanticIndexManifest, SemanticIndexStatus,
-        SemanticProviderMeasurement, SemanticRebuildReport, SourceRootInfo, SourceRootStatus,
+        ArtifactObservation, BookmarkEntry, BookmarkImportReport, BookmarkRecord, EvidenceAnchor,
+        EvidenceExcerpt, EvidenceSegment, EvidenceView, FtsHealthReport, FtsRepairReport,
+        IndexCancellationToken, IndexCheckpoint, IndexFailure, IndexReport, LibraryStats,
+        ObservationReport, OcrPurgeReport, OcrStatus, PassageObservation, RankContributions,
+        RelationshipEndpoint, RelationshipInput, RelationshipKind, RelationshipOrigin,
+        RelationshipRecord, RelationshipView, ResolveEvidenceRequest, SearchHit, SearchRequest,
+        SemanticCandidate, SemanticDropReport, SemanticIndexConfig, SemanticIndexManifest,
+        SemanticIndexStatus, SemanticProviderMeasurement, SemanticRebuildReport, SourceRootInfo,
+        SourceRootStatus,
     },
     error::{io_error, LoomError, Result},
     ingest::{
@@ -37,7 +39,8 @@ use crate::{
     },
 };
 
-const SCHEMA_VERSION: i64 = 6;
+const SCHEMA_VERSION: i64 = 7;
+const RELATIONSHIP_SCHEMA_VERSION: i64 = 6;
 const PREVIOUS_SCHEMA_VERSION: i64 = 5;
 const PREVIOUS_PREVIOUS_SCHEMA_VERSION: i64 = 4;
 const V3_SCHEMA_VERSION: i64 = 3;
@@ -51,6 +54,18 @@ const LEGACY_SCHEMA_TABLES: &[&str] = &[
     "relationships",
 ];
 const CURRENT_SCHEMA_TABLES: &[&str] = &[
+    "source_roots",
+    "artifacts",
+    "artifact_locators",
+    "artifact_versions",
+    "passages",
+    "relationships",
+    "bookmark_imports",
+    "bookmark_records",
+    "bookmark_import_items",
+    "index_jobs",
+];
+const PRE_BOOKMARK_SCHEMA_TABLES: &[&str] = &[
     "source_roots",
     "artifacts",
     "artifact_locators",
@@ -141,6 +156,250 @@ impl Library {
     pub fn index_path(&self, selected_path: impl AsRef<Path>) -> Result<IndexReport> {
         let cancellation = IndexCancellationToken::new();
         self.index_path_with_options(selected_path, &cancellation, None, None, None)
+    }
+
+    /// Imports a Netscape HTML bookmark export as metadata-only, source-faithful records.
+    ///
+    /// The export is read once from the explicitly selected local file. URLs become locators and
+    /// searchable metadata passages; they are never fetched as part of this operation.
+    pub fn import_bookmarks(
+        &self,
+        selected_path: impl AsRef<Path>,
+    ) -> Result<BookmarkImportReport> {
+        let requested_path = selected_path.as_ref();
+        let metadata = fs::symlink_metadata(requested_path)
+            .map_err(|source| io_error(requested_path, source))?;
+        if metadata.file_type().is_symlink() || !metadata.is_file() {
+            return Err(LoomError::InvalidPath(format!(
+                "bookmark export must be a regular file: {}",
+                requested_path.display()
+            )));
+        }
+        let path = requested_path
+            .canonicalize()
+            .map_err(|source| io_error(requested_path, source))?;
+        let source_uri = utf8_path(&path)?;
+        let bytes = fs::read(&path).map_err(|source| io_error(&path, source))?;
+        if bytes.len() as u64 > self.limits.max_file_bytes {
+            return Err(LoomError::InvalidPath(format!(
+                "bookmark export exceeds the {}-byte limit: {}",
+                self.limits.max_file_bytes,
+                path.display()
+            )));
+        }
+        let text = String::from_utf8(bytes.clone()).map_err(|_| {
+            LoomError::InvalidPath(format!("bookmark export is not UTF-8: {}", path.display()))
+        })?;
+        let export = bookmarks::parse_bookmark_export(&text)?;
+        let content_hash = format!("blake3:{}", blake3::hash(&bytes).to_hex());
+        let root_id = {
+            let mut connection = self.lock()?;
+            ensure_source_root(&mut connection, &source_uri, false)?
+        };
+        let now = Utc::now().to_rfc3339();
+        let mut connection = self.lock()?;
+        let transaction = connection.transaction()?;
+        let existing: Option<(String, i64)> = transaction
+            .query_row(
+                "SELECT id, (SELECT COUNT(*) FROM bookmark_import_items WHERE import_id = i.id)
+                 FROM bookmark_imports i
+                 WHERE source_locator = ?1 AND format = ?2 AND content_hash = ?3",
+                params![source_uri, export.format, content_hash],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        if let Some((import_id, unchanged)) = existing {
+            transaction.commit()?;
+            return Ok(BookmarkImportReport {
+                import_id,
+                source_uri,
+                format: export.format,
+                content_hash,
+                discovered: export.bookmarks.len() as u64,
+                unchanged: unchanged.max(0) as u64,
+                remote_fetches: 0,
+                ..BookmarkImportReport::default()
+            });
+        }
+
+        let import_id = Uuid::new_v4().to_string();
+        transaction.execute(
+            "INSERT INTO bookmark_imports(
+                id, source_root_id, source_locator, format, content_hash, imported_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                import_id,
+                root_id,
+                source_uri,
+                export.format,
+                content_hash,
+                now
+            ],
+        )?;
+        let mut report = BookmarkImportReport {
+            import_id: import_id.clone(),
+            source_uri: source_uri.clone(),
+            format: export.format.clone(),
+            content_hash: content_hash.clone(),
+            discovered: export.bookmarks.len() as u64,
+            remote_fetches: 0,
+            ..BookmarkImportReport::default()
+        };
+        for (ordinal, entry) in export.bookmarks.iter().enumerate() {
+            let entry_hash = bookmark_entry_hash(entry);
+            let existing_record: Option<(
+                String,
+                String,
+                String,
+                Option<String>,
+                Option<String>,
+                String,
+            )> = transaction
+                .query_row(
+                    "SELECT id, title, entry_hash, added_at, modified_at, artifact_id
+                     FROM bookmark_records WHERE url = ?1 AND folder_path = ?2",
+                    params![entry.url, entry.folder_path],
+                    |row| {
+                        Ok((
+                            row.get(0)?,
+                            row.get(1)?,
+                            row.get(2)?,
+                            row.get(3)?,
+                            row.get(4)?,
+                            row.get(5)?,
+                        ))
+                    },
+                )
+                .optional()?;
+            let same_url_elsewhere: bool = transaction.query_row(
+                "SELECT EXISTS(SELECT 1 FROM bookmark_records WHERE url = ?1)",
+                [&entry.url],
+                |row| row.get(0),
+            )?;
+            let (bookmark_id, artifact_id, outcome) = if let Some((
+                bookmark_id,
+                old_title,
+                old_hash,
+                old_added_at,
+                old_modified_at,
+                artifact_id,
+            )) = existing_record
+            {
+                let unchanged = old_hash == entry_hash
+                    && old_title == entry.title
+                    && old_added_at == entry.added_at
+                    && old_modified_at == entry.modified_at;
+                if unchanged {
+                    report.unchanged += 1;
+                    (bookmark_id, artifact_id, "unchanged")
+                } else {
+                    upsert_bookmark_artifact(
+                        &transaction,
+                        &root_id,
+                        &source_uri,
+                        &artifact_id,
+                        entry,
+                        &entry_hash,
+                        &now,
+                    )?;
+                    transaction.execute(
+                        "UPDATE bookmark_records
+                         SET title = ?1, added_at = ?2, modified_at = ?3, entry_hash = ?4,
+                             updated_at = ?5
+                         WHERE id = ?6",
+                        params![
+                            entry.title,
+                            entry.added_at,
+                            entry.modified_at,
+                            entry_hash,
+                            now,
+                            bookmark_id
+                        ],
+                    )?;
+                    report.merged += 1;
+                    (bookmark_id, artifact_id, "merged")
+                }
+            } else {
+                let artifact_id = ensure_bookmark_artifact(
+                    &transaction,
+                    &root_id,
+                    &source_uri,
+                    entry,
+                    &entry_hash,
+                    &now,
+                )?;
+                let bookmark_id = Uuid::new_v4().to_string();
+                transaction.execute(
+                    "INSERT INTO bookmark_records(
+                        id, artifact_id, folder_path, title, url, added_at, modified_at,
+                        entry_hash, first_import_id, created_at, updated_at
+                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?10)",
+                    params![
+                        bookmark_id,
+                        artifact_id,
+                        entry.folder_path,
+                        entry.title,
+                        entry.url,
+                        entry.added_at,
+                        entry.modified_at,
+                        entry_hash,
+                        import_id,
+                        now
+                    ],
+                )?;
+                report.imported += 1;
+                let outcome = if same_url_elsewhere {
+                    report.conflicts += 1;
+                    "conflict"
+                } else {
+                    "imported"
+                };
+                (bookmark_id, artifact_id, outcome)
+            };
+            transaction.execute(
+                "INSERT INTO bookmark_import_items(
+                    import_id, bookmark_id, ordinal, entry_hash, outcome
+                 ) VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![import_id, bookmark_id, ordinal as i64, entry_hash, outcome],
+            )?;
+            let _ = artifact_id;
+        }
+        transaction.commit()?;
+        Ok(report)
+    }
+
+    /// Lists bounded current bookmark records with their original export provenance.
+    pub fn list_bookmarks(&self, limit: u32) -> Result<Vec<BookmarkRecord>> {
+        let limit = limit.clamp(1, 1_000);
+        let connection = self.lock()?;
+        let mut statement = connection.prepare(
+            "SELECT r.id, r.artifact_id, r.first_import_id, i.source_locator,
+                    r.folder_path, r.title, r.url, r.added_at, r.modified_at, r.entry_hash,
+                    (SELECT COUNT(*) FROM bookmark_import_items bi WHERE bi.bookmark_id = r.id)
+             FROM bookmark_records r
+             JOIN bookmark_imports i ON i.id = r.first_import_id
+             ORDER BY r.folder_path, r.title, r.id
+             LIMIT ?1",
+        )?;
+        let rows = statement
+            .query_map([limit], |row| {
+                Ok(BookmarkRecord {
+                    id: row.get(0)?,
+                    artifact_id: row.get(1)?,
+                    import_id: row.get(2)?,
+                    source_uri: row.get(3)?,
+                    folder_path: row.get(4)?,
+                    title: row.get(5)?,
+                    url: row.get(6)?,
+                    added_at: row.get(7)?,
+                    modified_at: row.get(8)?,
+                    entry_hash: row.get(9)?,
+                    import_count: row.get::<_, i64>(10)?.max(0) as u64,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(Into::into);
+        rows
     }
 
     /// Indexes one explicitly selected regular file or directory with cooperative cancellation.
@@ -2493,6 +2752,7 @@ fn migrate(connection: &mut Connection) -> Result<()> {
         if !matches!(
             version,
             SCHEMA_VERSION
+                | RELATIONSHIP_SCHEMA_VERSION
                 | PREVIOUS_SCHEMA_VERSION
                 | PREVIOUS_PREVIOUS_SCHEMA_VERSION
                 | V3_SCHEMA_VERSION
@@ -2595,6 +2855,41 @@ fn migrate(connection: &mut Connection) -> Result<()> {
             CHECK(confidence IS NULL OR (confidence >= 0.0 AND confidence <= 1.0))
          ) STRICT;
 
+         CREATE TABLE IF NOT EXISTS bookmark_imports(
+            id TEXT PRIMARY KEY,
+            source_root_id TEXT NOT NULL REFERENCES source_roots(id) ON DELETE CASCADE,
+            source_locator TEXT NOT NULL,
+            format TEXT NOT NULL,
+            content_hash TEXT NOT NULL,
+            imported_at TEXT NOT NULL,
+            UNIQUE(source_locator, format, content_hash)
+         ) STRICT;
+
+         CREATE TABLE IF NOT EXISTS bookmark_records(
+            id TEXT PRIMARY KEY,
+            artifact_id TEXT NOT NULL REFERENCES artifacts(id) ON DELETE CASCADE,
+            folder_path TEXT NOT NULL,
+            title TEXT NOT NULL,
+            url TEXT NOT NULL,
+            added_at TEXT,
+            modified_at TEXT,
+            entry_hash TEXT NOT NULL,
+            first_import_id TEXT NOT NULL REFERENCES bookmark_imports(id) ON DELETE CASCADE,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            UNIQUE(url, folder_path)
+         ) STRICT;
+         CREATE INDEX IF NOT EXISTS bookmark_records_url_idx ON bookmark_records(url);
+
+         CREATE TABLE IF NOT EXISTS bookmark_import_items(
+            import_id TEXT NOT NULL REFERENCES bookmark_imports(id) ON DELETE CASCADE,
+            bookmark_id TEXT NOT NULL REFERENCES bookmark_records(id) ON DELETE CASCADE,
+            ordinal INTEGER NOT NULL CHECK(ordinal >= 0),
+            entry_hash TEXT NOT NULL,
+            outcome TEXT NOT NULL CHECK(outcome IN ('imported', 'unchanged', 'merged', 'conflict')),
+            PRIMARY KEY(import_id, bookmark_id, ordinal)
+         ) STRICT;
+
          CREATE TABLE IF NOT EXISTS index_jobs(
             id TEXT PRIMARY KEY,
             source_root_id TEXT NOT NULL REFERENCES source_roots(id) ON DELETE CASCADE,
@@ -2652,7 +2947,7 @@ fn migrate(connection: &mut Connection) -> Result<()> {
                   CHECK(json_valid(extraction_metadata_json));",
         )?;
     }
-    if existing_version.is_some_and(|version| version < SCHEMA_VERSION) {
+    if existing_version.is_some_and(|version| version < RELATIONSHIP_SCHEMA_VERSION) {
         ensure_relationship_column(
             &transaction,
             "relationship_schema_version",
@@ -2682,8 +2977,10 @@ fn migrate(connection: &mut Connection) -> Result<()> {
 }
 
 fn validate_schema_shape(connection: &Connection, version: i64) -> Result<()> {
-    let tables = if version != LEGACY_SCHEMA_VERSION {
+    let tables = if version >= SCHEMA_VERSION {
         CURRENT_SCHEMA_TABLES
+    } else if version != LEGACY_SCHEMA_VERSION {
+        PRE_BOOKMARK_SCHEMA_TABLES
     } else {
         LEGACY_SCHEMA_TABLES
     };
@@ -2766,9 +3063,15 @@ fn validate_schema_shape(connection: &Connection, version: i64) -> Result<()> {
         (version >= PREVIOUS_SCHEMA_VERSION)
             .then_some(("artifact_versions", "extraction_metadata_json")),
     )
-    .chain((version >= SCHEMA_VERSION).then_some(("relationships", "relationship_schema_version")))
-    .chain((version >= SCHEMA_VERSION).then_some(("relationships", "origin")))
-    .chain((version >= SCHEMA_VERSION).then_some(("relationships", "metadata_json")))
+    .chain(
+        (version >= RELATIONSHIP_SCHEMA_VERSION)
+            .then_some(("relationships", "relationship_schema_version")),
+    )
+    .chain((version >= RELATIONSHIP_SCHEMA_VERSION).then_some(("relationships", "origin")))
+    .chain((version >= RELATIONSHIP_SCHEMA_VERSION).then_some(("relationships", "metadata_json")))
+    .chain((version >= SCHEMA_VERSION).then_some(("bookmark_imports", "id")))
+    .chain((version >= SCHEMA_VERSION).then_some(("bookmark_records", "id")))
+    .chain((version >= SCHEMA_VERSION).then_some(("bookmark_import_items", "import_id")))
     .chain((version != LEGACY_SCHEMA_VERSION).then_some(("index_jobs", "id")))
     .chain((version != LEGACY_SCHEMA_VERSION).then_some(("index_jobs", "source_root_id")))
     .chain((version != LEGACY_SCHEMA_VERSION).then_some(("index_jobs", "selection_locator")))
@@ -2963,6 +3266,193 @@ fn ensure_source_root(
         ],
     )?;
     Ok(id)
+}
+
+fn bookmark_entry_hash(entry: &BookmarkEntry) -> String {
+    let canonical = format!(
+        "{}\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{}",
+        entry.folder_path,
+        entry.title,
+        entry.url,
+        entry.added_at.as_deref().unwrap_or_default(),
+        entry.modified_at.as_deref().unwrap_or_default()
+    );
+    format!("blake3:{}", blake3::hash(canonical.as_bytes()).to_hex())
+}
+
+fn bookmark_passage(entry: &BookmarkEntry) -> String {
+    if entry.folder_path.is_empty() {
+        format!("{}\n{}", entry.title, entry.url)
+    } else {
+        format!("{}\n{}\n{}", entry.title, entry.url, entry.folder_path)
+    }
+}
+
+fn ensure_bookmark_artifact(
+    transaction: &Transaction<'_>,
+    root_id: &str,
+    source_uri: &str,
+    entry: &BookmarkEntry,
+    entry_hash: &str,
+    now: &str,
+) -> Result<String> {
+    let artifact_id: String = transaction
+        .query_row(
+            "SELECT artifact_id FROM artifact_locators
+             WHERE kind = 'url' AND locator = ?1 AND active = 1",
+            [&entry.url],
+            |row| row.get(0),
+        )
+        .optional()?
+        .unwrap_or_else(|| Uuid::new_v4().to_string());
+    let exists: bool = transaction.query_row(
+        "SELECT EXISTS(SELECT 1 FROM artifacts WHERE id = ?1)",
+        [&artifact_id],
+        |row| row.get(0),
+    )?;
+    if !exists {
+        transaction.execute(
+            "INSERT INTO artifacts(
+                id, source_root_id, title, media_type, state, created_at, last_seen_at
+             ) VALUES (?1, ?2, ?3, 'text/x-bookmark', 'active', ?4, ?4)",
+            params![artifact_id, root_id, entry.title, now],
+        )?;
+    } else {
+        transaction.execute(
+            "UPDATE artifacts SET title = ?1, state = 'active', last_seen_at = ?2 WHERE id = ?3",
+            params![entry.title, now, artifact_id],
+        )?;
+    }
+    transaction.execute(
+        "INSERT INTO artifact_locators(
+            id, artifact_id, kind, locator, active, first_seen_at, last_seen_at
+         ) VALUES (?1, ?2, 'url', ?3, 1, ?4, ?4)
+         ON CONFLICT(kind, locator) DO UPDATE SET artifact_id = excluded.artifact_id,
+           active = 1, last_seen_at = excluded.last_seen_at",
+        params![Uuid::new_v4().to_string(), artifact_id, entry.url, now],
+    )?;
+    upsert_bookmark_artifact(
+        transaction,
+        root_id,
+        source_uri,
+        &artifact_id,
+        entry,
+        entry_hash,
+        now,
+    )?;
+    Ok(artifact_id)
+}
+
+fn upsert_bookmark_artifact(
+    transaction: &Transaction<'_>,
+    _root_id: &str,
+    source_uri: &str,
+    artifact_id: &str,
+    entry: &BookmarkEntry,
+    entry_hash: &str,
+    now: &str,
+) -> Result<()> {
+    let passage_text = bookmark_passage(entry);
+    let content_hash = entry_hash;
+    let extraction_metadata = serde_json::json!({
+        "bookmark": {
+            "folder_path": entry.folder_path,
+            "added_at": entry.added_at,
+            "modified_at": entry.modified_at,
+            "source_export": source_uri,
+        },
+        "remote_fetch": false,
+    });
+    let active: Option<(String, String, String)> = transaction
+        .query_row(
+            "SELECT v.id, v.content_hash, v.extractor_version
+             FROM artifacts a JOIN artifact_versions v ON v.id = a.active_version_id
+             WHERE a.id = ?1",
+            [artifact_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .optional()?;
+    if active.as_ref().is_some_and(|(_, hash, version)| {
+        hash == &content_hash && version == BOOKMARK_EXTRACTOR_VERSION
+    }) {
+        transaction.execute(
+            "UPDATE artifacts SET title = ?1, last_seen_at = ?2 WHERE id = ?3",
+            params![entry.title, now, artifact_id],
+        )?;
+        return Ok(());
+    }
+    transaction.execute(
+        "UPDATE artifact_versions SET status = 'superseded'
+         WHERE artifact_id = ?1 AND status = 'ready'",
+        [artifact_id],
+    )?;
+    let existing_version: Option<String> = transaction
+        .query_row(
+            "SELECT id FROM artifact_versions
+             WHERE artifact_id = ?1 AND content_hash = ?2 AND extractor_id = ?3
+               AND extractor_version = ?4",
+            params![
+                artifact_id,
+                content_hash,
+                BOOKMARK_EXTRACTOR_ID,
+                BOOKMARK_EXTRACTOR_VERSION
+            ],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let version_id = if let Some(version_id) = existing_version {
+        transaction.execute(
+            "UPDATE artifact_versions
+             SET status = 'ready', extraction_metadata_json = ?1
+             WHERE id = ?2",
+            params![serde_json::to_string(&extraction_metadata)?, version_id],
+        )?;
+        version_id
+    } else {
+        let version_id = Uuid::new_v4().to_string();
+        transaction.execute(
+            "INSERT INTO artifact_versions(
+                id, artifact_id, content_hash, hash_algorithm, byte_size, source_modified_ns,
+                extractor_id, extractor_version, parse_warnings_json, page_count,
+                extraction_metadata_json, status, created_at
+             ) VALUES (?1, ?2, ?3, 'blake3', ?4, NULL, ?5, ?6, '[]', NULL, ?7, 'ready', ?8)",
+            params![
+                version_id,
+                artifact_id,
+                content_hash,
+                sql_i64(passage_text.len() as u64, "bookmark passage size")?,
+                BOOKMARK_EXTRACTOR_ID,
+                BOOKMARK_EXTRACTOR_VERSION,
+                serde_json::to_string(&extraction_metadata)?,
+                now
+            ],
+        )?;
+        let char_end = passage_text.chars().count() as u64;
+        let line_end = passage_text.lines().count().max(1) as u64;
+        insert_passages(
+            transaction,
+            &version_id,
+            &[PassageDraft {
+                ordinal: 0,
+                text: passage_text.clone(),
+                text_hash: format!("blake3:{}", blake3::hash(passage_text.as_bytes()).to_hex()),
+                anchor: EvidenceAnchor::Text {
+                    char_start: 0,
+                    char_end,
+                    line_start: 1,
+                    line_end,
+                },
+            }],
+            now,
+        )?;
+        version_id
+    };
+    transaction.execute(
+        "UPDATE artifacts SET active_version_id = ?1, title = ?2, media_type = 'text/x-bookmark',
+             state = 'active', last_seen_at = ?3 WHERE id = ?4",
+        params![version_id, entry.title, now, artifact_id],
+    )?;
+    Ok(())
 }
 
 fn insert_passages(
@@ -3197,7 +3687,7 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(schema_version, "6");
+        assert_eq!(schema_version, "7");
 
         let foreign_keys: i64 = connection
             .query_row("PRAGMA foreign_keys", [], |row| row.get(0))
@@ -3223,6 +3713,9 @@ mod tests {
             "artifact_versions",
             "passages",
             "relationships",
+            "bookmark_imports",
+            "bookmark_records",
+            "bookmark_import_items",
             "index_jobs",
             "passages_fts_vocab",
             "passages_fts_instances",
@@ -3245,6 +3738,9 @@ mod tests {
             "artifact_versions",
             "passages",
             "relationships",
+            "bookmark_imports",
+            "bookmark_records",
+            "bookmark_import_items",
             "index_jobs",
             "passages_fts_vocab",
             "passages_fts_instances",
@@ -3295,7 +3791,7 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(schema_version, "6");
+        assert_eq!(schema_version, "7");
         let checkpoint_table: bool = connection
             .query_row(
                 "SELECT EXISTS(
