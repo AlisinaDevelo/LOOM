@@ -100,6 +100,17 @@ pub fn fuse_hybrid_candidates(
     validate_query(query)?;
     validate_config(config)?;
 
+    // Semantic vectors are a disposable derivative and can produce plausible but unsupported
+    // neighbors. Keep lexical candidates authoritative, while admitting a semantic-only
+    // candidate only when at least half of the distinct query tokens occur in its canonical
+    // passage, title, or source locator. This conservative gate preserves paraphrase headroom
+    // without allowing an unanchored semantic tail to inflate false positives.
+    let inputs = inputs
+        .into_iter()
+        .filter(|input| {
+            input.lexical_rank.is_some() || semantic_candidate_is_admissible(query, input)
+        })
+        .collect::<Vec<_>>();
     let recency = recency_scores(&inputs);
     let mut ranked = inputs
         .into_iter()
@@ -222,6 +233,19 @@ fn path_token_overlap(query: &str, input: &HybridRankInput) -> f64 {
     let path_tokens = unique_tokens(&format!("{} {}", input.title, input.source_uri));
     let overlap = query_tokens.intersection(&path_tokens).count();
     overlap as f64 / query_tokens.len() as f64
+}
+
+fn semantic_candidate_is_admissible(query: &str, input: &HybridRankInput) -> bool {
+    let query_tokens = unique_tokens(query);
+    if query_tokens.is_empty() {
+        return false;
+    }
+    let evidence_tokens = unique_tokens(&format!(
+        "{} {} {}",
+        input.passage_text, input.title, input.source_uri
+    ));
+    let overlap = query_tokens.intersection(&evidence_tokens).count();
+    overlap.saturating_mul(2) >= query_tokens.len()
 }
 
 fn recency_scores(inputs: &[HybridRankInput]) -> Vec<f64> {

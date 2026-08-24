@@ -20,6 +20,11 @@ The output retains the canonical artifact/version/passage tuple, original anchor
 all signal values. Ties resolve by passage ID. A missing or incompatible semantic derivative fails
 closed; the ranker never silently changes the default lexical behavior.
 
+Semantic-only candidates also pass a conservative admission check: at least half of the distinct
+query tokens must occur in the canonical passage, title, or source locator. Lexical candidates
+are always eligible, so semantic ranking can still rerank an evidence-backed lexical set and can
+admit a partial-token paraphrase without exposing an unsupported semantic tail.
+
 ## Promotion gate
 
 The benchmark runner compares lexical-only, semantic-only, and hybrid retrieval on the same
@@ -37,6 +42,8 @@ claim.
 ## Consequences
 
 Hybrid candidates can broaden recall but also introduce semantic false positives and coarse
-passage anchors. Keeping the experiment separate makes those failures visible, preserves source
-fidelity, and gives later benchmark work a stable contract for changing weights or adding a
-reranker.
+passage anchors. The admission check makes the evidence boundary explicit: an embedding may
+rerank or modestly expand a lexical-supported result set, but it cannot manufacture an
+unrelated result solely from vector proximity. Keeping the experiment separate makes failures
+visible, preserves source fidelity, and gives later benchmark work a stable contract for changing
+weights or adding a reranker.

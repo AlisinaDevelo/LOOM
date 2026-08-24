@@ -110,6 +110,7 @@ run_step rust-msrv-check cargo +1.88.0 check --workspace --all-targets --locked
 run_step rust-msrv-tests cargo +1.88.0 test -p loom-core --lib --tests -- --nocapture
 run_step retrieval-benchmark cargo run --locked -q -p loom-cli -- benchmark --corpus benchmarks/retrieval/v0/corpus --queries benchmarks/retrieval/v0/queries.jsonl
 run_step retrieval-benchmark-v1 cargo run --locked -q -p loom-cli -- benchmark --corpus benchmarks/retrieval/v1/corpus --queries benchmarks/retrieval/v1/queries.jsonl
+run_step hybrid-ablation python3 scripts/hybrid-ablation.py
 run_step semantic-contract bash scripts/verify-semantic-contract.sh "$EVIDENCE_DIR/semantic"
 run_mixed_corpus
 run_step clear-rust-target clear_rust_outputs
