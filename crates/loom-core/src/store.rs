@@ -1123,6 +1123,61 @@ mod tests {
         assert!(report.failures.is_empty());
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn unreadable_source_is_reported_and_recovers_after_permissions_restore() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = tempdir().unwrap();
+        let source = directory.path().join("restricted.md");
+        fs::write(&source, "permission recovery marker").unwrap();
+        let canonical_source = source.canonicalize().unwrap();
+        let library = Library::open_in_memory().unwrap();
+        assert_eq!(library.index_path(directory.path()).unwrap().indexed, 1);
+
+        let mut permissions = fs::metadata(&source).unwrap().permissions();
+        permissions.set_mode(0o0);
+        fs::set_permissions(&source, permissions).unwrap();
+        assert!(
+            fs::File::open(&source).is_err(),
+            "the unreadable-input test requires a non-privileged target user"
+        );
+
+        let failed = library.index_path(directory.path()).unwrap();
+        assert_eq!(failed.discovered, 1);
+        assert_eq!(failed.indexed, 0);
+        assert_eq!(failed.failures.len(), 1);
+        assert_eq!(
+            failed.failures[0].source,
+            canonical_source.display().to_string()
+        );
+        assert!(failed.failures[0].reason.contains("I/O error"));
+        assert!(library
+            .search(&SearchRequest {
+                text: "permission recovery".into(),
+                limit: 10,
+            })
+            .unwrap()
+            .is_empty());
+
+        let mut restored = fs::metadata(&source).unwrap().permissions();
+        restored.set_mode(0o600);
+        fs::set_permissions(&source, restored).unwrap();
+        let recovered = library.index_path(directory.path()).unwrap();
+        assert_eq!(recovered.unchanged, 1);
+        assert!(recovered.failures.is_empty());
+        assert_eq!(
+            library
+                .search(&SearchRequest {
+                    text: "permission recovery".into(),
+                    limit: 10,
+                })
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
     #[test]
     fn complete_directory_rescan_hides_deleted_artifacts() {
         let directory = tempdir().unwrap();
