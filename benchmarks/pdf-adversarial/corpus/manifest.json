@@ -1,0 +1,118 @@
+{
+  "schema_version": 1,
+  "name": "loom-pdf-adversarial-v1",
+  "license": "CC0-1.0",
+  "generator": "loom-pdf-adversarial-v1",
+  "extractor": {
+    "id": "loom.pdf",
+    "version": "0.1.0"
+  },
+  "fixtures": [
+    {
+      "id": "tagged-text",
+      "class": "tagged_text",
+      "outcome": "indexed",
+      "expected_page_count": 1,
+      "expected_pages": [
+        1
+      ],
+      "expected_warnings": [],
+      "expected_contains": "tagged evidence marker",
+      "path": "tagged-text.pdf",
+      "byte_hash": "8975e6aa58fc3e730817829c6c23161ffb07899f6100b6951f118320c49d4c63",
+      "hash_algorithm": "sha256",
+      "extractor_id": "loom.pdf",
+      "extractor_version": "0.1.0"
+    },
+    {
+      "id": "multi-column",
+      "class": "multi_column",
+      "outcome": "indexed",
+      "expected_page_count": 1,
+      "expected_pages": [
+        1
+      ],
+      "expected_warnings": [],
+      "expected_contains": "right column marker",
+      "path": "multi-column.pdf",
+      "byte_hash": "c892f2033c636b10f0f41b938203efca8d322bb5eff6a3a8fecf131574584fa2",
+      "hash_algorithm": "sha256",
+      "extractor_id": "loom.pdf",
+      "extractor_version": "0.1.0"
+    },
+    {
+      "id": "ligature",
+      "class": "ligature",
+      "outcome": "indexed",
+      "expected_page_count": 1,
+      "expected_pages": [
+        1
+      ],
+      "expected_warnings": [],
+      "expected_contains": "office fi ligature marker",
+      "path": "ligature.pdf",
+      "byte_hash": "02a76602a21ff03aab636ed780c7b1ad67f59d86592ae75a3fe10eda5edee11a",
+      "hash_algorithm": "sha256",
+      "extractor_id": "loom.pdf",
+      "extractor_version": "0.1.0"
+    },
+    {
+      "id": "rotated-page",
+      "class": "rotated_page",
+      "outcome": "indexed",
+      "expected_page_count": 1,
+      "expected_pages": [
+        1
+      ],
+      "expected_warnings": [],
+      "expected_contains": "rotated page marker",
+      "path": "rotated-page.pdf",
+      "byte_hash": "f94540c7bb6e4d2c6c00740a9bede5470bc902b6440ba8cbe36c1856bb3dffc1",
+      "hash_algorithm": "sha256",
+      "extractor_id": "loom.pdf",
+      "extractor_version": "0.1.0"
+    },
+    {
+      "id": "encrypted",
+      "class": "encrypted",
+      "outcome": "unsupported",
+      "expected_page_count": null,
+      "expected_pages": [],
+      "expected_warnings": [],
+      "expected_error_contains": "encrypted PDF",
+      "path": "encrypted.pdf",
+      "byte_hash": "bb5533cac93dbd39655af49a1bb778b7cb88be6ce7c1a6d8137f1b13af65f775",
+      "hash_algorithm": "sha256",
+      "extractor_id": "loom.pdf",
+      "extractor_version": "0.1.0"
+    },
+    {
+      "id": "malformed",
+      "class": "malformed",
+      "outcome": "unsupported",
+      "expected_page_count": null,
+      "expected_pages": [],
+      "expected_warnings": [],
+      "expected_error_contains": "malformed PDF",
+      "path": "malformed.pdf",
+      "byte_hash": "3ce77c7c8e3ddc239005badc494a88cfd1f251dd30528140f07e34eca853739c",
+      "hash_algorithm": "sha256",
+      "extractor_id": "loom.pdf",
+      "extractor_version": "0.1.0"
+    },
+    {
+      "id": "image-only",
+      "class": "image_only",
+      "outcome": "unsupported",
+      "expected_page_count": null,
+      "expected_pages": [],
+      "expected_warnings": [],
+      "expected_error_contains": "no extractable text",
+      "path": "image-only.pdf",
+      "byte_hash": "091972e56458e55e6dd8c2451760a32179764719f8473d149c4e252608f22dc4",
+      "hash_algorithm": "sha256",
+      "extractor_id": "loom.pdf",
+      "extractor_version": "0.1.0"
+    }
+  ]
+}
