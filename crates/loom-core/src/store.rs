@@ -1136,7 +1136,7 @@ mod tests {
         assert_eq!(library.index_path(directory.path()).unwrap().indexed, 1);
 
         let mut permissions = fs::metadata(&source).unwrap().permissions();
-        permissions.set_mode(0);
+        permissions.set_mode(0o0);
         fs::set_permissions(&source, permissions).unwrap();
         assert!(
             fs::File::open(&source).is_err(),
@@ -1147,7 +1147,10 @@ mod tests {
         assert_eq!(failed.discovered, 1);
         assert_eq!(failed.indexed, 0);
         assert_eq!(failed.failures.len(), 1);
-        assert_eq!(failed.failures[0].source, canonical_source.display().to_string());
+        assert_eq!(
+            failed.failures[0].source,
+            canonical_source.display().to_string()
+        );
         assert!(failed.failures[0].reason.contains("I/O error"));
         assert!(library
             .search(&SearchRequest {
