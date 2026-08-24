@@ -40,6 +40,9 @@ pub enum LoomError {
     #[error("unsupported or invalid library schema version: {0}")]
     UnsupportedSchemaVersion(String),
 
+    #[error("index job interrupted: {0}")]
+    IndexInterrupted(String),
+
     #[error("library lock is unavailable")]
     LockPoisoned,
 

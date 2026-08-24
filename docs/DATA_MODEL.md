@@ -1,6 +1,6 @@
 # Data model
 
-This document describes the schema currently created by LOOM schema version 2. It is an
+This document describes the schema currently created by LOOM schema version 3. It is an
 implementation contract for the pre-alpha slice, not a stable migration guarantee.
 
 ## Identity and source records
@@ -14,6 +14,7 @@ implementation contract for the pre-alpha slice, not a stable migration guarante
 | artifact_versions | Immutable content observations            | content_hash, hash_algorithm, byte_size, source mtime, extractor identity/version, status |
 | passages          | Normalized text and exact anchors         | artifact version, ordinal, text, text hash, JSON locator, character/line offsets          |
 | relationships     | Reserved source-to-source relationships   | source/target artifacts, optional evidence passage, method, confidence                    |
+| index_jobs        | Durable progress for one selected-root scan | discovery fingerprint, total/next unit, state, error, timestamps                         |
 
 The current extractor creates file locators. The schema also names URL and managed-copy locator
 kinds for future work; they are not part of the current supported input path.
@@ -81,13 +82,27 @@ erasure and a user-facing retention policy are not implemented.
 
 ## Compatibility
 
-The schema is currently version 2. LOOM refuses missing, malformed, or unknown version markers; it
-does not silently rewrite them. Pre-alpha version 1 databases are rejected because their
-content-version uniqueness contract omitted extractor identity; users of that unpublished format
-must rebuild the local index from source files. Changes to identity, content hashing, anchors, or
-FTS5 maintenance require an ordered migration plan, updated fixtures, and an ADR. Future semantic
-indexes must reference canonical artifact versions and be rebuildable rather than becoming a
-second authority.
+The schema is currently version 3. LOOM refuses missing, malformed, or unknown version markers;
+version 2 databases migrate transactionally by adding the `index_jobs` table and recording version
+3. Pre-alpha version 1 databases are rejected because their content-version uniqueness contract
+omitted extractor identity; users of that unpublished format must rebuild the local index from
+source files. Changes to identity, content hashing, anchors, or FTS5 maintenance require an
+ordered migration plan, updated fixtures, and an ADR. Future semantic indexes must reference
+canonical artifact versions and be rebuildable rather than becoming a second authority.
+
+## Durable indexing jobs
+
+`index_jobs` is a checkpoint, not a second source of truth. One row is keyed by the selected source
+root and canonical selection locator. The discovery fingerprint binds the checkpoint to the sorted
+set of paths observed at job start; a changed selection resets progress rather than skipping newly
+discovered work. Each supported ingestion unit advances `next_unit` in the same SQLite transaction
+that creates or reuses its artifact version and passages. Unsupported or unreadable units advance
+through a small reconciliation transaction and retain an explicit failure in the returned report.
+
+An interrupted or still-running row resumes from its durable `next_unit` when the fingerprint and
+unit count match. Completion records `state = completed` and the next run starts a fresh scan, so
+retries of unchanged bytes reuse the existing content version. The row is intentionally diagnostic
+and rebuildable; canonical artifact, version, passage, and hash records remain authoritative.
 
 ## References
 

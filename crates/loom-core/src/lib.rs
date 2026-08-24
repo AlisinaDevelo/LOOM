@@ -7,8 +7,9 @@ mod search;
 mod store;
 
 pub use domain::{
-    ArtifactObservation, EvidenceAnchor, EvidenceExcerpt, EvidenceSegment, IndexFailure,
-    IndexReport, LibraryStats, OpenArtifactRequest, PassageObservation, SearchHit, SearchRequest,
+    ArtifactObservation, EvidenceAnchor, EvidenceExcerpt, EvidenceSegment, IndexCheckpoint,
+    IndexFailure, IndexReport, LibraryStats, OpenArtifactRequest, PassageObservation, SearchHit,
+    SearchRequest,
 };
 pub use error::{LoomError, Result};
 pub use store::{Library, LibraryLimits};
