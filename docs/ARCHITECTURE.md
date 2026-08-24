@@ -60,7 +60,8 @@ benchmark. Its default database is .loom/library.sqlite3; callers can provide an
 
 The Tauri layer opens the application-data SQLite database and exposes the narrow commands
 index_selected_folder, cancel_indexing, reconcile_approved_roots, list_source_roots,
-revoke_source_root, search, library_stats, resolve_evidence, and open_artifact. Folder selection happens inside the
+revoke_source_root, search, library_stats, resolve_evidence, and open_artifact. Folder selection
+happens inside the
 Rust command through the native dialog; the webview does not provide a path. Persisted roots are
 exact read-only locators with
 available/missing/denied/moved/unsafe/revoked status. Re-selection through the native picker is the
