@@ -126,6 +126,9 @@ nav { display: grid; gap: 6px; }
 .cancel-source { border-color: #6a3d35; color: #e6a895; }
 .cancel-source:hover:not(:disabled) { border-color: var(--warm); }
 .scope-note { margin: 10px 0 0; color: var(--faint); font-size: 10px; line-height: 1.45; }
+.ocr-controls { margin-top: 18px; padding-top: 14px; border-top: 1px solid var(--line); }
+.ocr-control-row { display: flex; justify-content: space-between; align-items: center; margin-top: 9px; color: var(--muted); font: 10px ui-monospace, monospace; text-transform: uppercase; }
+.ocr-controls > .scope-action { margin-top: 8px; }
 .scope-list { margin-top: 18px; padding-top: 14px; border-top: 1px solid var(--line); }
 .scope-list ul { display: grid; gap: 7px; margin: 10px 0 0; padding: 0; list-style: none; }
 .scope-row { display: grid; gap: 5px; padding: 8px; border: 1px solid var(--line); border-radius: 7px; background: #151814; }

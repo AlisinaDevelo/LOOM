@@ -15,6 +15,8 @@ For a selected file or directory, the current path may store:
 - a BLAKE3 content hash;
 - normalized passage text and exact character/line anchors;
 - extractor identity and version;
+- for images, derived OCR text, pixel-region anchors, provider/model identity, confidence, EXIF
+  orientation, and fixed-point display scale;
 - local timestamps and indexing statistics.
 
 Search queries are used in memory for the current search operation and are not a field in the
@@ -40,7 +42,9 @@ or content to the selected external application.
   re-selection; it never falls back to the home directory or another broader path.
 - Directory traversal does not follow symlinks; stable reads enforce canonical root containment and
   verify descriptor/path identity before and after reading.
-- Only UTF-8 .txt, .md, and .markdown files are accepted in this slice.
+- Only UTF-8 .txt/.md/.markdown, bounded text-based PDFs, and common PNG/JPEG/GIF/WebP images are
+  accepted in this slice. Image OCR is local macOS Vision processing; it is disabled/purged as a
+  user-visible policy and never uploads source bytes.
 - No automatic cloud upload or third-party model processing occurs in the current path.
 - Revoking a saved scope disables future reconciliation and hides its active artifacts from search;
   canonical historical rows remain until a future retention/purge policy is implemented.
@@ -48,6 +52,9 @@ or content to the selected external application.
   it does not upload, discard, or roll back a complete source version already committed locally.
 - A complete rescan hides removed or unreadable sources from search, but does not erase their stored
   historical passage text.
+- Disabling OCR or invoking the OCR purge removes derived `loom.ocr` versions/passages but retains
+  the original image locator and source bytes. Re-indexing after re-enabling recreates the derived
+  records.
 
 Do not select confidential or regulated material unless you understand the local storage,
 operating-system, backup, and deletion implications. Treat the database and its WAL files as

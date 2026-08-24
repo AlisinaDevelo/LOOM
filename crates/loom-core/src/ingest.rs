@@ -14,6 +14,7 @@ use walkdir::WalkDir;
 use crate::{
     domain::EvidenceAnchor,
     error::{io_error, LoomError, Result},
+    ocr::{self, ImageOcrRegion},
 };
 
 pub(crate) const EXTRACTOR_ID: &str = "loom.text";
@@ -33,6 +34,8 @@ pub(crate) struct StableDocument {
     pub(crate) pdf_pages: Option<Vec<(u32, String)>>,
     pub(crate) page_count: Option<u32>,
     pub(crate) parse_warnings: Vec<String>,
+    pub(crate) image_regions: Option<Vec<ImageOcrRegion>>,
+    pub(crate) extraction_metadata: serde_json::Value,
 }
 
 #[derive(Debug)]
@@ -97,6 +100,10 @@ pub(crate) fn supported_media_type(path: &Path) -> Option<&'static str> {
         Some("txt") => Some("text/plain"),
         Some("md" | "markdown") => Some("text/markdown"),
         Some("pdf") => Some("application/pdf"),
+        Some("png") => Some("image/png"),
+        Some("jpg" | "jpeg") => Some("image/jpeg"),
+        Some("gif") => Some("image/gif"),
+        Some("webp") => Some("image/webp"),
         _ => None,
     }
 }
@@ -106,11 +113,22 @@ pub(crate) fn read_stable(path: &Path, root: &Path, max_bytes: u64) -> Result<St
     read_stable_with_limits(path, root, max_bytes, DEFAULT_MAX_PDF_PAGES)
 }
 
+#[cfg(test)]
 pub(crate) fn read_stable_with_limits(
     path: &Path,
     root: &Path,
     max_bytes: u64,
     max_pdf_pages: usize,
+) -> Result<StableDocument> {
+    read_stable_with_limits_and_ocr(path, root, max_bytes, max_pdf_pages, true)
+}
+
+pub(crate) fn read_stable_with_limits_and_ocr(
+    path: &Path,
+    root: &Path,
+    max_bytes: u64,
+    max_pdf_pages: usize,
+    ocr_enabled: bool,
 ) -> Result<StableDocument> {
     let media_type = supported_media_type(path)
         .ok_or_else(|| LoomError::UnsupportedSource(path.display().to_string()))?;
@@ -134,6 +152,26 @@ pub(crate) fn read_stable_with_limits(
             page_count: Some(extraction.page_count),
             pdf_pages: Some(extraction.pages),
             parse_warnings: extraction.warnings,
+            image_regions: None,
+            extraction_metadata: serde_json::json!({}),
+        });
+    }
+    if media_type.starts_with("image/") {
+        if !ocr_enabled {
+            return Err(LoomError::OcrDisabled);
+        }
+        let extraction = ocr::extract_image(&stable.bytes)?;
+        return Ok(StableDocument {
+            raw_hash,
+            byte_size: stable.bytes.len() as u64,
+            modified_ns: stable.modified_ns,
+            normalized_text: extraction.normalized_text,
+            media_type,
+            pdf_pages: None,
+            page_count: None,
+            parse_warnings: extraction.warnings,
+            image_regions: Some(extraction.regions),
+            extraction_metadata: extraction.metadata,
         });
     }
     let text = String::from_utf8(stable.bytes).map_err(|_| {
@@ -149,6 +187,8 @@ pub(crate) fn read_stable_with_limits(
         pdf_pages: None,
         page_count: None,
         parse_warnings: Vec::new(),
+        image_regions: None,
+        extraction_metadata: serde_json::json!({}),
     })
 }
 
@@ -476,6 +516,33 @@ pub(crate) fn split_pdf_passages(
         }
     }
     passages
+}
+
+pub(crate) fn split_image_passages(regions: &[ImageOcrRegion]) -> Vec<PassageDraft> {
+    regions
+        .iter()
+        .enumerate()
+        .map(|(ordinal, region)| PassageDraft {
+            ordinal: ordinal as u32,
+            text: region.text.clone(),
+            text_hash: format!("blake3:{}", blake3::hash(region.text.as_bytes()).to_hex()),
+            anchor: EvidenceAnchor::ImageRegion {
+                char_start: region.char_start,
+                char_end: region.char_end,
+                line_start: region.line_start,
+                line_end: region.line_end,
+                x: region.bounds.x,
+                y: region.bounds.y,
+                width: region.bounds.width,
+                height: region.bounds.height,
+                image_width: region.image_width,
+                image_height: region.image_height,
+                orientation: region.orientation,
+                scale_milli: region.scale_milli,
+                confidence_milli: region.confidence_milli,
+            },
+        })
+        .collect()
 }
 
 #[cfg(test)]

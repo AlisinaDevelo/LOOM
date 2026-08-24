@@ -62,7 +62,7 @@ fn populated_v3_migration_adds_pdf_metadata_without_rewriting_canonical_rows() {
             |row| row.get(0),
         )
         .unwrap();
-    assert_eq!(schema_version, "4");
+    assert_eq!(schema_version, "5");
     let (hash, warnings, page_count): (String, String, Option<i64>) = connection
         .query_row(
             "SELECT content_hash, parse_warnings_json, page_count
@@ -104,6 +104,55 @@ fn opening_a_library_rebuilds_a_missing_derived_fts_projection() {
 
     let reopened = Library::open(&database).unwrap();
     assert_eq!(search_marker(&reopened), 1);
+}
+
+#[test]
+fn populated_v4_migration_adds_extraction_metadata_without_rewriting_rows() {
+    let directory = tempdir().unwrap();
+    let database = directory.path().join("v4.sqlite3");
+    let source = directory.path().join("v4.md");
+    fs::write(&source, "v4 migration marker").unwrap();
+    {
+        let library = Library::open(&database).unwrap();
+        library.index_path(&source).unwrap();
+    }
+    let connection = Connection::open(&database).unwrap();
+    connection
+        .execute_batch(
+            "ALTER TABLE artifact_versions DROP COLUMN extraction_metadata_json;
+             UPDATE schema_meta SET value = '4' WHERE key = 'schema_version';",
+        )
+        .unwrap();
+    drop(connection);
+
+    let library = Library::open(&database).unwrap();
+    let connection = Connection::open(&database).unwrap();
+    let schema_version: String = connection
+        .query_row(
+            "SELECT value FROM schema_meta WHERE key = 'schema_version'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(schema_version, "5");
+    let metadata: String = connection
+        .query_row(
+            "SELECT extraction_metadata_json FROM artifact_versions",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(metadata, "{}");
+    assert_eq!(
+        library
+            .search(&SearchRequest {
+                text: "v4 migration marker".into(),
+                limit: 5,
+            })
+            .unwrap()
+            .len(),
+        1
+    );
 }
 
 #[test]
@@ -159,7 +208,7 @@ fn assert_preserved_v2_rows(library: &Library, database: &std::path::Path) {
             |row| row.get(0),
         )
         .unwrap();
-    assert_eq!(schema_version, "4");
+    assert_eq!(schema_version, "5");
 
     let (hash, extractor_id, extractor_version): (String, String, String) = connection
         .query_row(

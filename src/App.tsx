@@ -53,14 +53,28 @@ type SearchHit = {
     segments: Array<{ text: string; highlighted: boolean }>;
   };
   anchor: {
-    kind: "text" | "pdf_page";
+    kind: "text" | "pdf_page" | "image_region";
     char_start: number;
     char_end: number;
     line_start: number;
     line_end: number;
     page?: number;
+    x?: number;
+    y?: number;
+    width?: number;
+    height?: number;
+    image_width?: number;
+    image_height?: number;
+    orientation?: number;
+    confidence_milli?: number;
   };
   match_reason: string;
+};
+
+type OcrStatus = {
+  enabled: boolean;
+  derived_versions: number;
+  derived_passages: number;
 };
 
 const emptyStats: LibraryStats = {
@@ -97,8 +111,13 @@ function App() {
   const [stats, setStats] = useState<LibraryStats>(emptyStats);
   const [query, setQuery] = useState("");
   const [hits, setHits] = useState<SearchHit[]>([]);
+  const [ocrStatus, setOcrStatus] = useState<OcrStatus>({
+    enabled: true,
+    derived_versions: 0,
+    derived_passages: 0,
+  });
   const [searched, setSearched] = useState(false);
-  const [busy, setBusy] = useState<"index" | "search" | "scope" | null>(null);
+  const [busy, setBusy] = useState<"index" | "search" | "scope" | "ocr" | null>(null);
   const [sourceRoots, setSourceRoots] = useState<SourceRootInfo[]>([]);
   const [notice, setNotice] = useState("Ready. LOOM does not upload your library.");
   const [error, setError] = useState<string | null>(null);
@@ -196,6 +215,43 @@ function App() {
     }
   };
 
+  const toggleOcr = async () => {
+    setError(null);
+    setBusy("ocr");
+    const next = !ocrStatus.enabled;
+    setNotice(next ? "Enabling local image OCR…" : "Disabling OCR and purging derived records…");
+    try {
+      await invoke("set_ocr_enabled", { enabled: next });
+      const status = await invoke<OcrStatus>("ocr_status");
+      setOcrStatus(status);
+      setNotice(next ? "Local image OCR is enabled." : "OCR is disabled; derived OCR records were purged.");
+      await refreshStats();
+    } catch (caught) {
+      setError(errorMessage(caught));
+      setNotice("OCR policy change stopped safely.");
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const purgeOcr = async () => {
+    setError(null);
+    setBusy("ocr");
+    setNotice("Purging derived OCR records…");
+    try {
+      await invoke("purge_ocr_records");
+      const status = await invoke<OcrStatus>("ocr_status");
+      setOcrStatus(status);
+      setNotice("Derived OCR records purged; original images remain untouched.");
+      await refreshStats();
+    } catch (caught) {
+      setError(errorMessage(caught));
+      setNotice("OCR purge stopped safely.");
+    } finally {
+      setBusy(null);
+    }
+  };
+
   const runSearch = async (event: FormEvent) => {
     event.preventDefault();
     if (!query.trim()) return;
@@ -282,7 +338,20 @@ function App() {
             <span aria-hidden="true">{busy === "index" ? "×" : "＋"}</span>
             {busy === "index" ? "Stop indexing" : "Add a folder"}
           </button>
-          <p className="scope-note">Text, Markdown, and bounded PDF text are supported locally.</p>
+          <p className="scope-note">Text, Markdown, bounded PDF text, and local image OCR are supported.</p>
+          <section className="ocr-controls" aria-labelledby="ocr-heading">
+            <div className="section-label" id="ocr-heading">Image OCR</div>
+            <div className="ocr-control-row">
+              <span>{ocrStatus.enabled ? "enabled" : "disabled"}</span>
+              <button type="button" className="scope-action" onClick={toggleOcr} disabled={busy !== null}>
+                {ocrStatus.enabled ? "Disable & purge" : "Enable"}
+              </button>
+            </div>
+            <p className="scope-note">Runs on-device through macOS Vision. Disabling removes derived text and keeps original images.</p>
+            <button type="button" className="scope-action" onClick={purgeOcr} disabled={busy !== null}>
+              Purge derived OCR now
+            </button>
+          </section>
           <section className="scope-list" aria-labelledby="scope-heading">
             <div className="section-label" id="scope-heading">Saved scopes</div>
             {sourceRoots.length === 0 ? (
@@ -399,7 +468,7 @@ function App() {
                     <div className="result-title-row">
                       <div>
                         <span className="media-badge">
-                          {hit.media_type === "application/pdf" ? "PDF" : hit.media_type === "text/markdown" ? "MD" : "TXT"}
+                          {hit.media_type === "application/pdf" ? "PDF" : hit.media_type.startsWith("image/") ? "IMG" : hit.media_type === "text/markdown" ? "MD" : "TXT"}
                         </span>
                         <h3>{hit.title}</h3>
                       </div>
@@ -418,6 +487,7 @@ function App() {
                     <div className="evidence-row">
                       <span>
                         {hit.anchor.kind === "pdf_page" ? `page ${hit.anchor.page} · ` : ""}
+                        {hit.anchor.kind === "image_region" ? `region ${hit.anchor.x},${hit.anchor.y} · ` : ""}
                         lines {hit.anchor.line_start}–{hit.anchor.line_end}
                       </span>
                       <span>score {hit.score.toFixed(4)}</span>

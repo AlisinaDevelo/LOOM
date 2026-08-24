@@ -16,7 +16,7 @@ backend-owned selection -> bounded traversal (no symlink following)
 no-follow, contained stable read -> line-ending normalization -> BLAKE3 hash
         |
         v
-artifact version -> passages with character/line anchors
+artifact version -> passages with text/page/pixel anchors
         |
         +--> SQLite canonical tables
         |
@@ -30,18 +30,22 @@ artifact version -> passages with character/line anchors
 The source file remains the authority for opening the original. LOOM stores extracted passage text
 and metadata in the local database so searches can run without rereading every source file. The
 current file ingestion path does not upload, copy, or synchronize source content to a service.
+Image OCR is a local macOS Vision call; only derived text, fixed-point region geometry, and
+provider/model metadata enter the canonical database.
 
 ## Components
 
 ### loom-core
 
 The Rust core owns ingestion, passage segmentation, the SQLite schema, FTS5 queries, statistics, and
-evidence-bearing search results. The current extractor is loom.text version 0.1.0.
+evidence-bearing search results. Text uses `loom.text` 0.1.0; PDF uses `loom.pdf` 0.1.0; image OCR
+uses `loom.ocr` 0.1.0 with a native provider boundary.
 
-Ingestion accepts an explicitly selected regular file or directory, supports UTF-8 .txt, .md, and
-.markdown, does not follow symlinks, limits a file to 8 MiB, and limits one traversal to 20,000
-files. Reads use a no-follow descriptor on Unix, canonical root containment, file identity, size,
-modification-time, and post-read checks. Files that change during a read are retried and reported if
+Ingestion accepts an explicitly selected regular file or directory, supports UTF-8 .txt/.md/.markdown,
+bounded text-based PDFs, and common PNG/JPEG/GIF/WebP images, does not follow symlinks, limits a file
+to 8 MiB, and limits one traversal to 20,000 files. Reads use a no-follow descriptor on Unix,
+canonical root containment, file identity, size, modification-time, and post-read checks. Files
+that change during a read are retried and reported if
 a stable read cannot be obtained. A complete directory rescan marks disappeared, unsupported, or
 unreadable prior sources missing so they no longer search. Text is normalized to LF before passage
 offsets are computed. Passages target 1,000 characters with 120 characters of overlap.
@@ -75,10 +79,10 @@ from user data and is not a claim about production retrieval quality.
 
 ## Persistence
 
-SQLite is the canonical store. The current schema is version 3 and contains source roots, logical
-artifacts, locators, content versions, passages, reserved relationships, and durable indexing-job
-checkpoints. Each passage has a JSON text anchor plus scalar character and line offsets. Version 2
-databases migrate transactionally by adding the checkpoint table while preserving populated
+SQLite is the canonical store. The current schema is version 5 and contains source roots, logical
+artifacts, locators, content versions, passages, reserved relationships, durable indexing-job
+checkpoints, and extraction metadata. Each passage has a JSON text, PDF-page, or image-region
+anchor plus scalar offsets. Versions 2–4 migrate transactionally while preserving populated
 canonical rows; see [SCHEMA_COMPATIBILITY.md](SCHEMA_COMPATIBILITY.md).
 
 SQLite FTS5 is an external-content virtual table over passages. Insert, update, and delete triggers
@@ -93,9 +97,9 @@ mode, in-memory temporary storage, and SQLite trusted-schema hardening. These ar
 choices for the local database, not a promise of crash-proof or encrypted storage. SQLite documents
 the WAL trade-offs in its [WAL reference](https://www.sqlite.org/wal.html).
 
-The current schema is version 3. Opening validates a known marker's required tables and columns,
-refuses a missing, malformed, or unknown version marker instead of rewriting it, and supports one
-reviewed version-2 transactional migration. The disposable FTS5 projection is rebuilt from
+The current schema is version 5. Opening validates a known marker's required tables and columns,
+refuses a missing, malformed, or unknown version marker instead of rewriting it, and supports
+reviewed versions 2–4 transactional migrations. The disposable FTS5 projection is rebuilt from
 canonical passages on open; canonical rows are never reconstructed from FTS5. Pre-alpha version 1
 databases are explicitly rejected because their content-version uniqueness contract did not include
 extractor identity. A content observation is keyed by source artifact, byte hash, extractor, and
@@ -118,6 +122,15 @@ line span; parser/page warnings and page count are stored on the immutable artif
 Encrypted, malformed, image-only, over-page-limit, and over-byte-limit PDFs fail closed with a
 bounded report. The original path remains the render/open authority; LOOM never copies a PDF just
 to display a page.
+
+Image ingestion uses macOS Vision through the isolated `loom-ocr-macos` crate. The provider
+returns owned Rust values only: OCR text, confidence, provider/model identity, and normalized
+lower-left rectangles. The core converts rectangles once into clamped top-left pixel bounds after
+EXIF orientation, stores fixed-point confidence/scale and extraction metadata, and never stores
+Objective-C objects or source image bytes. OCR is an explicit local policy: disabling it
+transactionally deletes every `loom.ocr` version and passage while retaining the source locator;
+re-enabling and re-indexing recovers the derived records. Malformed images, empty OCR results, and
+non-macOS provider absence fail closed with a visible bounded report.
 
 Approved-root observation is deliberately conservative. The coalescer accepts only absolute,
 in-scope hints, debounces duplicate create/modify/remove/rename events, and turns overflow or large
@@ -144,9 +157,8 @@ reconciliation boundary.
 
 The current SQLite records are the authority for source identity, text, versions, and evidence. An
 eventual semantic index may add vectors or other derived representations, but it must be rebuildable
-from canonical records and must not replace the source-backed result contract. PDF/OCR extraction,
-browser capture, external model providers, cloud sync, and managed copies are not implemented in
-this slice.
+from canonical records and must not replace the source-backed result contract. Browser capture,
+external model providers, cloud sync, and managed copies are not implemented in this slice.
 
 ## References
 

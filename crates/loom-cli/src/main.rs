@@ -39,6 +39,14 @@ enum Command {
     FtsHealth,
     /// Repair the derived FTS5 projection and print before/after evidence.
     FtsRepair,
+    /// Print local OCR policy and derived-record counts.
+    OcrStatus,
+    /// Enable local image OCR for subsequent indexing runs.
+    OcrEnable,
+    /// Disable local image OCR and purge all derived OCR records.
+    OcrDisable,
+    /// Purge derived OCR records without changing the enable policy.
+    OcrPurge,
     /// Evaluate exact-artifact recovery on a rights-clean JSONL query set.
     Benchmark {
         #[arg(long)]
@@ -197,6 +205,31 @@ fn main() -> Result<(), Box<dyn Error>> {
         Command::FtsRepair => {
             let library = Library::open(arguments.database)?;
             println!("{}", serde_json::to_string_pretty(&library.repair_fts()?)?);
+        }
+        Command::OcrStatus => {
+            let library = Library::open(arguments.database)?;
+            println!("{}", serde_json::to_string_pretty(&library.ocr_status()?)?);
+        }
+        Command::OcrEnable => {
+            let library = Library::open(arguments.database)?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&library.set_ocr_enabled(true)?)?
+            );
+        }
+        Command::OcrDisable => {
+            let library = Library::open(arguments.database)?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&library.set_ocr_enabled(false)?)?
+            );
+        }
+        Command::OcrPurge => {
+            let library = Library::open(arguments.database)?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&library.purge_ocr_records()?)?
+            );
         }
         Command::Benchmark { corpus, queries } => run_benchmark(&corpus, &queries)?,
     }

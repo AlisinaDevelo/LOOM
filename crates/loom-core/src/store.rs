@@ -2,7 +2,10 @@ use std::{
     collections::HashSet,
     fs,
     path::{Path, PathBuf},
-    sync::{Mutex, MutexGuard},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Mutex, MutexGuard,
+    },
 };
 
 use chrono::Utc;
@@ -13,8 +16,8 @@ use crate::{
     domain::{
         ArtifactObservation, EvidenceAnchor, FtsHealthReport, FtsRepairReport,
         IndexCancellationToken, IndexCheckpoint, IndexFailure, IndexReport, LibraryStats,
-        ObservationReport, PassageObservation, SearchHit, SearchRequest, SourceRootInfo,
-        SourceRootStatus,
+        ObservationReport, OcrPurgeReport, OcrStatus, PassageObservation, SearchHit, SearchRequest,
+        SourceRootInfo, SourceRootStatus,
     },
     error::{io_error, LoomError, Result},
     ingest::{
@@ -22,11 +25,13 @@ use crate::{
         PDF_EXTRACTOR_VERSION,
     },
     observe::{self, ObservationEvent},
+    ocr::IMAGE_OCR_EXTRACTOR_ID,
     search::{collision_free_markers, compile_query, project_fts_evidence},
 };
 
-const SCHEMA_VERSION: i64 = 4;
-const PREVIOUS_SCHEMA_VERSION: i64 = 3;
+const SCHEMA_VERSION: i64 = 5;
+const PREVIOUS_SCHEMA_VERSION: i64 = 4;
+const PREVIOUS_PREVIOUS_SCHEMA_VERSION: i64 = 3;
 const LEGACY_SCHEMA_VERSION: i64 = 2;
 const LEGACY_SCHEMA_TABLES: &[&str] = &[
     "source_roots",
@@ -45,6 +50,8 @@ const CURRENT_SCHEMA_TABLES: &[&str] = &[
     "relationships",
     "index_jobs",
 ];
+
+type VersionProjection = (String, String, String, String, Option<i64>, String, String);
 
 /// Resource boundaries applied to every ingestion request.
 #[derive(Debug, Clone, Copy)]
@@ -72,6 +79,7 @@ impl Default for LibraryLimits {
 pub struct Library {
     connection: Mutex<Connection>,
     limits: LibraryLimits,
+    ocr_enabled: AtomicBool,
 }
 
 impl Library {
@@ -98,9 +106,11 @@ impl Library {
     fn from_connection(mut connection: Connection, limits: LibraryLimits) -> Result<Self> {
         configure(&connection)?;
         migrate(&mut connection)?;
+        let ocr_enabled = load_ocr_enabled(&connection)?;
         Ok(Self {
             connection: Mutex::new(connection),
             limits,
+            ocr_enabled: AtomicBool::new(ocr_enabled),
         })
     }
 
@@ -418,11 +428,12 @@ impl Library {
                 units_processed_this_run += 1;
                 continue;
             }
-            match ingest::read_stable_with_limits(
+            match ingest::read_stable_with_limits_and_ocr(
                 &path,
                 &selected_path,
                 self.limits.max_file_bytes,
                 self.limits.max_pdf_pages,
+                self.ocr_enabled.load(Ordering::Acquire),
             ) {
                 Ok(document) => {
                     let bytes = document.byte_size;
@@ -461,6 +472,22 @@ impl Library {
                     }
                 }
                 Err(error) => {
+                    if matches!(error, LoomError::OcrDisabled) {
+                        report.skipped += 1;
+                        if let Err(checkpoint_error) =
+                            self.advance_index_job(&job.job_id, unit as u64 + 1)
+                        {
+                            report.failed += 1;
+                            report.failures.push(IndexFailure {
+                                source: path.display().to_string(),
+                                reason: format!(
+                                    "OCR disabled but checkpoint could not advance: {checkpoint_error}"
+                                ),
+                            });
+                        }
+                        units_processed_this_run += 1;
+                        continue;
+                    }
                     let reason = match self.mark_locator_missing_and_advance(
                         &root_id,
                         &locator,
@@ -512,10 +539,13 @@ impl Library {
         job_id: &str,
         next_unit: u64,
     ) -> Result<bool> {
-        let (extractor_id, extractor_version) = if document.media_type == "application/pdf" {
-            (PDF_EXTRACTOR_ID, PDF_EXTRACTOR_VERSION)
-        } else {
-            (EXTRACTOR_ID, EXTRACTOR_VERSION)
+        let (extractor_id, extractor_version) = match document.media_type {
+            "application/pdf" => (PDF_EXTRACTOR_ID, PDF_EXTRACTOR_VERSION),
+            media_type if media_type.starts_with("image/") => (
+                IMAGE_OCR_EXTRACTOR_ID,
+                crate::ocr::IMAGE_OCR_EXTRACTOR_VERSION,
+            ),
+            _ => (EXTRACTOR_ID, EXTRACTOR_VERSION),
         };
         self.index_document_with_extractor_and_checkpoint(
             root_id,
@@ -561,24 +591,23 @@ impl Library {
             .and_then(|value| value.to_str())
             .unwrap_or(&source_uri)
             .to_string();
-        let passages = document
-            .pdf_pages
-            .as_deref()
-            .map(|pages| {
-                ingest::split_pdf_passages(
-                    pages,
-                    self.limits.passage_target_chars,
-                    self.limits.passage_overlap_chars,
-                )
-            })
-            .unwrap_or_else(|| {
-                ingest::split_passages(
-                    &document.normalized_text,
-                    self.limits.passage_target_chars,
-                    self.limits.passage_overlap_chars,
-                )
-            });
+        let passages = if let Some(regions) = document.image_regions.as_deref() {
+            ingest::split_image_passages(regions)
+        } else if let Some(pages) = document.pdf_pages.as_deref() {
+            ingest::split_pdf_passages(
+                pages,
+                self.limits.passage_target_chars,
+                self.limits.passage_overlap_chars,
+            )
+        } else {
+            ingest::split_passages(
+                &document.normalized_text,
+                self.limits.passage_target_chars,
+                self.limits.passage_overlap_chars,
+            )
+        };
         let parse_warnings_json = serde_json::to_string(&document.parse_warnings)?;
+        let extraction_metadata_json = serde_json::to_string(&document.extraction_metadata)?;
         let page_count = document.page_count.map(|value| value as i64);
         let now = Utc::now().to_rfc3339();
         let mut connection = self.lock()?;
@@ -646,8 +675,9 @@ impl Library {
         let inserted = transaction.execute(
             "INSERT OR IGNORE INTO artifact_versions(
                 id, artifact_id, content_hash, hash_algorithm, byte_size, source_modified_ns,
-                extractor_id, extractor_version, parse_warnings_json, page_count, status, created_at
-             ) VALUES (?1, ?2, ?3, 'blake3', ?4, ?5, ?6, ?7, ?8, ?9, 'ready', ?10)",
+                extractor_id, extractor_version, parse_warnings_json, page_count,
+                extraction_metadata_json, status, created_at
+             ) VALUES (?1, ?2, ?3, 'blake3', ?4, ?5, ?6, ?7, ?8, ?9, ?10, 'ready', ?11)",
             params![
                 version_id,
                 artifact_id,
@@ -658,6 +688,7 @@ impl Library {
                 extractor_version,
                 parse_warnings_json,
                 page_count,
+                extraction_metadata_json,
                 now
             ],
         )?;
@@ -1051,10 +1082,10 @@ impl Library {
             .map_err(|source| io_error(requested_path, source))?;
         let source_uri = utf8_path(&source_path)?;
         let connection = self.lock()?;
-        let version: Option<(String, String, String, String, Option<i64>, String)> = connection
+        let version: Option<VersionProjection> = connection
             .query_row(
                 "SELECT v.id, v.content_hash, v.extractor_id, v.extractor_version,
-                        v.page_count, v.parse_warnings_json
+                        v.page_count, v.parse_warnings_json, v.extraction_metadata_json
                  FROM artifact_locators l
                  JOIN artifacts a ON a.id = l.artifact_id
                  JOIN artifact_versions v ON v.id = a.active_version_id
@@ -1069,6 +1100,7 @@ impl Library {
                         row.get(3)?,
                         row.get(4)?,
                         row.get(5)?,
+                        row.get(6)?,
                     ))
                 },
             )
@@ -1080,8 +1112,10 @@ impl Library {
             extractor_version,
             page_count,
             parse_warnings_json,
+            extraction_metadata_json,
         ) = version.ok_or_else(|| LoomError::ArtifactNotFound(source_uri.clone()))?;
         let parse_warnings = serde_json::from_str(&parse_warnings_json)?;
+        let extraction_metadata = serde_json::from_str(&extraction_metadata_json)?;
         let passages = {
             let mut statement = connection.prepare_cached(
                 "SELECT ordinal, text_hash, locator_json
@@ -1119,8 +1153,58 @@ impl Library {
             extractor_version,
             page_count: page_count.and_then(|value| u32::try_from(value).ok()),
             parse_warnings,
+            extraction_metadata,
             passages,
         })
+    }
+
+    /// Returns the persisted local OCR policy and the number of derived OCR records.
+    pub fn ocr_status(&self) -> Result<OcrStatus> {
+        let connection = self.lock()?;
+        let derived_versions = count_where(
+            &connection,
+            "artifact_versions",
+            "extractor_id = 'loom.ocr'",
+        )?;
+        let derived_passages = count_where(
+            &connection,
+            "passages",
+            "artifact_version_id IN (SELECT id FROM artifact_versions WHERE extractor_id = 'loom.ocr')",
+        )?;
+        Ok(OcrStatus {
+            enabled: self.ocr_enabled.load(Ordering::Acquire),
+            derived_versions,
+            derived_passages,
+        })
+    }
+
+    /// Enables or disables image OCR. Disabling is destructive only to derived OCR records: the
+    /// original image locator and bytes remain untouched and can be re-indexed after re-enabling.
+    pub fn set_ocr_enabled(&self, enabled: bool) -> Result<OcrPurgeReport> {
+        let mut connection = self.lock()?;
+        let transaction = connection.transaction()?;
+        transaction.execute(
+            "INSERT INTO schema_meta(key, value) VALUES ('ocr_enabled', ?1)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            [if enabled { "1" } else { "0" }],
+        )?;
+        let report = if enabled {
+            OcrPurgeReport::default()
+        } else {
+            purge_ocr_records_transaction(&transaction)?
+        };
+        transaction.commit()?;
+        self.ocr_enabled.store(enabled, Ordering::Release);
+        Ok(report)
+    }
+
+    /// Deletes all derived OCR versions/passages while retaining source locators and bytes.
+    pub fn purge_ocr_records(&self) -> Result<OcrPurgeReport> {
+        let mut connection = self.lock()?;
+        let transaction = connection.transaction()?;
+        let report = purge_ocr_records_transaction(&transaction)?;
+        transaction.commit()?;
+        Ok(report)
     }
 
     /// Compares canonical passage content with the derived FTS5 vocabulary and row coverage.
@@ -1282,7 +1366,10 @@ fn migrate(connection: &mut Connection) -> Result<()> {
     if let Some(version) = existing_version {
         if !matches!(
             version,
-            SCHEMA_VERSION | PREVIOUS_SCHEMA_VERSION | LEGACY_SCHEMA_VERSION
+            SCHEMA_VERSION
+                | PREVIOUS_SCHEMA_VERSION
+                | PREVIOUS_PREVIOUS_SCHEMA_VERSION
+                | LEGACY_SCHEMA_VERSION
         ) {
             return Err(LoomError::UnsupportedSchemaVersion(version.to_string()));
         }
@@ -1340,6 +1427,8 @@ fn migrate(connection: &mut Connection) -> Result<()> {
             parse_warnings_json TEXT NOT NULL DEFAULT '[]'
               CHECK(json_valid(parse_warnings_json)),
             page_count INTEGER CHECK(page_count IS NULL OR page_count >= 0),
+            extraction_metadata_json TEXT NOT NULL DEFAULT '{}'
+              CHECK(json_valid(extraction_metadata_json)),
             status TEXT NOT NULL CHECK(status IN ('ready', 'failed', 'superseded')),
             created_at TEXT NOT NULL,
             UNIQUE(artifact_id, content_hash, extractor_id, extractor_version)
@@ -1411,10 +1500,9 @@ fn migrate(connection: &mut Connection) -> Result<()> {
             INSERT INTO passages_fts(rowid, text) VALUES (new.rowid, new.text);
          END;",
     )?;
-    if matches!(
-        existing_version,
-        Some(PREVIOUS_SCHEMA_VERSION | LEGACY_SCHEMA_VERSION)
-    ) {
+    if existing_version.is_some_and(|version| {
+        version == PREVIOUS_PREVIOUS_SCHEMA_VERSION || version == LEGACY_SCHEMA_VERSION
+    }) {
         transaction.execute_batch(
             "ALTER TABLE artifact_versions
                 ADD COLUMN parse_warnings_json TEXT NOT NULL DEFAULT '[]'
@@ -1423,10 +1511,22 @@ fn migrate(connection: &mut Connection) -> Result<()> {
                 ADD COLUMN page_count INTEGER CHECK(page_count IS NULL OR page_count >= 0);",
         )?;
     }
+    if existing_version.is_some_and(|version| version < SCHEMA_VERSION) {
+        transaction.execute_batch(
+            "ALTER TABLE artifact_versions
+                ADD COLUMN extraction_metadata_json TEXT NOT NULL DEFAULT '{}'
+                  CHECK(json_valid(extraction_metadata_json));",
+        )?;
+    }
     transaction.execute(
         "INSERT INTO schema_meta(key, value) VALUES ('schema_version', ?1)
          ON CONFLICT(key) DO UPDATE SET value = excluded.value",
         [SCHEMA_VERSION.to_string()],
+    )?;
+    transaction.execute(
+        "INSERT INTO schema_meta(key, value) VALUES ('ocr_enabled', '1')
+         ON CONFLICT(key) DO NOTHING",
+        [],
     )?;
     transaction.commit()?;
     connection.execute_batch("PRAGMA trusted_schema = OFF;")?;
@@ -1507,8 +1607,12 @@ fn validate_schema_shape(connection: &Connection, version: i64) -> Result<()> {
         ("relationships", "created_at"),
     ]
     .into_iter()
-    .chain((version == SCHEMA_VERSION).then_some(("artifact_versions", "parse_warnings_json")))
-    .chain((version == SCHEMA_VERSION).then_some(("artifact_versions", "page_count")))
+    .chain(
+        (version >= PREVIOUS_SCHEMA_VERSION)
+            .then_some(("artifact_versions", "parse_warnings_json")),
+    )
+    .chain((version >= PREVIOUS_SCHEMA_VERSION).then_some(("artifact_versions", "page_count")))
+    .chain((version >= SCHEMA_VERSION).then_some(("artifact_versions", "extraction_metadata_json")))
     .chain((version != LEGACY_SCHEMA_VERSION).then_some(("index_jobs", "id")))
     .chain((version != LEGACY_SCHEMA_VERSION).then_some(("index_jobs", "source_root_id")))
     .chain((version != LEGACY_SCHEMA_VERSION).then_some(("index_jobs", "selection_locator")))
@@ -1731,6 +1835,13 @@ fn insert_passages(
                 line_start,
                 line_end,
                 ..
+            }
+            | EvidenceAnchor::ImageRegion {
+                char_start,
+                char_end,
+                line_start,
+                line_end,
+                ..
             } => (char_start, char_end, line_start, line_end),
         };
         statement.execute(params![
@@ -1754,6 +1865,51 @@ fn count(connection: &Connection, table: &str) -> Result<u64> {
     let sql = format!("SELECT COUNT(*) FROM {table}");
     let value: i64 = connection.query_row(&sql, [], |row| row.get(0))?;
     Ok(value.max(0) as u64)
+}
+
+fn count_where(connection: &Connection, table: &str, predicate: &str) -> Result<u64> {
+    let sql = format!("SELECT COUNT(*) FROM {table} WHERE {predicate}");
+    let value: i64 = connection.query_row(&sql, [], |row| row.get(0))?;
+    Ok(value.max(0) as u64)
+}
+
+fn purge_ocr_records_transaction(transaction: &Transaction<'_>) -> Result<OcrPurgeReport> {
+    let artifacts_affected: i64 = transaction.query_row(
+        "SELECT COUNT(DISTINCT artifact_id) FROM artifact_versions WHERE extractor_id = ?1",
+        [IMAGE_OCR_EXTRACTOR_ID],
+        |row| row.get(0),
+    )?;
+    let versions_deleted: i64 = transaction.query_row(
+        "SELECT COUNT(*) FROM artifact_versions WHERE extractor_id = ?1",
+        [IMAGE_OCR_EXTRACTOR_ID],
+        |row| row.get(0),
+    )?;
+    let passages_deleted: i64 = transaction.query_row(
+        "SELECT COUNT(*) FROM passages WHERE artifact_version_id IN
+            (SELECT id FROM artifact_versions WHERE extractor_id = ?1)",
+        [IMAGE_OCR_EXTRACTOR_ID],
+        |row| row.get(0),
+    )?;
+    transaction.execute(
+        "DELETE FROM artifact_versions WHERE extractor_id = ?1",
+        [IMAGE_OCR_EXTRACTOR_ID],
+    )?;
+    Ok(OcrPurgeReport {
+        artifacts_affected: artifacts_affected.max(0) as u64,
+        versions_deleted: versions_deleted.max(0) as u64,
+        passages_deleted: passages_deleted.max(0) as u64,
+    })
+}
+
+fn load_ocr_enabled(connection: &Connection) -> Result<bool> {
+    let value: Option<String> = connection
+        .query_row(
+            "SELECT value FROM schema_meta WHERE key = 'ocr_enabled'",
+            [],
+            |row| row.get(0),
+        )
+        .optional()?;
+    Ok(value.as_deref() != Some("0"))
 }
 
 fn sql_i64(value: u64, field: &str) -> Result<i64> {
@@ -1885,7 +2041,7 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(schema_version, "4");
+        assert_eq!(schema_version, "5");
 
         let foreign_keys: i64 = connection
             .query_row("PRAGMA foreign_keys", [], |row| row.get(0))
@@ -1983,7 +2139,7 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(schema_version, "4");
+        assert_eq!(schema_version, "5");
         let checkpoint_table: bool = connection
             .query_row(
                 "SELECT EXISTS(

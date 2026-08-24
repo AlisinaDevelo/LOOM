@@ -24,6 +24,25 @@ pub enum EvidenceAnchor {
         line_start: u64,
         line_end: u64,
     },
+    /// Character and line offsets for one OCR region in an image's oriented pixel space.
+    ///
+    /// Coordinates are integer pixels after the EXIF orientation transform. Fixed-point fields
+    /// keep the canonical evidence record deterministic across FFI and database round-trips.
+    ImageRegion {
+        char_start: u64,
+        char_end: u64,
+        line_start: u64,
+        line_end: u64,
+        x: u32,
+        y: u32,
+        width: u32,
+        height: u32,
+        image_width: u32,
+        image_height: u32,
+        orientation: u8,
+        scale_milli: u32,
+        confidence_milli: u32,
+    },
 }
 
 /// One source that could not be indexed.
@@ -184,7 +203,24 @@ pub struct ArtifactObservation {
     pub extractor_version: String,
     pub page_count: Option<u32>,
     pub parse_warnings: Vec<String>,
+    pub extraction_metadata: serde_json::Value,
     pub passages: Vec<PassageObservation>,
+}
+
+/// Whether local image OCR is enabled and how many derived records currently exist.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OcrStatus {
+    pub enabled: bool,
+    pub derived_versions: u64,
+    pub derived_passages: u64,
+}
+
+/// Counts retained after deleting derived OCR records.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OcrPurgeReport {
+    pub artifacts_affected: u64,
+    pub versions_deleted: u64,
+    pub passages_deleted: u64,
 }
 
 /// A user search request crossing the Tauri IPC boundary.

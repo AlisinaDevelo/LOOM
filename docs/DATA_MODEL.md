@@ -1,20 +1,20 @@
 # Data model
 
-This document describes the schema currently created by LOOM schema version 4. The supported
+This document describes the schema currently created by LOOM schema version 5. The supported
 version matrix and migration policy are maintained in [SCHEMA_COMPATIBILITY.md](SCHEMA_COMPATIBILITY.md).
 
 ## Identity and source records
 
-| Table             | Purpose                                   | Important fields                                                                          |
-| ----------------- | ----------------------------------------- | ----------------------------------------------------------------------------------------- |
-| schema_meta       | Records the schema version                | key, value                                                                                |
-| source_roots      | An explicitly selected file or directory  | kind, unique locator, enabled, timestamps                                                 |
-| artifacts         | A logical source under a root             | title, media_type, state, active_version_id                                               |
-| artifact_locators | Resolves an artifact to a source location | kind, locator, active, first/last seen timestamps                                         |
-| artifact_versions | Immutable content observations            | content_hash, byte_size, mtime, extractor/version, page_count, parse_warnings_json, status|
-| passages          | Normalized text and exact anchors         | artifact version, ordinal, text, text hash, JSON locator, character/line offsets          |
-| relationships     | Reserved source-to-source relationships   | source/target artifacts, optional evidence passage, method, confidence                    |
-| index_jobs        | Durable progress for one root scan        | discovery fingerprint, total/next unit, state, error, timestamps                          |
+|Table|Purpose|Important fields|
+|---|---|---|
+|schema_meta|Records the schema version|key, value|
+|source_roots|An explicitly selected file or directory|kind, unique locator, enabled, timestamps|
+|artifacts|A logical source under a root|title, media_type, state, active_version_id|
+|artifact_locators|Resolves an artifact to a source location|kind, locator, active, first/last seen timestamps|
+|artifact_versions|Immutable content observations|content_hash, byte_size, mtime, extractor/version, page_count, parse_warnings_json, extraction_metadata_json, status|
+|passages|Normalized text and exact anchors|artifact version, ordinal, text, text hash, JSON locator, character/line/pixel offsets|
+|relationships|Reserved source-to-source relationships|source/target artifacts, optional evidence passage, method, confidence|
+|index_jobs|Durable progress for one root scan|discovery fingerprint, total/next unit, state, error, timestamps|
 
 The current extractor creates file locators. The schema also names URL and managed-copy locator
 kinds for future work; they are not part of the current supported input path.
@@ -49,6 +49,13 @@ page number plus local character/line offsets, so a result can be opened against
 without treating a concatenated text projection as a page identity. `artifact_versions.page_count`
 and `parse_warnings_json` retain parser/page outcomes; an empty text layer is an explicit bounded
 failure rather than a successful zero-evidence index.
+
+Image passages are one OCR region per passage. Their `image_region` anchor stores normalized-text
+offsets plus clamped top-left pixel bounds in the EXIF-oriented image space, the encoded image
+dimensions, EXIF orientation, fixed-point display scale, and OCR confidence. `extraction_metadata_json`
+records the local provider, provider version, model revision, dimensions, orientation, scale, and
+region count. The source image bytes remain at the original locator; LOOM stores only derived OCR
+text and metadata.
 
 ## Lexical index
 
@@ -95,10 +102,10 @@ erasure and a user-facing retention policy are not implemented.
 
 ## Compatibility
 
-The schema is currently version 3. LOOM validates the expected shape before changing a known
+The schema is currently version 5. LOOM validates the expected shape before changing a known
 database, refuses missing or unknown version markers, and fails malformed versions with a named
 reason. Version 2 databases migrate transactionally by adding the `index_jobs` table and recording
-version 3; the populated fixture and preservation checks are documented in
+version 5; the populated fixture and preservation checks are documented in
 [SCHEMA_COMPATIBILITY.md](SCHEMA_COMPATIBILITY.md). Pre-alpha version 1 databases are rejected
 because their content-version uniqueness contract omitted extractor identity; users of that
 unpublished format must rebuild the local index from source files. Changes to identity, content

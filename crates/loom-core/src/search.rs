@@ -169,18 +169,47 @@ pub(crate) fn project_fts_evidence(
             "highlight range exceeds the stored passage".into(),
         ));
     }
-    let (char_start, line_start, page) = match passage_anchor {
+    let (char_start, line_start, page, image) = match passage_anchor {
         EvidenceAnchor::Text {
             char_start,
             line_start,
             ..
-        } => (*char_start, *line_start, None),
+        } => (*char_start, *line_start, None, None),
         EvidenceAnchor::PdfPage {
             page,
             char_start,
             line_start,
             ..
-        } => (*char_start, *line_start, Some(*page)),
+        } => (*char_start, *line_start, Some(*page), None),
+        EvidenceAnchor::ImageRegion {
+            char_start,
+            line_start,
+            x,
+            y,
+            width,
+            height,
+            image_width,
+            image_height,
+            orientation,
+            scale_milli,
+            confidence_milli,
+            ..
+        } => (
+            *char_start,
+            *line_start,
+            None,
+            Some((
+                *x,
+                *y,
+                *width,
+                *height,
+                *image_width,
+                *image_height,
+                *orientation,
+                *scale_milli,
+                *confidence_milli,
+            )),
+        ),
     };
     let matched_line_start = line_start
         + characters[..first_start]
@@ -192,20 +221,53 @@ pub(crate) fn project_fts_evidence(
             .iter()
             .filter(|character| **character == '\n')
             .count() as u64;
-    let anchor = match page {
-        Some(page) => EvidenceAnchor::PdfPage {
+    let anchor = match (page, image) {
+        (Some(page), None) => EvidenceAnchor::PdfPage {
             page,
             char_start: char_start + first_start as u64,
             char_end: char_start + last_end as u64,
             line_start: matched_line_start,
             line_end: matched_line_end,
         },
-        None => EvidenceAnchor::Text {
+        (
+            None,
+            Some((
+                x,
+                y,
+                width,
+                height,
+                image_width,
+                image_height,
+                orientation,
+                scale_milli,
+                confidence_milli,
+            )),
+        ) => EvidenceAnchor::ImageRegion {
+            char_start: char_start + first_start as u64,
+            char_end: char_start + last_end as u64,
+            line_start: matched_line_start,
+            line_end: matched_line_end,
+            x,
+            y,
+            width,
+            height,
+            image_width,
+            image_height,
+            orientation,
+            scale_milli,
+            confidence_milli,
+        },
+        (None, None) => EvidenceAnchor::Text {
             char_start: char_start + first_start as u64,
             char_end: char_start + last_end as u64,
             line_start: matched_line_start,
             line_end: matched_line_end,
         },
+        (Some(_), Some(_)) => {
+            return Err(LoomError::EvidenceProjection(
+                "an evidence anchor cannot be both a PDF page and image region".into(),
+            ))
+        }
     };
     Ok((EvidenceExcerpt { segments }, anchor))
 }

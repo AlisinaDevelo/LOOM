@@ -8,6 +8,9 @@ fn main() {
             "revoke_source_root",
             "search",
             "library_stats",
+            "ocr_status",
+            "set_ocr_enabled",
+            "purge_ocr_records",
             "open_artifact",
         ]),
     ))

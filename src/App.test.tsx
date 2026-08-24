@@ -277,4 +277,24 @@ describe("desktop truth path", () => {
       expect(invokeMock).toHaveBeenCalledWith("revoke_source_root", { locator: "/Users/test/notes" });
     });
   });
+
+  it("exposes a local OCR disable and purge control", async () => {
+    invokeMock.mockImplementation(async (command) => {
+      if (command === "reconcile_approved_roots") return {};
+      if (command === "list_source_roots") return [];
+      if (command === "library_stats") return emptyStats;
+      if (command === "set_ocr_enabled") return { versions_deleted: 1, passages_deleted: 2 };
+      if (command === "ocr_status") return { enabled: false, derived_versions: 0, derived_passages: 0 };
+      throw new Error(`unexpected command: ${command}`);
+    });
+
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "Disable & purge" }));
+
+    await waitFor(() => {
+      expect(invokeMock).toHaveBeenCalledWith("set_ocr_enabled", { enabled: false });
+      expect(invokeMock).toHaveBeenCalledWith("ocr_status");
+    });
+    expect(await screen.findByText("disabled")).toBeInTheDocument();
+  });
 });
