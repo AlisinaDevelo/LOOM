@@ -682,11 +682,15 @@ def verify_live(manifest: dict[str, Any], snapshot: Snapshot, plan: dict[str, An
 
 def contains_unsafe_public_metadata(body: str) -> bool:
     unsafe_patterns = (
-        "forge-task:v1", "gpt-", "assigned:", "agent:", "model:",
-        "assigned agent", "assigned model", "routing metadata", ".forge/",
+        "forge-task:v1", "gpt-", "assigned:", "assigned agent", "assigned model",
+        "routing metadata", ".forge/",
     )
     lowered = body.lower()
-    return any(pattern in lowered for pattern in unsafe_patterns)
+    if any(pattern in lowered for pattern in unsafe_patterns):
+        return True
+    # A normal sentence such as "the threat model: covers redirects" is public
+    # prose, while routing fields are serialized at the beginning of a line.
+    return re.search(r"(?im)^\s*(?:agent|model)\s*:\s*", body) is not None
 
 
 def main() -> int:
