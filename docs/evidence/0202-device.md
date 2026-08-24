@@ -3,6 +3,9 @@
 This artifact records issue [#21](https://github.com/AlisinaDevelo/LOOM/issues/21) at
 implementation commit [`b98862e`](https://github.com/AlisinaDevelo/LOOM/commit/b98862ebc36c0e5b3222c6415335da4b4084621a).
 The viewer and native OCR provider were exercised on the target Mac, not in hosted CI.
+The viewer was merged through PR [#181](https://github.com/AlisinaDevelo/LOOM/pull/181); the
+current merged-main reproduction is recorded below. Issue #21 remains in `review` until
+independent approval and protected-main enforcement are available.
 
 ## Reproduction environment
 
@@ -72,5 +75,26 @@ document renderer. OCR confidence, coordinates, extractor identity, and source h
 so a user can open the original when visual inspection is required. No screenshot was used as
 acceptance evidence; any future UI capture must be cropped to the relevant result/viewer region.
 
-Merge remains gated on independent review and protected `main`; the target repository currently
-reports `main` unprotected, so no self-merge is claimed here.
+The post-merge reproduction below satisfies the code and target-device evidence portion. Merge
+remains gated on independent approval and protected `main`; the target repository currently
+reports `main` unprotected. Future desktop captures must be cropped to the relevant result/viewer
+region.
+
+## Merged-main reproduction
+
+The same target-device harness was run against runtime-tested merged `main` commit
+`eee1236710b98375e86b12187d545ed451ee2b7c` on the Mac specified above. The current main tip
+`e5bcf782e0c5ea3efce27c7b3625fde50f6e25b9` adds only documentation and roadmap metadata after
+that runtime-tested commit; no evidence-viewer source changed.
+
+- Verification directory: `/tmp/loom-0110-main-device.QLkKl1`
+- Harness summary SHA-256: `45bc997dcb26b8bc6cbd63a09fa17aed6c5d4ae968ef349be473b0b034e94e70`
+- Commands SHA-256: `d840925fb008af9101dc3121870b79960c1b6924451df17a7851f2f6132bb209`
+- Log manifest: `/tmp/loom-0110-main-device.QLkKl1/log-sha256.txt`
+- Log manifest SHA-256: `ed539c48e8c9b648f0ae341ddf37f02107d5aacff5d5e2a19ae0d28612c57d64`
+
+The full local pipe passed. Its frontend tests covered verified PDF/image anchors, stale and
+changed originals, rotation/HiDPI projection, local command capabilities, and accessible result
+states; native Vision and PDF fixtures also passed. No hosted Actions or unavailable hardware
+substituted for this target-device evidence. The original path remains authoritative and future
+desktop captures must be cropped to the relevant evidence panel.
