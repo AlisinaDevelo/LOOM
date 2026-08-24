@@ -78,6 +78,34 @@ ranking, query expansion, and duplicate handling.
 These checks are observations of the current checkout, not a promise that every environment or
 future commit will pass.
 
+## Adversarial PDF extraction corpus
+
+`benchmarks/pdf-adversarial/corpus/` is a deterministic, synthetic CC0 corpus for the PDF
+ingestion boundary. It covers tagged text, multi-column layout, a text-layer ligature marker,
+rotated pages, encryption-declared input, malformed bytes, and image-only pages. The manifest
+records each fixture's SHA-256, expected page identity, warning list, extractor identity/version,
+and whether the expected result is indexed or explicitly unsupported. It contains no user data,
+copied publications, external fonts, or screenshots.
+
+Regenerate the corpus only when deliberately changing the generator version:
+
+```text
+python3 scripts/generate-pdf-adversarial-fixtures.py
+```
+
+Run the fail-closed contract against a built CLI:
+
+```text
+python3 scripts/pdf-adversarial.py --loom target/debug/loom
+```
+
+The runner validates the manifest/file set and every byte hash, indexes fixtures one at a time,
+checks extractor/page/warning projections and source-backed page anchors for indexed inputs,
+checks the expected failure class for unsupported inputs, and emits aggregate plus per-class
+completeness/failure counts. A changed or unlisted fixture is a hard failure. This is an
+ingestion regression contract, not a claim that the parser handles arbitrary production PDFs;
+rights-clean real-world corpora and multilingual/layout studies remain future work.
+
 ## Large-library performance gate
 
 Issue 0207 has a device-reproducible scale harness at
