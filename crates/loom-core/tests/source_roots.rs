@@ -9,6 +9,7 @@ fn persisted_root_reopens_and_reconciles_only_the_selected_locator() {
     let database = tempdir().unwrap();
     let original = root.path().join("original.md");
     fs::write(&original, "persisted root original marker").unwrap();
+    let original_bytes = fs::read(&original).unwrap();
 
     let library = Library::open(database.path().join("library.sqlite3")).unwrap();
     assert_eq!(library.index_path(root.path()).unwrap().indexed, 1);
@@ -44,6 +45,11 @@ fn persisted_root_reopens_and_reconciles_only_the_selected_locator() {
         search(&reopened, "relaunch reconciliation marker"),
         1,
         "relaunch must rescan only the persisted root"
+    );
+    assert_eq!(
+        fs::read(&original).unwrap(),
+        original_bytes,
+        "read-only scope reconciliation must not mutate source bytes"
     );
     assert_eq!(reopened.source_roots().unwrap()[0].locator, locator);
 }
