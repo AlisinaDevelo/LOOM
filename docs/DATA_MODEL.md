@@ -1,7 +1,7 @@
 # Data model
 
-This document describes the schema currently created by LOOM schema version 3. It is an
-implementation contract for the pre-alpha slice, not a stable migration guarantee.
+This document describes the schema currently created by LOOM schema version 3. The supported
+version matrix and migration policy are maintained in [SCHEMA_COMPATIBILITY.md](SCHEMA_COMPATIBILITY.md).
 
 ## Identity and source records
 
@@ -82,13 +82,16 @@ erasure and a user-facing retention policy are not implemented.
 
 ## Compatibility
 
-The schema is currently version 3. LOOM refuses missing, malformed, or unknown version markers;
-version 2 databases migrate transactionally by adding the `index_jobs` table and recording version
-3. Pre-alpha version 1 databases are rejected because their content-version uniqueness contract
-omitted extractor identity; users of that unpublished format must rebuild the local index from
-source files. Changes to identity, content hashing, anchors, or FTS5 maintenance require an
-ordered migration plan, updated fixtures, and an ADR. Future semantic indexes must reference
-canonical artifact versions and be rebuildable rather than becoming a second authority.
+The schema is currently version 3. LOOM validates the expected shape before changing a known
+database, refuses missing or unknown version markers, and fails malformed versions with a named
+reason. Version 2 databases migrate transactionally by adding the `index_jobs` table and recording
+version 3; the populated fixture and preservation checks are documented in
+[SCHEMA_COMPATIBILITY.md](SCHEMA_COMPATIBILITY.md). Pre-alpha version 1 databases are rejected
+because their content-version uniqueness contract omitted extractor identity; users of that
+unpublished format must rebuild the local index from source files. Changes to identity, content
+hashing, anchors, or FTS5 maintenance require an ordered migration plan, updated fixtures, and an
+ADR. Future semantic indexes must reference canonical artifact versions and be rebuildable rather
+than becoming a second authority.
 
 ## Durable indexing jobs
 

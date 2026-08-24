@@ -22,6 +22,23 @@ use crate::{
 
 const SCHEMA_VERSION: i64 = 3;
 const PREVIOUS_SCHEMA_VERSION: i64 = 2;
+const LEGACY_SCHEMA_TABLES: &[&str] = &[
+    "source_roots",
+    "artifacts",
+    "artifact_locators",
+    "artifact_versions",
+    "passages",
+    "relationships",
+];
+const CURRENT_SCHEMA_TABLES: &[&str] = &[
+    "source_roots",
+    "artifacts",
+    "artifact_locators",
+    "artifact_versions",
+    "passages",
+    "relationships",
+    "index_jobs",
+];
 
 /// Resource boundaries applied to every ingestion request.
 #[derive(Debug, Clone, Copy)]
@@ -1022,10 +1039,12 @@ fn configure(connection: &Connection) -> Result<()> {
 }
 
 fn migrate(connection: &mut Connection) -> Result<()> {
-    if let Some(version) = stored_schema_version(connection)? {
+    let existing_version = stored_schema_version(connection)?;
+    if let Some(version) = existing_version {
         if version != SCHEMA_VERSION && version != PREVIOUS_SCHEMA_VERSION {
             return Err(LoomError::UnsupportedSchemaVersion(version.to_string()));
         }
+        validate_schema_shape(connection, version)?;
     }
     let transaction = connection.transaction()?;
     transaction.execute_batch(
@@ -1150,6 +1169,116 @@ fn migrate(connection: &mut Connection) -> Result<()> {
     )?;
     transaction.commit()?;
     connection.execute_batch("PRAGMA trusted_schema = OFF;")?;
+    rebuild_fts(connection)?;
+    Ok(())
+}
+
+fn validate_schema_shape(connection: &Connection, version: i64) -> Result<()> {
+    let tables = if version == SCHEMA_VERSION {
+        CURRENT_SCHEMA_TABLES
+    } else {
+        LEGACY_SCHEMA_TABLES
+    };
+    for table in tables {
+        let exists: bool = connection.query_row(
+            "SELECT EXISTS(
+                SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1
+             )",
+            [table],
+            |row| row.get(0),
+        )?;
+        if !exists {
+            return Err(LoomError::UnsupportedSchemaVersion(format!(
+                "schema version {version} is missing required table `{table}`"
+            )));
+        }
+    }
+    for (table, column) in [
+        ("source_roots", "id"),
+        ("source_roots", "kind"),
+        ("source_roots", "locator"),
+        ("source_roots", "enabled"),
+        ("source_roots", "created_at"),
+        ("source_roots", "last_seen_at"),
+        ("artifacts", "id"),
+        ("artifacts", "source_root_id"),
+        ("artifacts", "title"),
+        ("artifacts", "media_type"),
+        ("artifacts", "state"),
+        ("artifacts", "active_version_id"),
+        ("artifacts", "created_at"),
+        ("artifacts", "last_seen_at"),
+        ("artifact_locators", "id"),
+        ("artifact_locators", "artifact_id"),
+        ("artifact_locators", "kind"),
+        ("artifact_locators", "locator"),
+        ("artifact_locators", "active"),
+        ("artifact_locators", "first_seen_at"),
+        ("artifact_locators", "last_seen_at"),
+        ("artifact_versions", "id"),
+        ("artifact_versions", "artifact_id"),
+        ("artifact_versions", "content_hash"),
+        ("artifact_versions", "hash_algorithm"),
+        ("artifact_versions", "byte_size"),
+        ("artifact_versions", "source_modified_ns"),
+        ("artifact_versions", "extractor_id"),
+        ("artifact_versions", "extractor_version"),
+        ("artifact_versions", "status"),
+        ("artifact_versions", "created_at"),
+        ("passages", "id"),
+        ("passages", "artifact_version_id"),
+        ("passages", "ordinal"),
+        ("passages", "text"),
+        ("passages", "text_hash"),
+        ("passages", "locator_json"),
+        ("passages", "char_start"),
+        ("passages", "char_end"),
+        ("passages", "line_start"),
+        ("passages", "line_end"),
+        ("passages", "created_at"),
+        ("relationships", "id"),
+        ("relationships", "source_artifact_id"),
+        ("relationships", "target_artifact_id"),
+        ("relationships", "kind"),
+        ("relationships", "evidence_passage_id"),
+        ("relationships", "confidence"),
+        ("relationships", "method"),
+        ("relationships", "created_at"),
+    ]
+    .into_iter()
+    .chain((version == SCHEMA_VERSION).then_some(("index_jobs", "id")))
+    .chain((version == SCHEMA_VERSION).then_some(("index_jobs", "source_root_id")))
+    .chain((version == SCHEMA_VERSION).then_some(("index_jobs", "selection_locator")))
+    .chain((version == SCHEMA_VERSION).then_some(("index_jobs", "discovery_fingerprint")))
+    .chain((version == SCHEMA_VERSION).then_some(("index_jobs", "total_units")))
+    .chain((version == SCHEMA_VERSION).then_some(("index_jobs", "next_unit")))
+    .chain((version == SCHEMA_VERSION).then_some(("index_jobs", "state")))
+    .chain((version == SCHEMA_VERSION).then_some(("index_jobs", "last_error")))
+    .chain((version == SCHEMA_VERSION).then_some(("index_jobs", "started_at")))
+    .chain((version == SCHEMA_VERSION).then_some(("index_jobs", "updated_at")))
+    .chain((version == SCHEMA_VERSION).then_some(("index_jobs", "completed_at")))
+    {
+        let exists: bool = connection.query_row(
+            "SELECT EXISTS(
+                SELECT 1 FROM pragma_table_info(?1) WHERE name = ?2
+             )",
+            rusqlite::params![table, column],
+            |row| row.get(0),
+        )?;
+        if !exists {
+            return Err(LoomError::UnsupportedSchemaVersion(format!(
+                "schema version {version} is missing required column `{table}.{column}`"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn rebuild_fts(connection: &Connection) -> Result<()> {
+    connection.execute(
+        "INSERT INTO passages_fts(passages_fts) VALUES ('rebuild')",
+        [],
+    )?;
     Ok(())
 }
 
@@ -1453,10 +1582,10 @@ mod tests {
         let database = directory.path().join("v2.sqlite3");
         let connection = rusqlite::Connection::open(&database).unwrap();
         connection
-            .execute_batch(
-                "CREATE TABLE schema_meta(key TEXT PRIMARY KEY, value TEXT NOT NULL) STRICT;
-                 INSERT INTO schema_meta(key, value) VALUES ('schema_version', '2');",
-            )
+            .execute_batch(include_str!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../tests/fixtures/schema-v2.sql"
+            )))
             .unwrap();
         drop(connection);
 

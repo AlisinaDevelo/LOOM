@@ -86,6 +86,7 @@ without private routing metadata.
 
 - [Architecture](docs/ARCHITECTURE.md)
 - [Data model](docs/DATA_MODEL.md)
+- [Schema compatibility](docs/SCHEMA_COMPATIBILITY.md)
 - [Privacy](docs/PRIVACY.md)
 - [Threat model](docs/THREAT_MODEL.md)
 - [Evaluation](docs/EVALUATION.md)
