@@ -1,8 +1,9 @@
 # LOOM 0102 device evidence
 
 This artifact records the target-device verification for the canonical SQLite artifact and passage
-model. Issue [#11](https://github.com/AlisinaDevelo/LOOM/issues/11) remains open until the same
-reproduction is rerun against the merged `main` SHA and the resulting evidence is linked there.
+model. The original implementation run is retained below for history; the merged-main reproduction
+now appears at the end of this artifact. Issue [#11](https://github.com/AlisinaDevelo/LOOM/issues/11)
+remains open until independent review and a protected-main policy are available.
 
 ## Device and toolchain
 
@@ -99,6 +100,32 @@ sha256:f561d56136ef6040f35bfb02e35cff7f39cc34633db9f0739990e5e490341fa8  (7,715 
 
 No user data, network service, live capture path, or unavailable hardware was substituted. This
 evidence covers the current local text/Markdown slice only; PDF/OCR/browser connectors and passive
-capture remain unsupported. The PR must be pushed, reviewed, and merged to protected `main`; the
-same commands and mixed-corpus reproduction must then be rerun against that merged SHA. The final
-merged SHA, post-merge log digests, and issue closure decision belong in the issue before closure.
+capture remain unsupported. The post-merge reproduction below satisfies the code and target-device
+evidence portion; independent review and a protected-main policy remain required before closure.
+
+## Merged-main reproduction
+
+The same target-device harness was rerun against runtime-tested merged `main` commit
+`eee1236710b98375e86b12187d545ed451ee2b7c` on the Mac specified above. The current main tip
+`58b4934abf43f74f00a42be706aae1e83def711e` adds only documentation and roadmap metadata after that
+runtime-tested commit; no canonical-store source changed.
+
+- Verification directory: `/tmp/loom-0110-main-device.QLkKl1`
+- Harness summary SHA-256: `45bc997dcb26b8bc6cbd63a09fa17aed6c5d4ae968ef349be473b0b034e94e70`
+- Commands SHA-256: `d840925fb008af9101dc3121870b79960c1b6924451df17a7851f2f6132bb209`
+- Log manifest: `/tmp/loom-0110-main-device.QLkKl1/log-sha256.txt`
+- Log manifest SHA-256: `ed539c48e8c9b648f0ae341ddf37f02107d5aacff5d5e2a19ae0d28612c57d64`
+
+The full local pipe passed: format, warnings-denied Clippy, workspace tests, Rust 1.88 MSRV
+check/tests, `npm ci`, `npm run check`, retrieval benchmark, semantic contract, local security
+scan, Tauri debug build, and mixed-corpus failure/recovery. The canonical-store fixture contract,
+migration, stable-ID, cascade, and source-boundary tests passed within the workspace/MSRV runs.
+The retrieval fixture indexed 3/3 sources with completeness 1.0, Recall@1/5 1.0, anchor precision
+1.0, false-positive rate 0.0, median latency 0.185 ms, and p95 latency 0.518041 ms.
+
+The mixed corpus again reported `discovered=4`, `indexed=2`, `skipped=1`, and one bounded-size
+failure on the first index; an outside-root symlink remained unreachable. Replacing the oversized
+file recovered it on the next index with `indexed=1`, `unchanged=2`, `skipped=1`, no failures, and
+final stats of 3 artifacts, 3 versions, 3 passages, and 250 indexed bytes. No hosted CI or
+unavailable hardware substituted for this target-device evidence. Any future desktop capture must
+be cropped to the relevant evidence panel.

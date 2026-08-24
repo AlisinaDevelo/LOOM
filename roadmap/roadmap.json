@@ -274,7 +274,7 @@
     {
       "id": "0102",
       "title": "Implement the canonical SQLite artifact and passage model",
-      "status": "backlog",
+      "status": "review",
       "quarter": "Q01",
       "phase": "v0.1 Thread",
       "workstream": "foundation",
