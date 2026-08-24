@@ -9,7 +9,7 @@
     "image/png",
     "saved_web"
   ],
-  "query_count": 10,
+  "query_count": 11,
   "thresholds": {
     "exact_source_recall_at_1": 0.85,
     "exact_source_recall_at_5": 0.85,
@@ -120,6 +120,24 @@
           "anchor": { "kind": "image_region", "char_start": 20, "char_end": 47, "line_start": 2, "line_end": 2, "x": 0, "y": 141, "width": 668, "height": 48, "image_width": 878, "image_height": 191, "orientation": 1, "scale_milli": 1000, "confidence_milli": 1000 }
         }
       ]
+    },
+    {
+      "path": "corpus/screenshot/scanned-page.png",
+      "content_hash": "blake3:b737123e1d16e8ccde727bf63c433114f6d72ae1259397a3e2be394dc40277d6",
+      "extractor_id": "loom.ocr",
+      "extractor_version": "0.1.0",
+      "passages": [
+        {
+          "ordinal": 0,
+          "text_hash": "blake3:61056af58a1aeee806c410db708408d3c13c948617e180dfcbfb443ed168f92d",
+          "anchor": { "kind": "image_region", "char_start": 0, "char_end": 24, "line_start": 1, "line_end": 1, "x": 0, "y": 0, "width": 573, "height": 46, "image_width": 575, "image_height": 143, "orientation": 1, "scale_milli": 1000, "confidence_milli": 1000 }
+        },
+        {
+          "ordinal": 1,
+          "text_hash": "blake3:eba5c322c093888956e82645ca0a6cf18215c50953b7ee034d72740ea6d0f057",
+          "anchor": { "kind": "image_region", "char_start": 25, "char_end": 53, "line_start": 2, "line_end": 2, "x": 0, "y": 101, "width": 573, "height": 40, "image_width": 575, "image_height": 143, "orientation": 1, "scale_milli": 1000, "confidence_milli": 1000 }
+        }
+      ]
     }
   ],
   "reported_metrics": [
@@ -138,5 +156,5 @@
     "database_bytes",
     "database_bytes_per_source_byte"
   ],
-  "notes": "Synthetic CC0 fixture with duplicate, paraphrase, date, screenshot/OCR, PDF, saved-web, and hard-negative cases. It is a baseline evaluation artifact, not a population-quality claim."
+  "notes": "Synthetic CC0 fixture with duplicate, paraphrase, date, screenshot/OCR, rasterized scanned-page, PDF, saved-web, and hard-negative cases. It is a baseline evaluation artifact, not a population-quality claim."
 }

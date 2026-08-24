@@ -46,7 +46,8 @@ measurement of this local run, not a performance target.
 
 `benchmarks/retrieval/v1/` extends the smoke contract without replacing it. The synthetic
 CC0 corpus covers local text, an exact duplicate, a date, a hard negative, a saved-web record,
-a two-page PDF, and a deliberately cropped screenshot with two OCR regions. The manifest stores
+a two-page PDF, a deliberately cropped screenshot, and a rasterized scanned-page stand-in, each
+with OCR/page evidence where applicable. The manifest stores
 content and passage hashes, extractor versions, page/region geometry, query alternatives, a
 negative query, and one paraphrase reformulation. The saved-web fixture is a Markdown stand-in
 with URL, capture time, and snapshot status; it is not a claim that LOOM currently archives every

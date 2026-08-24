@@ -10,7 +10,8 @@ The corpus contains seven deliberately boring artifacts:
 - a hard negative with overlapping vocabulary;
 - a saved-web Markdown stand-in carrying a URL, capture time, and snapshot status;
 - a two-page synthetic PDF with page anchors; and
-- a cropped PNG screenshot with two OCR regions.
+- a cropped PNG screenshot and a rasterized synthetic scanned-page stand-in, each
+  with two OCR regions.
 
 The screenshot is derived from the repository's synthetic OCR fixture. Its original
 non-background bounding box was `878x191` at `(x=84, y=170)`; `ocr-cropped.png` is
@@ -31,8 +32,8 @@ Positive queries may list an exact duplicate as an acceptable alternative. Negat
 queries must return no result. One positive query also has a paraphrase reformulation;
 the report scores whether the reformulation recovers the expected source and anchor.
 
-The report includes, overall and by source class (local text, PDF, saved web, and
-screenshot):
+The report includes, overall and by source class (local text, PDF, saved web,
+screenshot, and scanned page):
 
 - exact-source Recall@1 and Recall@5;
 - mean reciprocal rank (MRR) and anchor precision;

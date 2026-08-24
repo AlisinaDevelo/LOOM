@@ -6,7 +6,8 @@ Status: accepted for the v0.2 Needle evaluation work
 
 Keep the v0 text smoke benchmark as a backward-compatible regression and add a
 versioned v1 benchmark for the supported evidence classes: local text, PDF pages,
-saved-web records, and cropped screenshot/OCR regions. A benchmark query is a
+saved-web records, cropped screenshot/OCR regions, and a rasterized scanned-page
+stand-in. A benchmark query is a
 known-item recovery task. It names the expected artifact, an exact evidence anchor,
 and, where appropriate, an acceptable exact duplicate. A negative query is successful
 only when the search returns no result.
@@ -28,8 +29,10 @@ not imply real-world quality.
 
 The v1 screenshot fixture is a crop of the synthetic OCR fixture's non-background
 bounding box. The crop is stored as a rights-clean test asset so screenshot checks do
-not retain unrelated pixels. Saved-web coverage is currently a Markdown stand-in with
-URL, capture timestamp, and snapshot status; it does not claim HTML archiving parity.
+not retain unrelated pixels. A second cropped raster fixture represents a scanned page
+without claiming a scanned-PDF OCR implementation. Saved-web coverage is currently a
+Markdown stand-in with URL, capture timestamp, and snapshot status; it does not claim
+HTML archiving parity.
 
 ## Consequences
 
