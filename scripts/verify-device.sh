@@ -100,6 +100,7 @@ run_step rust-msrv-tests cargo +1.88.0 test -p loom-core --lib --tests -- --noca
 run_step npm-install npm ci
 run_step npm-check npm run check
 run_step retrieval-benchmark cargo run --locked -q -p loom-cli -- benchmark --corpus benchmarks/retrieval/v0/corpus --queries benchmarks/retrieval/v0/queries.jsonl
+run_step security-check bash scripts/security-check.sh
 run_step tauri-build npm run tauri build -- --debug --no-bundle
 run_mixed_corpus
 
