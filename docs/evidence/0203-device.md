@@ -2,6 +2,8 @@
 
 - Issue: [#22](https://github.com/AlisinaDevelo/LOOM/issues/22)
 - Implementation commit: d46dd803506d0a681bee451765e2276f37065432
+- Implementation PR: [#182](https://github.com/AlisinaDevelo/LOOM/pull/182)
+- Roadmap status: `review`; independent approval and protected-main enforcement remain pending.
 - Verification run: /tmp/loom-0203-device-final.mpz6X2
 - Verification status: PASS
 - Verification date: 2026-08-24
@@ -112,3 +114,17 @@ The full local pipe passed on this merged-main SHA, including rustfmt, warnings-
 workspace tests, Rust 1.88 MSRV checks/tests, npm checks, retrieval, semantic drop/rebuild,
 security, Tauri debug build, and mixed-corpus recovery. No screenshot was needed; any future
 desktop capture must be cropped to the relevant result/evidence panel.
+
+## Current main reconciliation
+
+The same target-device pipe is represented on the current main tip
+`e5bcf782e0c5ea3efce27c7b3625fde50f6e25b9`. The runtime-tested source commit remains
+`eee1236710b98375e86b12187d545ed451ee2b7c`; current main adds only documentation and roadmap
+metadata after that run, so no semantic implementation changed. The retained run directory is
+`/tmp/loom-0110-main-device.QLkKl1`, with summary SHA-256
+`45bc997dcb26b8bc6cbd63a09fa17aed6c5d4ae968ef349be473b0b034e94e70`, commands SHA-256
+`d840925fb008af9101dc3121870b79960c1b6924451df17a7851f2f6132bb209`, and log manifest SHA-256
+`ed539c48e8c9b648f0ae341ddf37f02107d5aacff5d5e2a19ae0d28612c57d64`. The local pipe passed the
+semantic drop/rebuild and fail-closed provider tests alongside the full retrieval, security,
+frontend, Tauri, and mixed-corpus checks. No hosted Actions or unavailable hardware substituted;
+future desktop captures must be cropped to the relevant evidence panel.

@@ -3,6 +3,9 @@
 This artifact records issue [#20](https://github.com/AlisinaDevelo/LOOM/issues/20) at
 implementation commit [`ce09aee`](https://github.com/AlisinaDevelo/LOOM/commit/ce09aee8a3d0e1d26f6252f8880de1656ea4e9ba).
 The OCR provider was exercised on the target Mac, not in hosted CI.
+The implementation was merged through PR [#180](https://github.com/AlisinaDevelo/LOOM/pull/180);
+the current merged-main reproduction is recorded below. Issue #20 remains in `review` until
+independent approval and protected-main enforcement are available.
 
 ## Reproduction environment
 
@@ -65,6 +68,26 @@ and image-only PDF rendering remain outside this issue. The database still conta
 and is not encrypted at rest. No screenshot was used as acceptance evidence; any future UI capture
 must be cropped to the relevant result/control.
 
-The issue is implementation-ready for review and stacked publication. Merge remains gated on an
-independent review and protected `main`; the target repository currently reports `main` unprotected,
-so no self-merge is claimed here.
+The issue is implementation-ready for review. The post-merge reproduction below satisfies the code
+and target-device evidence portion; independent approval and protected-main enforcement remain
+required. The target repository currently reports `main` unprotected. Future desktop captures must
+be cropped to the relevant result/control panel.
+
+## Merged-main reproduction
+
+The same target-device harness was run against runtime-tested merged `main` commit
+`eee1236710b98375e86b12187d545ed451ee2b7c` on the Mac specified above. The current main tip
+`e5bcf782e0c5ea3efce27c7b3625fde50f6e25b9` adds only documentation and roadmap metadata after
+that runtime-tested commit; no OCR source changed.
+
+- Verification directory: `/tmp/loom-0110-main-device.QLkKl1`
+- Harness summary SHA-256: `45bc997dcb26b8bc6cbd63a09fa17aed6c5d4ae968ef349be473b0b034e94e70`
+- Commands SHA-256: `d840925fb008af9101dc3121870b79960c1b6924451df17a7851f2f6132bb209`
+- Log manifest: `/tmp/loom-0110-main-device.QLkKl1/log-sha256.txt`
+- Log manifest SHA-256: `ed539c48e8c9b648f0ae341ddf37f02107d5aacff5d5e2a19ae0d28612c57d64`
+
+The full local pipe passed. Its workspace tests included native Vision OCR metadata/geometry,
+malformed-input recovery, derived-record purge/re-enable, and source-backed image-region results;
+the focused OCR contract also passed under Rust 1.88. No hosted Actions or unavailable hardware
+substituted for this target-device evidence. The database-derived OCR and non-macOS limitations
+remain explicit.
