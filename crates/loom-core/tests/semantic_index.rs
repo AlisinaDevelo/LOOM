@@ -30,7 +30,12 @@ fn semantic_rebuild_is_evidence_bound_and_repeatable() {
     assert_eq!(rebuilt.rebuilt_passages, canonical_stats.passages);
     assert_eq!(rebuilt.manifest.config.provider_id, "loom.hash-embedding");
     assert_eq!(rebuilt.manifest.config.dimension, 128);
+    assert_eq!(rebuilt.manifest.config.tokenizer, "unicode-alnum-lower-v1");
     assert_eq!(rebuilt.manifest.config.normalization, "l2");
+    assert_eq!(
+        rebuilt.manifest.config.build_parameters,
+        "hash-token=1.0;hash-bigram=0.5;vector=float32-le-v1"
+    );
     assert_eq!(rebuilt.manifest.config.index_revision, "semantic-v1");
 
     let healthy = library.semantic_status().unwrap();
@@ -147,7 +152,7 @@ fn incompatible_manifest_fails_closed_without_touching_canonical_rows() {
     let connection = Connection::open(&database).unwrap();
     connection
         .execute(
-            "UPDATE semantic_index_meta SET model_id = 'foreign-model' WHERE slot = 1",
+            "UPDATE semantic_index_meta SET tokenizer = 'foreign-tokenizer' WHERE slot = 1",
             [],
         )
         .unwrap();
@@ -165,4 +170,72 @@ fn incompatible_manifest_fails_closed_without_touching_canonical_rows() {
         Err(LoomError::SemanticIndexUnavailable(_))
     ));
     assert_eq!(library.stats().unwrap(), canonical_stats);
+}
+
+#[test]
+fn incompatible_build_parameters_fail_closed_without_touching_canonical_rows() {
+    let directory = tempdir().unwrap();
+    let source = directory.path().join("build-parameters.md");
+    let database = directory.path().join("library.sqlite3");
+    fs::write(&source, "build parameter compatibility marker\n").unwrap();
+    let library = Library::open(&database).unwrap();
+    library.index_path(&source).unwrap();
+    library.semantic_rebuild().unwrap();
+    let canonical_stats = library.stats().unwrap();
+    drop(library);
+
+    let connection = Connection::open(&database).unwrap();
+    connection
+        .execute(
+            "UPDATE semantic_index_meta SET build_parameters = 'foreign-build' WHERE slot = 1",
+            [],
+        )
+        .unwrap();
+    drop(connection);
+
+    let library = Library::open(&database).unwrap();
+    let status = library.semantic_status().unwrap();
+    assert!(!status.healthy);
+    assert!(status
+        .reason
+        .as_deref()
+        .is_some_and(|reason| reason.contains("provider manifest")));
+    assert!(matches!(
+        library.semantic_search("build parameter compatibility", 5),
+        Err(LoomError::SemanticIndexUnavailable(_))
+    ));
+    assert_eq!(library.stats().unwrap(), canonical_stats);
+}
+
+#[test]
+fn legacy_semantic_manifest_columns_are_upgraded_without_rebuilding_canonical_rows() {
+    let directory = tempdir().unwrap();
+    let source = directory.path().join("legacy-manifest.md");
+    let database = directory.path().join("library.sqlite3");
+    fs::write(&source, "legacy semantic manifest marker\n").unwrap();
+    let library = Library::open(&database).unwrap();
+    library.index_path(&source).unwrap();
+    library.semantic_rebuild().unwrap();
+    let canonical_stats = library.stats().unwrap();
+    drop(library);
+
+    let connection = Connection::open(&database).unwrap();
+    connection
+        .execute_batch(
+            "ALTER TABLE semantic_index_meta DROP COLUMN tokenizer;
+             ALTER TABLE semantic_index_meta DROP COLUMN build_parameters;
+             ALTER TABLE semantic_embeddings DROP COLUMN tokenizer;
+             ALTER TABLE semantic_embeddings DROP COLUMN build_parameters;",
+        )
+        .unwrap();
+    drop(connection);
+
+    let library = Library::open(&database).unwrap();
+    let status = library.semantic_status().unwrap();
+    assert!(status.healthy, "legacy semantic status: {status:?}");
+    assert_eq!(library.stats().unwrap(), canonical_stats);
+    assert_eq!(
+        status.manifest.unwrap().config.tokenizer,
+        "unicode-alnum-lower-v1"
+    );
 }

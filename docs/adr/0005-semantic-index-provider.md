@@ -7,23 +7,27 @@
 
 The semantic index must be useful for contract and recovery testing without making canonical
 evidence depend on a model download, a network provider, or an opaque vector service. The current
-MVP needs a rebuildable derivative with explicit provider identity, model identity, dimension,
-normalization, revision, passage hash, and source digest. It also needs a device measurement that
+MVP needs a rebuildable derivative with explicit provider identity, model identity, tokenizer,
+dimension, normalization, build parameters, revision, passage hash, and source digest. It also
+needs a device measurement that
 can be repeated on the target Mac before a neural provider is considered.
 
 ## Decision
 
-The first provider is loom.hash-embedding / hashed-tokens-v1. It lowercases Unicode
-alphanumeric tokens, hashes tokens and adjacent bigrams with BLAKE3 into 128 signed buckets, and
-L2-normalizes the resulting little-endian f32 vector. Vectors are stored as SQLite BLOBs in the
-derived semantic_embeddings table and searched with a deterministic cosine scan ordered by score
-then passage ID. The current implementation is MPL-2.0 project code using the existing BLAKE3
-dependency; it downloads no model and makes no network request.
+The first provider is loom.hash-embedding / hashed-tokens-v1. Its tokenizer contract is
+`unicode-alnum-lower-v1`, and its build parameters are
+`hash-token=1.0;hash-bigram=0.5;vector=float32-le-v1`. It hashes tokens and adjacent bigrams with
+BLAKE3 into 128 signed buckets, then L2-normalizes the resulting little-endian f32 vector.
+Vectors are stored as SQLite BLOBs in the derived semantic_embeddings table and searched with a
+deterministic cosine scan ordered by score then passage ID. The current implementation is MPL-2.0
+project code using the existing BLAKE3 dependency; it downloads no model and makes no network
+request.
 
 Canonical artifacts, versions, passages, hashes, and anchors remain authoritative. The vector
 projection is disposable: it is rebuilt transactionally, checked against an ordered canonical
-passage digest, and can be dropped without changing lexical retrieval. A provider or model change
-must change the manifest and revision rather than mixing records.
+passage digest, and can be dropped without changing lexical retrieval. A provider, model,
+tokenizer, or build-parameter change must change the manifest and revision or be rejected rather
+than mixing records.
 
 ## Target-device measurement
 

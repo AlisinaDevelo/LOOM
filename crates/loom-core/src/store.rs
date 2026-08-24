@@ -59,7 +59,19 @@ const CURRENT_SCHEMA_TABLES: &[&str] = &[
 ];
 
 type VersionProjection = (String, String, String, String, Option<i64>, String, String);
-type SemanticMetaRow = (String, String, i64, String, String, String, i64, i64, i64);
+type SemanticMetaRow = (
+    String,
+    String,
+    String,
+    i64,
+    String,
+    String,
+    String,
+    String,
+    i64,
+    i64,
+    i64,
+);
 
 /// Resource boundaries applied to every ingestion request.
 #[derive(Debug, Clone, Copy)]
@@ -1580,9 +1592,9 @@ impl Library {
         transaction.execute("DELETE FROM semantic_index_meta", [])?;
         let mut insert = transaction.prepare(
             "INSERT INTO semantic_embeddings(
-                passage_id, passage_hash, provider_id, model_id, dimension,
-                normalization, index_revision, vector_blob, created_at
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                passage_id, passage_hash, provider_id, model_id, tokenizer, dimension,
+                normalization, build_parameters, index_revision, vector_blob, created_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
         )?;
         let now = Utc::now().to_rfc3339();
         let mut vector_bytes = 0_u64;
@@ -1599,8 +1611,10 @@ impl Library {
                 passage_hash,
                 config.provider_id,
                 config.model_id,
+                config.tokenizer,
                 sql_i64(u64::from(config.dimension), "semantic dimension")?,
                 config.normalization,
+                config.build_parameters,
                 config.index_revision,
                 encoded,
                 now,
@@ -1610,14 +1624,17 @@ impl Library {
         let passage_count = passages.len() as u64;
         transaction.execute(
             "INSERT INTO semantic_index_meta(
-                slot, provider_id, model_id, dimension, normalization, index_revision,
-                source_digest, canonical_passages, indexed_passages, vector_bytes, built_at
-             ) VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7, ?8, ?9)",
+                slot, provider_id, model_id, tokenizer, dimension, normalization,
+                build_parameters, index_revision, source_digest, canonical_passages,
+                indexed_passages, vector_bytes, built_at
+             ) VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?9, ?10, ?11)",
             params![
                 config.provider_id,
                 config.model_id,
+                config.tokenizer,
                 sql_i64(u64::from(config.dimension), "semantic dimension")?,
                 config.normalization,
+                config.build_parameters,
                 config.index_revision,
                 source_digest,
                 sql_i64(passage_count, "semantic passage count")?,
@@ -1668,8 +1685,9 @@ impl Library {
         let config = SemanticIndexConfig::default();
         let meta: Option<SemanticMetaRow> = connection
             .query_row(
-                "SELECT provider_id, model_id, dimension, normalization, index_revision,
-                        source_digest, canonical_passages, indexed_passages, vector_bytes
+                "SELECT provider_id, model_id, tokenizer, dimension, normalization,
+                        build_parameters, index_revision, source_digest, canonical_passages,
+                        indexed_passages, vector_bytes
                  FROM semantic_index_meta WHERE slot = 1",
                 [],
                 |row| {
@@ -1683,6 +1701,8 @@ impl Library {
                         row.get(6)?,
                         row.get(7)?,
                         row.get(8)?,
+                        row.get(9)?,
+                        row.get(10)?,
                     ))
                 },
             )
@@ -1695,14 +1715,16 @@ impl Library {
         )?;
         let invalid_vectors: i64 = connection.query_row(
             "SELECT COUNT(*) FROM semantic_embeddings
-             WHERE provider_id <> ?1 OR model_id <> ?2 OR dimension <> ?3
-                OR normalization <> ?4 OR index_revision <> ?5
-                OR length(vector_blob) <> ?6",
+             WHERE provider_id <> ?1 OR model_id <> ?2 OR tokenizer <> ?3
+                OR dimension <> ?4 OR normalization <> ?5 OR build_parameters <> ?6
+                OR index_revision <> ?7 OR length(vector_blob) <> ?8",
             params![
                 config.provider_id,
                 config.model_id,
+                config.tokenizer,
                 sql_i64(u64::from(config.dimension), "semantic dimension")?,
                 config.normalization,
+                config.build_parameters,
                 config.index_revision,
                 sql_i64(u64::from(config.dimension) * 4, "semantic vector size")?,
             ],
@@ -1719,8 +1741,10 @@ impl Library {
         let Some((
             provider_id,
             model_id,
+            tokenizer,
             dimension,
             normalization,
+            build_parameters,
             index_revision,
             source_digest,
             stored_canonical,
@@ -1741,10 +1765,12 @@ impl Library {
         let stored_config = SemanticIndexConfig {
             provider_id,
             model_id,
+            tokenizer,
             dimension: u32::try_from(dimension).map_err(|_| {
                 LoomError::SemanticIndexIncompatible("manifest dimension is invalid".into())
             })?,
             normalization,
+            build_parameters,
             index_revision,
         };
         let manifest = SemanticIndexManifest {
@@ -2069,8 +2095,10 @@ fn ensure_semantic_schema(connection: &Connection) -> Result<()> {
             slot INTEGER PRIMARY KEY CHECK(slot = 1),
             provider_id TEXT NOT NULL,
             model_id TEXT NOT NULL,
+            tokenizer TEXT NOT NULL,
             dimension INTEGER NOT NULL CHECK(dimension > 0),
             normalization TEXT NOT NULL,
+            build_parameters TEXT NOT NULL,
             index_revision TEXT NOT NULL,
             source_digest TEXT NOT NULL,
             canonical_passages INTEGER NOT NULL CHECK(canonical_passages >= 0),
@@ -2084,8 +2112,10 @@ fn ensure_semantic_schema(connection: &Connection) -> Result<()> {
             passage_hash TEXT NOT NULL,
             provider_id TEXT NOT NULL,
             model_id TEXT NOT NULL,
+            tokenizer TEXT NOT NULL,
             dimension INTEGER NOT NULL CHECK(dimension > 0),
             normalization TEXT NOT NULL,
+            build_parameters TEXT NOT NULL,
             index_revision TEXT NOT NULL,
             vector_blob BLOB NOT NULL,
             created_at TEXT NOT NULL
@@ -2094,6 +2124,50 @@ fn ensure_semantic_schema(connection: &Connection) -> Result<()> {
          CREATE INDEX IF NOT EXISTS semantic_embeddings_revision
            ON semantic_embeddings(index_revision, passage_id);",
     )?;
+    ensure_semantic_column(
+        connection,
+        "semantic_index_meta",
+        "tokenizer",
+        "TEXT NOT NULL DEFAULT 'unicode-alnum-lower-v1'",
+    )?;
+    ensure_semantic_column(
+        connection,
+        "semantic_index_meta",
+        "build_parameters",
+        "TEXT NOT NULL DEFAULT 'hash-token=1.0;hash-bigram=0.5;vector=float32-le-v1'",
+    )?;
+    ensure_semantic_column(
+        connection,
+        "semantic_embeddings",
+        "tokenizer",
+        "TEXT NOT NULL DEFAULT 'unicode-alnum-lower-v1'",
+    )?;
+    ensure_semantic_column(
+        connection,
+        "semantic_embeddings",
+        "build_parameters",
+        "TEXT NOT NULL DEFAULT 'hash-token=1.0;hash-bigram=0.5;vector=float32-le-v1'",
+    )?;
+    Ok(())
+}
+
+fn ensure_semantic_column(
+    connection: &Connection,
+    table: &str,
+    column: &str,
+    definition: &str,
+) -> Result<()> {
+    let exists: bool = connection.query_row(
+        "SELECT EXISTS(
+            SELECT 1 FROM pragma_table_info(?1) WHERE name = ?2
+         )",
+        params![table, column],
+        |row| row.get(0),
+    )?;
+    if !exists {
+        let statement = format!("ALTER TABLE {table} ADD COLUMN {column} {definition}");
+        connection.execute(&statement, [])?;
+    }
     Ok(())
 }
 
