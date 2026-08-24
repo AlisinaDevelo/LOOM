@@ -153,10 +153,10 @@ pub(crate) fn decode_vector(bytes: &[u8], dimension: u32) -> Option<Vec<f32>> {
         return None;
     }
     let mut vector = Vec::with_capacity(expected / std::mem::size_of::<f32>());
-    for chunk in bytes.chunks_exact(std::mem::size_of::<f32>()) {
-        let mut value = [0_u8; std::mem::size_of::<f32>()];
-        value.copy_from_slice(chunk);
-        let value = f32::from_le_bytes(value);
+    let (chunks, remainder) = bytes.as_chunks::<4>();
+    debug_assert!(remainder.is_empty());
+    for chunk in chunks {
+        let value = f32::from_le_bytes(*chunk);
         if !value.is_finite() {
             return None;
         }
