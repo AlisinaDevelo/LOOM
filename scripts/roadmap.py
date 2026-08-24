@@ -28,7 +28,8 @@ FORGE_MARKER_RE = re.compile(r"<!-- forge-task:v1 id=(\d{4})(?:\s+[^>]*)? -->")
 MARKER_PREFIX = "<!-- loom-roadmap:v2 id="
 MANAGED_LABEL_PREFIXES = ("type:", "priority:", "horizon:", "area:", "phase:", "status:")
 API_VERSION = "2022-11-28"
-WRITE_DELAY_SECONDS = 1.1
+# Keep every serialized content mutation below GitHub's secondary-limit pressure.
+WRITE_DELAY_SECONDS = 8.0
 RELATIONSHIP_READ_DELAY_SECONDS = 0.1
 
 

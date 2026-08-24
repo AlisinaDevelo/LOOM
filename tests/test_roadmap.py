@@ -83,6 +83,9 @@ class RoadmapTests(unittest.TestCase):
         self.assertEqual("2026-08-23", self.manifest["program"]["starts_on"])
         self.assertEqual("2031-08-23", self.manifest["program"]["ends_on"])
 
+    def test_public_mutations_use_the_slow_single_writer_interval(self) -> None:
+        self.assertGreaterEqual(roadmap.WRITE_DELAY_SECONDS, 8.0)
+
     def test_every_issue_has_execution_metadata(self) -> None:
         for issue in self.manifest["issues"]:
             with self.subTest(issue=issue["id"]):
