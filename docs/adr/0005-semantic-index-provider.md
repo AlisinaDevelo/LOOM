@@ -28,18 +28,18 @@ must change the manifest and revision rather than mixing records.
 ## Target-device measurement
 
 The following run used the rights-clean retrieval corpus (3 active passages, 533 source bytes) on
-the target Mac documented in the 0203 evidence file. The debug loom binary was 18,835,720 bytes;
+the target Mac documented in the 0203 evidence file. The debug loom binary was 18,853,416 bytes;
 all provider candidates are compiled into the same binary, so this is a common binary footprint,
 not a claimed per-provider delta. Vector storage is 512 bytes per passage (1,536 bytes for this
 corpus).
 
 |Provider candidate|Dimension|Passages|Vector bytes|Embedding time|License/model constraint|
 |---|---:|---:|---:|---:|---|
-|BLAKE3 token + bigram hash (chosen)|128|3|1,536|596 us|MPL-2.0 project code; no model download|
-|BLAKE3 character trigram hash|128|3|1,536|1,223 us|MPL-2.0 project code; no model download|
-|BLAKE3 token-count hash|128|3|1,536|221 us|MPL-2.0 project code; no model download|
+|BLAKE3 token + bigram hash (chosen)|128|3|1,536|600 us|MPL-2.0 project code; no model download|
+|BLAKE3 character trigram hash|128|3|1,536|2,916 us|MPL-2.0 project code; no model download|
+|BLAKE3 token-count hash|128|3|1,536|235 us|MPL-2.0 project code; no model download|
 
-The timed rebuild, including the local CLI process, took 0.62 s with a 13,352,960-byte maximum
+The timed rebuild, including the local CLI process, took 0.95 s with a 13,336,576-byte maximum
 resident set size on this run. These are footprint and execution measurements, not semantic
 quality results. The benchmark does not claim that the hash baseline beats a neural model.
 
