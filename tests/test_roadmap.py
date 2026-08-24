@@ -183,6 +183,9 @@ class RoadmapTests(unittest.TestCase):
         for body in ("agent: planner", "model: local-encoder", "Assigned agent: private", "Assigned model: private"):
             self.assertTrue(roadmap.contains_unsafe_public_metadata(body))
 
+    def test_public_metadata_detector_allows_normal_threat_model_prose(self) -> None:
+        self.assertFalse(roadmap.contains_unsafe_public_metadata("The threat model: covers redirects."))
+
 
 if __name__ == "__main__":
     unittest.main()
