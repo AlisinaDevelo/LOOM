@@ -21,6 +21,9 @@ For a selected file or directory, the current path may store:
 - for an explicitly rebuilt semantic derivative, passage hashes, provider/model identity, vector
   dimensions/revision, and encoded local vectors;
 - local timestamps and indexing statistics.
+- for an explicitly selected Chrome or Firefox Netscape HTML export, the export path/hash, bookmark
+  folder, title, URL, browser timestamps, per-entry hash, and import/merge/conflict history. LOOM
+  does not fetch or store remote page content during this import.
 
 Search queries are used in memory for the current search operation and are not a field in the
 canonical schema. The current UI does not send them to a service.
@@ -58,6 +61,10 @@ or content to the selected external application.
   it does not upload, discard, or roll back a complete source version already committed locally.
 - A complete rescan hides removed or unreadable sources from search, but does not erase their stored
   historical passage text.
+- Bookmark import reads only the selected regular export file, rejects symlinks and executable URL
+  schemes, preserves source/export hashes and entry outcomes, and reports `remote_fetches: 0`.
+  Repeating the same export is idempotent; changed exports create a new import record and report
+  merges or duplicate-URL conflicts. No network client is part of this path.
 - Disabling OCR or invoking the OCR purge removes derived `loom.ocr` versions/passages but retains
   the original image locator and source bytes. Re-indexing after re-enabling recreates the derived
   records.

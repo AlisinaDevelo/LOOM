@@ -1,6 +1,6 @@
 # Data model
 
-This document describes the schema currently created by LOOM schema version 6. The supported
+This document describes the schema currently created by LOOM schema version 7. The supported
 version matrix and migration policy are maintained in [SCHEMA_COMPATIBILITY.md](SCHEMA_COMPATIBILITY.md).
 
 ## Identity and source records
@@ -14,12 +14,16 @@ version matrix and migration policy are maintained in [SCHEMA_COMPATIBILITY.md](
 |artifact_versions|Immutable content observations|content_hash, byte_size, mtime, extractor/version, page_count, parse_warnings_json, extraction_metadata_json, status|
 |passages|Normalized text and exact anchors|artifact version, ordinal, text, text hash, JSON locator, character/line/pixel offsets|
 |relationships|Typed source-to-source relationships|source/target artifacts, kind, origin, optional evidence passage, method, confidence, metadata, relationship schema version|
+|bookmark_imports|One source-faithful local browser export|selected export locator, Netscape format, BLAKE3 export hash, import timestamp|
+|bookmark_records|Current bookmark metadata and artifact identity|folder path, title, URL, browser timestamps, entry hash, first import|
+|bookmark_import_items|Per-import idempotence and merge history|import, bookmark, ordinal, entry hash, imported/unchanged/merged/conflict outcome|
 |index_jobs|Durable progress for one root scan|discovery fingerprint, total/next unit, state, error, timestamps|
 |semantic_index_meta|One disposable semantic-index manifest|provider/model/tokenizer, dimension, normalization, build parameters, revision, canonical digest/counts, vector bytes|
 |semantic_embeddings|Rebuildable vector per active passage|passage hash, provider/model/tokenizer, dimension, normalization, build parameters, revision, encoded vector bytes|
 
-The current extractor creates file locators. The schema also names URL and managed-copy locator
-kinds for future work; they are not part of the current supported input path.
+File ingestion creates file locators. The bookmark connector creates URL locators only for URLs
+present in an explicitly selected Netscape HTML export; it stores metadata and never resolves the
+URL. Managed-copy locators remain future work.
 
 An artifact is the logical identity of a source locator. A new content hash creates a new artifact
 version and can become the active version. Re-indexing unchanged bytes with the same extractor
@@ -74,6 +78,22 @@ The core exposes a bounded relationship listing that joins both endpoint artifac
 source URI, version ID, content hash, title, media type, and lifecycle state. The desktop viewer
 uses that projection to traverse a verified result to its related source and current version without
 introducing a graph database or treating inferred edges as confirmed facts.
+
+## Bookmark records
+
+`bookmark_imports` records one local Chrome or Firefox Netscape HTML export by its canonical
+selected-file locator, format, BLAKE3 content hash, and import time. The hash/locator/format tuple
+is unique, so repeating an unchanged export returns an `unchanged` report without writing another
+import. The parser is metadata-only: it preserves folder path, title, URL, `ADD_DATE`, and
+`LAST_MODIFIED`, rejects executable URL schemes, and never performs a network request.
+
+`bookmark_records` is the current source-faithful view keyed by URL and folder path. Each record
+points to a searchable `text/x-bookmark` artifact and keeps its entry hash plus first import ID;
+`bookmark_import_items` records every observed ordinal and whether it was imported, unchanged,
+merged, or a duplicate-URL conflict. Bookmark artifact passages contain the title, URL, and folder
+as an inspectable text anchor, while extraction metadata records the export locator and
+`remote_fetch: false`. A changed export creates a new import and an immutable artifact version;
+older versions remain available to the canonical store.
 
 ## Lexical index
 
@@ -141,10 +161,11 @@ erasure and a user-facing retention policy are not implemented.
 
 ## Compatibility
 
-The schema is currently version 6. LOOM validates the expected shape before changing a known
+The schema is currently version 7. LOOM validates the expected shape before changing a known
 database, refuses missing or unknown version markers, and fails malformed versions with a named
 reason. Version 2 databases migrate transactionally by adding the `index_jobs` table, relationship
-envelope defaults, and recording version 6; the populated fixture and preservation checks are
+envelope defaults, bookmark tables, and recording version 7; the populated fixture and preservation
+checks are
 documented in [SCHEMA_COMPATIBILITY.md](SCHEMA_COMPATIBILITY.md). Pre-alpha version 1 databases are
 rejected
 because their content-version uniqueness contract omitted extractor identity; users of that

@@ -160,6 +160,42 @@ describe("desktop truth path", () => {
     expect(screen.getByRole("button", { name: "Add a folder" })).toBeEnabled();
   });
 
+  it("imports a local bookmark export and reports source-faithful no-fetch results", async () => {
+    invokeMock.mockImplementation(async (command) => {
+      if (command === "reconcile_approved_roots") return {};
+      if (command === "list_source_roots") return [];
+      if (command === "library_stats") return emptyStats;
+      if (command === "capture_status") return { paused: false, excluded_apps: [], capture_root: "/tmp/loom-captures" };
+      if (command === "import_bookmarks") {
+        return {
+          import_id: "bookmark-import-1",
+          source_uri: "/Users/test/Bookmarks.html",
+          format: "netscape_html",
+          content_hash: "blake3:bookmark-export",
+          discovered: 2,
+          imported: 2,
+          unchanged: 0,
+          merged: 0,
+          conflicts: 0,
+          failed: 0,
+          remote_fetches: 0,
+          failures: [],
+        };
+      }
+      throw new Error(`unexpected command: ${command}`);
+    });
+
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "Import bookmarks" }));
+
+    await waitFor(() => {
+      expect(invokeMock).toHaveBeenCalledWith("import_bookmarks");
+    });
+    expect(await screen.findByRole("status")).toHaveTextContent(
+      "Imported 2; 0 unchanged; 0 merged; 0 duplicate URL conflicts. No URLs fetched.",
+    );
+  });
+
   it("focuses search from the global shortcut and announces the next action", async () => {
     invokeMock.mockImplementation(async (command) => {
       if (command === "reconcile_approved_roots") return {};

@@ -175,6 +175,26 @@ type CapturePurgeReport = {
   passages_deleted: number;
 };
 
+type BookmarkImportFailure = {
+  source: string;
+  reason: string;
+};
+
+type BookmarkImportReport = {
+  import_id: string;
+  source_uri: string;
+  format: string;
+  content_hash: string;
+  discovered: number;
+  imported: number;
+  unchanged: number;
+  merged: number;
+  conflicts: number;
+  failed: number;
+  remote_fetches: number;
+  failures: BookmarkImportFailure[];
+};
+
 const emptyStats: LibraryStats = {
   source_roots: 0,
   artifacts: 0,
@@ -425,7 +445,7 @@ function App() {
     derived_passages: 0,
   });
   const [searched, setSearched] = useState(false);
-  const [busy, setBusy] = useState<"index" | "search" | "scope" | "ocr" | "evidence" | null>(null);
+  const [busy, setBusy] = useState<"index" | "bookmarks" | "search" | "scope" | "ocr" | "evidence" | null>(null);
   const [sourceRoots, setSourceRoots] = useState<SourceRootInfo[]>([]);
   const [evidenceState, setEvidenceState] = useState<EvidenceState | null>(null);
   const [relationshipState, setRelationshipState] = useState<RelationshipState | null>(null);
@@ -613,6 +633,31 @@ function App() {
     } catch (caught) {
       setError(errorMessage(caught));
       setNotice("Indexing stopped safely.");
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const importBookmarks = async () => {
+    setError(null);
+    setBusy("bookmarks");
+    setNotice("Choose a local Chrome or Firefox bookmark export; LOOM will not fetch its URLs…");
+    try {
+      const report = await invoke<BookmarkImportReport | null>("import_bookmarks");
+      if (!report) {
+        setNotice("Bookmark selection cancelled. Nothing was imported.");
+        return;
+      }
+      setNotice(
+        `Imported ${report.imported}; ${report.unchanged} unchanged; ${report.merged} merged; ${report.conflicts} duplicate URL conflict${report.conflicts === 1 ? "" : "s"}. No URLs fetched.`,
+      );
+      if (report.failures.length) {
+        setError(report.failures.map((item) => `${item.source}: ${item.reason}`).join("\n"));
+      }
+      await refreshLibrary();
+    } catch (caught) {
+      setError(errorMessage(caught));
+      setNotice("Bookmark import stopped safely; no remote page content was fetched.");
     } finally {
       setBusy(null);
     }
@@ -807,7 +852,16 @@ function App() {
             <span aria-hidden="true">{busy === "index" ? "×" : "＋"}</span>
             {busy === "index" ? "Stop indexing" : "Add a folder"}
           </button>
+          <button
+            className="scope-action bookmark-import-button"
+            type="button"
+            onClick={importBookmarks}
+            disabled={busy !== null}
+          >
+            Import bookmarks
+          </button>
           <p className="scope-note">Text, Markdown, bounded PDF text, and local image OCR are supported.</p>
+          <p className="scope-note">Bookmark imports preserve folders, titles, URLs, and timestamps; URLs are never fetched.</p>
           <section className="ocr-controls" aria-labelledby="ocr-heading">
             <div className="section-label" id="ocr-heading">Image OCR</div>
             <div className="ocr-control-row">

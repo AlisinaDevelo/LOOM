@@ -293,6 +293,56 @@ pub struct CapturePurgeReport {
     pub passages_deleted: u64,
 }
 
+/// One metadata-only entry from a Netscape HTML bookmark export.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BookmarkEntry {
+    pub folder_path: String,
+    pub title: String,
+    pub url: String,
+    pub added_at: Option<String>,
+    pub modified_at: Option<String>,
+}
+
+/// Parsed bookmark export. The parser never resolves the URLs.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BookmarkExport {
+    pub format: String,
+    pub bookmarks: Vec<BookmarkEntry>,
+}
+
+/// Result of one local bookmark metadata import.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BookmarkImportReport {
+    pub import_id: String,
+    pub source_uri: String,
+    pub format: String,
+    pub content_hash: String,
+    pub discovered: u64,
+    pub imported: u64,
+    pub unchanged: u64,
+    pub merged: u64,
+    pub conflicts: u64,
+    pub failed: u64,
+    pub remote_fetches: u64,
+    pub failures: Vec<IndexFailure>,
+}
+
+/// Durable metadata for one current bookmark record.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BookmarkRecord {
+    pub id: String,
+    pub artifact_id: String,
+    pub import_id: String,
+    pub source_uri: String,
+    pub folder_path: String,
+    pub title: String,
+    pub url: String,
+    pub added_at: Option<String>,
+    pub modified_at: Option<String>,
+    pub entry_hash: String,
+    pub import_count: u64,
+}
+
 /// Stable relationship vocabulary. Unknown values are preserved so a newer connector can be
 /// opened by an older reader without silently changing the graph.
 #[derive(Debug, Clone, PartialEq, Eq)]

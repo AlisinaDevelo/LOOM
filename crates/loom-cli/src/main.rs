@@ -25,6 +25,13 @@ struct Arguments {
 enum Command {
     /// Index an explicitly selected text, Markdown, or PDF file or directory.
     Index { path: PathBuf },
+    /// Import a local Chrome/Firefox Netscape HTML bookmark export without fetching URLs.
+    ImportBookmarks { path: PathBuf },
+    /// List imported bookmark metadata and its original export provenance.
+    Bookmarks {
+        #[arg(long, default_value_t = 20)]
+        limit: u32,
+    },
     /// Search active passages and print evidence-backed hits.
     Search {
         query: String,
@@ -306,6 +313,20 @@ fn main() -> Result<(), Box<dyn Error>> {
             println!(
                 "{}",
                 serde_json::to_string_pretty(&library.index_path(path)?)?
+            );
+        }
+        Command::ImportBookmarks { path } => {
+            let library = Library::open(arguments.database)?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&library.import_bookmarks(path)?)?
+            );
+        }
+        Command::Bookmarks { limit } => {
+            let library = Library::open(arguments.database)?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&library.list_bookmarks(limit)?)?
             );
         }
         Command::Search { query, limit } => {

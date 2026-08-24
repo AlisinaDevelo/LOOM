@@ -6,6 +6,7 @@
   "permissions": [
     "core:default",
     "allow-index-selected-folder",
+    "allow-import-bookmarks",
     "allow-cancel-indexing",
     "allow-capture-status",
     "allow-set-capture-paused",

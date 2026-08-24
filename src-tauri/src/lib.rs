@@ -9,10 +9,10 @@ use std::{
 use blake3::Hash;
 use chrono::Utc;
 use loom_core::{
-    CaptureBounds, CaptureContext, CaptureMode, CapturePurgeReport, CaptureReport,
-    IndexCancellationToken, IndexReport, Library, LibraryStats, ObservationReport, OcrPurgeReport,
-    OcrStatus, OpenArtifactRequest, RelationshipView, ResolveEvidenceRequest, SearchHit,
-    SearchRequest, SourceRootInfo,
+    BookmarkImportReport, CaptureBounds, CaptureContext, CaptureMode, CapturePurgeReport,
+    CaptureReport, IndexCancellationToken, IndexReport, Library, LibraryStats, ObservationReport,
+    OcrPurgeReport, OcrStatus, OpenArtifactRequest, RelationshipView, ResolveEvidenceRequest,
+    SearchHit, SearchRequest, SourceRootInfo,
 };
 use serde::{Deserialize, Serialize};
 use tauri::{Manager, State};
@@ -99,6 +99,34 @@ async fn index_selected_folder(
         .take();
     result
         .map_err(|error| format!("index worker stopped: {error}"))?
+        .map(Some)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+async fn import_bookmarks(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+) -> CommandResult<Option<BookmarkImportReport>> {
+    let selected = tauri::async_runtime::spawn_blocking(move || {
+        app.dialog()
+            .file()
+            .set_title("Choose a Chrome or Firefox bookmark export")
+            .add_filter("Bookmark HTML", &["html", "htm"])
+            .blocking_pick_file()
+    })
+    .await
+    .map_err(|error| format!("bookmark picker stopped: {error}"))?;
+    let Some(selected) = selected else {
+        return Ok(None);
+    };
+    let path = selected
+        .into_path()
+        .map_err(|error| format!("could not read selected bookmark export: {error}"))?;
+    let library = Arc::clone(&state.library);
+    tauri::async_runtime::spawn_blocking(move || library.import_bookmarks(path))
+        .await
+        .map_err(|error| format!("bookmark import worker stopped: {error}"))?
         .map(Some)
         .map_err(|error| error.to_string())
 }
@@ -509,6 +537,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             index_selected_folder,
+            import_bookmarks,
             cancel_indexing,
             capture_status,
             set_capture_paused,
