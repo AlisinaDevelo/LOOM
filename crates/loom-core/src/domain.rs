@@ -1,3 +1,8 @@
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
+
 use serde::{Deserialize, Serialize};
 
 /// A versioned locator that lets the UI return to the evidence behind a result.
@@ -23,12 +28,47 @@ pub struct IndexFailure {
 /// A bounded summary of an explicit indexing operation.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IndexReport {
+    /// Stable durable identifier for this indexing run. A resumed run keeps the same ID.
+    pub run_id: String,
     pub discovered: u64,
+    /// Units processed in this invocation, including unchanged, skipped, and failed units.
+    pub attempted: u64,
     pub indexed: u64,
     pub unchanged: u64,
     pub skipped: u64,
+    pub failed: u64,
+    /// Units left unprocessed because cancellation was requested at a safe boundary.
+    pub cancelled: u64,
     pub bytes_read: u64,
     pub failures: Vec<IndexFailure>,
+}
+
+/// Cooperative cancellation shared by an indexing worker and its local UI/controller.
+///
+/// Cancellation is observed between bounded ingestion units. The current unit is allowed to
+/// finish its SQLite transaction so canonical artifacts and the durable checkpoint never expose
+/// a partially committed version.
+#[derive(Debug, Clone)]
+pub struct IndexCancellationToken(Arc<AtomicBool>);
+
+impl IndexCancellationToken {
+    pub fn new() -> Self {
+        Self(Arc::new(AtomicBool::new(false)))
+    }
+
+    pub fn cancel(&self) {
+        self.0.store(true, Ordering::Release);
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        self.0.load(Ordering::Acquire)
+    }
+}
+
+impl Default for IndexCancellationToken {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 /// Durable progress for the most recent indexing job for an explicitly selected root.

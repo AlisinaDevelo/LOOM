@@ -123,6 +123,8 @@ nav { display: grid; gap: 6px; }
 
 .add-source:hover:not(:disabled) { border-color: var(--thread); }
 .add-source:disabled { cursor: wait; opacity: 0.7; }
+.cancel-source { border-color: #6a3d35; color: #e6a895; }
+.cancel-source:hover:not(:disabled) { border-color: var(--warm); }
 .scope-note { margin: 10px 0 0; color: var(--faint); font-size: 10px; line-height: 1.45; }
 .scope-list { margin-top: 18px; padding-top: 14px; border-top: 1px solid var(--line); }
 .scope-list ul { display: grid; gap: 7px; margin: 10px 0 0; padding: 0; list-style: none; }

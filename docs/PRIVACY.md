@@ -44,6 +44,8 @@ or content to the selected external application.
 - No automatic cloud upload or third-party model processing occurs in the current path.
 - Revoking a saved scope disables future reconciliation and hides its active artifacts from search;
   canonical historical rows remain until a future retention/purge policy is implemented.
+- The desktop stop control requests cooperative cancellation at a bounded indexing-unit boundary;
+  it does not upload, discard, or roll back a complete source version already committed locally.
 - A complete rescan hides removed or unreadable sources from search, but does not erase their stored
   historical passage text.
 

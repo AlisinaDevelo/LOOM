@@ -8,9 +8,10 @@ mod search;
 mod store;
 
 pub use domain::{
-    ArtifactObservation, EvidenceAnchor, EvidenceExcerpt, EvidenceSegment, IndexCheckpoint,
-    IndexFailure, IndexReport, LibraryStats, ObservationReport, OpenArtifactRequest,
-    PassageObservation, SearchHit, SearchRequest, SourceRootInfo, SourceRootStatus,
+    ArtifactObservation, EvidenceAnchor, EvidenceExcerpt, EvidenceSegment, IndexCancellationToken,
+    IndexCheckpoint, IndexFailure, IndexReport, LibraryStats, ObservationReport,
+    OpenArtifactRequest, PassageObservation, SearchHit, SearchRequest, SourceRootInfo,
+    SourceRootStatus,
 };
 pub use error::{LoomError, Result};
 pub use observe::{coalesce_events, ObservationEvent, ObservationEventKind, ObservationPlan};

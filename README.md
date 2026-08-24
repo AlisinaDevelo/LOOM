@@ -25,6 +25,9 @@ content hash, excerpt, and exact text anchor with every result.
 - The CLI and Tauri desktop UI use the same Rust core and local database.
 - Saved desktop scopes persist as exact read-only locators. Missing, denied, moved, unsafe, and
   revoked roots are visible; re-selection is explicit and never broadens access.
+- Indexing reports a stable run ID, bounded attempted/indexed/skipped/failed/cancelled counts, and
+  can be stopped at a safe unit boundary; complete artifact versions remain searchable and the
+  durable checkpoint resumes the remainder.
 - The retrieval smoke fixture is the rights-clean synthetic corpus in benchmarks/retrieval/v0/.
 
 PDF/OCR extraction, embeddings, a semantic index, browser capture, cloud sync, accounts,

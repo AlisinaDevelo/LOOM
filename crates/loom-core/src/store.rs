@@ -11,8 +11,8 @@ use uuid::Uuid;
 
 use crate::{
     domain::{
-        ArtifactObservation, EvidenceAnchor, IndexCheckpoint, IndexFailure, IndexReport,
-        LibraryStats, ObservationReport, PassageObservation, SearchHit, SearchRequest,
+        ArtifactObservation, EvidenceAnchor, IndexCancellationToken, IndexCheckpoint, IndexFailure,
+        IndexReport, LibraryStats, ObservationReport, PassageObservation, SearchHit, SearchRequest,
         SourceRootInfo, SourceRootStatus,
     },
     error::{io_error, LoomError, Result},
@@ -99,7 +99,20 @@ impl Library {
 
     /// Indexes one explicitly selected regular file or directory.
     pub fn index_path(&self, selected_path: impl AsRef<Path>) -> Result<IndexReport> {
-        self.index_path_with_fault(selected_path, None)
+        let cancellation = IndexCancellationToken::new();
+        self.index_path_with_options(selected_path, &cancellation, None, None)
+    }
+
+    /// Indexes one explicitly selected regular file or directory with cooperative cancellation.
+    ///
+    /// The token is observed between bounded ingestion units. A cancellation request therefore
+    /// never interrupts a canonical artifact/version transaction midway through its commit.
+    pub fn index_path_with_cancellation(
+        &self,
+        selected_path: impl AsRef<Path>,
+        cancellation: &IndexCancellationToken,
+    ) -> Result<IndexReport> {
+        self.index_path_with_options(selected_path, cancellation, None, None)
     }
 
     /// Reconciles an in-scope event batch against the approved root's current bytes.
@@ -281,6 +294,28 @@ impl Library {
         selected_path: impl AsRef<Path>,
         interrupt_after_units: Option<usize>,
     ) -> Result<IndexReport> {
+        let cancellation = IndexCancellationToken::new();
+        self.index_path_with_options(selected_path, &cancellation, interrupt_after_units, None)
+    }
+
+    /// Deterministic cancellation hook used by integration fixtures.
+    #[doc(hidden)]
+    pub fn index_path_with_cancellation_after(
+        &self,
+        selected_path: impl AsRef<Path>,
+        cancel_after_units: usize,
+    ) -> Result<IndexReport> {
+        let cancellation = IndexCancellationToken::new();
+        self.index_path_with_options(selected_path, &cancellation, None, Some(cancel_after_units))
+    }
+
+    fn index_path_with_options(
+        &self,
+        selected_path: impl AsRef<Path>,
+        cancellation: &IndexCancellationToken,
+        interrupt_after_units: Option<usize>,
+        cancel_after_units: Option<usize>,
+    ) -> Result<IndexReport> {
         let requested_path = selected_path.as_ref();
         let requested_metadata = fs::symlink_metadata(requested_path)
             .map_err(|source| io_error(requested_path, source))?;
@@ -309,6 +344,7 @@ impl Library {
         )?;
 
         let mut report = IndexReport {
+            run_id: job.job_id.clone(),
             discovered: discovered.len() as u64,
             ..IndexReport::default()
         };
@@ -326,6 +362,16 @@ impl Library {
             .enumerate()
             .skip(job.next_unit as usize)
         {
+            if cancel_after_units.is_some_and(|limit| units_processed_this_run >= limit) {
+                cancellation.cancel();
+            }
+            if cancellation.is_cancelled() {
+                report.cancelled = report
+                    .discovered
+                    .saturating_sub(job.next_unit.saturating_add(report.attempted));
+                self.interrupt_index_job(&job.job_id, "cancelled by request")?;
+                return Ok(report);
+            }
             if interrupt_after_units.is_some_and(|limit| units_processed_this_run >= limit) {
                 let message = format!(
                     "fault injection after {} completed unit(s)",
@@ -334,9 +380,11 @@ impl Library {
                 self.interrupt_index_job(&job.job_id, &message)?;
                 return Err(LoomError::IndexInterrupted(job.job_id));
             }
+            report.attempted += 1;
             let locator = match utf8_path(&path) {
                 Ok(locator) => locator,
                 Err(error) => {
+                    report.failed += 1;
                     report.failures.push(IndexFailure {
                         source: path.display().to_string(),
                         reason: error.to_string(),
@@ -358,6 +406,7 @@ impl Library {
                         source: path.display().to_string(),
                         reason: format!("could not reconcile source state: {error}"),
                     });
+                    report.failed += 1;
                 }
                 units_processed_this_run += 1;
                 continue;
@@ -395,6 +444,7 @@ impl Library {
                                 source: path.display().to_string(),
                                 reason,
                             });
+                            report.failed += 1;
                         }
                     }
                 }
@@ -414,9 +464,17 @@ impl Library {
                         source: path.display().to_string(),
                         reason,
                     });
+                    report.failed += 1;
                 }
             }
             units_processed_this_run += 1;
+        }
+        if cancellation.is_cancelled() {
+            report.cancelled = report
+                .discovered
+                .saturating_sub(job.next_unit.saturating_add(report.attempted));
+            self.interrupt_index_job(&job.job_id, "cancelled by request")?;
+            return Ok(report);
         }
         if selected_path.is_dir() {
             if let Err(error) = self.reconcile_directory(&root_id, &seen) {

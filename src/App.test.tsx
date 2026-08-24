@@ -163,6 +163,44 @@ describe("desktop truth path", () => {
     expect(screen.getByText("1 original source ready to recover.")).toBeInTheDocument();
   });
 
+  it("requests bounded cancellation and reports the resumable run", async () => {
+    let resolveIndex: (report: unknown) => void = () => undefined;
+    const pendingIndex = new Promise((resolve) => {
+      resolveIndex = resolve;
+    });
+    invokeMock.mockImplementation(async (command) => {
+      if (command === "reconcile_approved_roots") return {};
+      if (command === "list_source_roots") return [];
+      if (command === "library_stats") return readyStats;
+      if (command === "index_selected_folder") return pendingIndex;
+      if (command === "cancel_indexing") return true;
+      throw new Error(`unexpected command: ${command}`);
+    });
+
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "Add a folder" }));
+    fireEvent.click(screen.getByRole("button", { name: "Stop indexing" }));
+
+    await waitFor(() => {
+      expect(invokeMock).toHaveBeenCalledWith("cancel_indexing");
+    });
+    resolveIndex({
+      run_id: "12345678-1234-4123-8123-123456789012",
+      discovered: 3,
+      attempted: 1,
+      indexed: 1,
+      unchanged: 0,
+      skipped: 0,
+      failed: 0,
+      cancelled: 2,
+      bytes_read: 82,
+      failures: [],
+    });
+    expect(await screen.findByRole("status")).toHaveTextContent(
+      "Cancelled run 12345678… after 1 unit; 2 remain resumable.",
+    );
+  });
+
   it("states when a valid search has no evidence instead of inventing an answer", async () => {
     invokeMock.mockImplementation(async (command) => {
       if (command === "reconcile_approved_roots") return {};
