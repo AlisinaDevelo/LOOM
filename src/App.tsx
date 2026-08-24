@@ -53,11 +53,12 @@ type SearchHit = {
     segments: Array<{ text: string; highlighted: boolean }>;
   };
   anchor: {
-    kind: "text";
+    kind: "text" | "pdf_page";
     char_start: number;
     char_end: number;
     line_start: number;
     line_end: number;
+    page?: number;
   };
   match_reason: string;
 };
@@ -281,7 +282,7 @@ function App() {
             <span aria-hidden="true">{busy === "index" ? "×" : "＋"}</span>
             {busy === "index" ? "Stop indexing" : "Add a folder"}
           </button>
-          <p className="scope-note">Text and Markdown only in this pre-alpha slice.</p>
+          <p className="scope-note">Text, Markdown, and bounded PDF text are supported locally.</p>
           <section className="scope-list" aria-labelledby="scope-heading">
             <div className="section-label" id="scope-heading">Saved scopes</div>
             {sourceRoots.length === 0 ? (
@@ -397,7 +398,9 @@ function App() {
                   <div className="result-body">
                     <div className="result-title-row">
                       <div>
-                        <span className="media-badge">{hit.media_type === "text/markdown" ? "MD" : "TXT"}</span>
+                        <span className="media-badge">
+                          {hit.media_type === "application/pdf" ? "PDF" : hit.media_type === "text/markdown" ? "MD" : "TXT"}
+                        </span>
                         <h3>{hit.title}</h3>
                       </div>
                       <button type="button" className="open-button" onClick={() => openArtifact(hit)}>
@@ -413,7 +416,10 @@ function App() {
                       )}
                     </blockquote>
                     <div className="evidence-row">
-                      <span>lines {hit.anchor.line_start}–{hit.anchor.line_end}</span>
+                      <span>
+                        {hit.anchor.kind === "pdf_page" ? `page ${hit.anchor.page} · ` : ""}
+                        lines {hit.anchor.line_start}–{hit.anchor.line_end}
+                      </span>
                       <span>score {hit.score.toFixed(4)}</span>
                       <span title={hit.content_hash}>{hit.content_hash.slice(0, 21)}…</span>
                       <span className="evidence-ok">evidence attached</span>

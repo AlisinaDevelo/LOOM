@@ -1,6 +1,7 @@
 use std::{
     fs::{self, File, Metadata, OpenOptions},
     io::Read,
+    panic::{catch_unwind, AssertUnwindSafe},
     path::{Path, PathBuf},
     time::SystemTime,
 };
@@ -17,6 +18,10 @@ use crate::{
 
 pub(crate) const EXTRACTOR_ID: &str = "loom.text";
 pub(crate) const EXTRACTOR_VERSION: &str = "0.1.0";
+pub(crate) const PDF_EXTRACTOR_ID: &str = "loom.pdf";
+pub(crate) const PDF_EXTRACTOR_VERSION: &str = "0.1.0";
+#[cfg(test)]
+const DEFAULT_MAX_PDF_PAGES: usize = 2_048;
 
 #[derive(Debug)]
 pub(crate) struct StableDocument {
@@ -25,6 +30,9 @@ pub(crate) struct StableDocument {
     pub(crate) modified_ns: Option<i64>,
     pub(crate) normalized_text: String,
     pub(crate) media_type: &'static str,
+    pub(crate) pdf_pages: Option<Vec<(u32, String)>>,
+    pub(crate) page_count: Option<u32>,
+    pub(crate) parse_warnings: Vec<String>,
 }
 
 #[derive(Debug)]
@@ -88,16 +96,46 @@ pub(crate) fn supported_media_type(path: &Path) -> Option<&'static str> {
     {
         Some("txt") => Some("text/plain"),
         Some("md" | "markdown") => Some("text/markdown"),
+        Some("pdf") => Some("application/pdf"),
         _ => None,
     }
 }
 
+#[cfg(test)]
 pub(crate) fn read_stable(path: &Path, root: &Path, max_bytes: u64) -> Result<StableDocument> {
+    read_stable_with_limits(path, root, max_bytes, DEFAULT_MAX_PDF_PAGES)
+}
+
+pub(crate) fn read_stable_with_limits(
+    path: &Path,
+    root: &Path,
+    max_bytes: u64,
+    max_pdf_pages: usize,
+) -> Result<StableDocument> {
     let media_type = supported_media_type(path)
         .ok_or_else(|| LoomError::UnsupportedSource(path.display().to_string()))?;
 
     let stable = read_stable_bytes(path, root, max_bytes)?;
     let raw_hash = format!("blake3:{}", blake3::hash(&stable.bytes).to_hex());
+    if media_type == "application/pdf" {
+        let extraction = extract_pdf_pages(&stable.bytes, path, max_pdf_pages)?;
+        let normalized_text = extraction
+            .pages
+            .iter()
+            .map(|(_, text)| text.as_str())
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        return Ok(StableDocument {
+            raw_hash,
+            byte_size: stable.bytes.len() as u64,
+            modified_ns: stable.modified_ns,
+            normalized_text,
+            media_type,
+            page_count: Some(extraction.page_count),
+            pdf_pages: Some(extraction.pages),
+            parse_warnings: extraction.warnings,
+        });
+    }
     let text = String::from_utf8(stable.bytes).map_err(|_| {
         LoomError::InvalidPath(format!("source is not UTF-8 text: {}", path.display()))
     })?;
@@ -108,7 +146,95 @@ pub(crate) fn read_stable(path: &Path, root: &Path, max_bytes: u64) -> Result<St
         modified_ns: stable.modified_ns,
         normalized_text,
         media_type,
+        pdf_pages: None,
+        page_count: None,
+        parse_warnings: Vec::new(),
     })
+}
+
+struct PdfExtraction {
+    page_count: u32,
+    pages: Vec<(u32, String)>,
+    warnings: Vec<String>,
+}
+
+fn extract_pdf_pages(bytes: &[u8], path: &Path, max_pdf_pages: usize) -> Result<PdfExtraction> {
+    let extraction = catch_unwind(AssertUnwindSafe(|| {
+        if bytes
+            .windows(b"/Encrypt".len())
+            .any(|window| window == b"/Encrypt")
+        {
+            return Err(LoomError::PdfExtraction(format!(
+                "encrypted PDF requires an explicit password and was not indexed: {}",
+                path.display()
+            )));
+        }
+        let document = pdf_extract::Document::load_mem(bytes).map_err(|error| {
+            LoomError::PdfExtraction(format!("malformed PDF at {}: {error}", path.display()))
+        })?;
+        if document.is_encrypted() {
+            return Err(LoomError::PdfExtraction(format!(
+                "encrypted PDF requires an explicit password and was not indexed: {}",
+                path.display()
+            )));
+        }
+        let page_numbers = document.get_pages().keys().copied().collect::<Vec<_>>();
+        if page_numbers.is_empty() {
+            return Err(LoomError::PdfExtraction(format!(
+                "PDF has no pages: {}",
+                path.display()
+            )));
+        }
+        if page_numbers.len() > max_pdf_pages {
+            return Err(LoomError::PdfExtraction(format!(
+                "PDF has {} pages, exceeding the {max_pdf_pages}-page limit: {}",
+                page_numbers.len(),
+                path.display()
+            )));
+        }
+
+        let mut pages = Vec::with_capacity(page_numbers.len());
+        let mut warnings = Vec::new();
+        for page in page_numbers {
+            let mut text = String::new();
+            let mut output = pdf_extract::PlainTextOutput::new(&mut text);
+            if let Err(error) = pdf_extract::output_doc_page(&document, &mut output, page) {
+                warnings.push(format!("page {page} extraction failed: {error}"));
+                pages.push((page, String::new()));
+                continue;
+            }
+            let text = normalize_pdf_text(&text);
+            if text.trim().is_empty() {
+                warnings.push(format!("page {page} contains no extractable text"));
+            }
+            pages.push((page, text));
+        }
+        if pages.iter().all(|(_, text)| text.trim().is_empty()) {
+            return Err(LoomError::PdfExtraction(format!(
+                "PDF contains no extractable text (image-only or unsupported fonts): {}",
+                path.display()
+            )));
+        }
+        Ok(PdfExtraction {
+            page_count: pages.len() as u32,
+            pages,
+            warnings,
+        })
+    }))
+    .map_err(|_| {
+        LoomError::PdfExtraction(format!(
+            "PDF parser rejected malformed input without a recoverable error: {}",
+            path.display()
+        ))
+    })?;
+    extraction
+}
+
+fn normalize_pdf_text(text: &str) -> String {
+    text.replace("\r\n", "\n")
+        .replace('\r', "\n")
+        .trim_matches('\n')
+        .to_string()
 }
 
 /// Reads a source through a no-follow descriptor and verifies that it stayed within `root`.
@@ -319,13 +445,46 @@ pub(crate) fn split_passages(
     drafts
 }
 
+pub(crate) fn split_pdf_passages(
+    pages: &[(u32, String)],
+    target_chars: usize,
+    overlap_chars: usize,
+) -> Vec<PassageDraft> {
+    let mut passages = Vec::new();
+    let mut ordinal = 0u32;
+    for (page, text) in pages {
+        for mut passage in split_passages(text, target_chars, overlap_chars) {
+            let EvidenceAnchor::Text {
+                char_start,
+                char_end,
+                line_start,
+                line_end,
+            } = passage.anchor
+            else {
+                unreachable!("text segmentation always emits text anchors")
+            };
+            passage.ordinal = ordinal;
+            passage.anchor = EvidenceAnchor::PdfPage {
+                page: *page,
+                char_start,
+                char_end,
+                line_start,
+                line_end,
+            };
+            ordinal = ordinal.saturating_add(1);
+            passages.push(passage);
+        }
+    }
+    passages
+}
+
 #[cfg(test)]
 mod tests {
     use std::fs;
 
     use tempfile::tempdir;
 
-    use super::{discover, read_stable_hash, split_passages};
+    use super::{discover, read_stable_hash, split_passages, split_pdf_passages};
     use crate::{EvidenceAnchor, LoomError};
 
     #[test]
@@ -350,7 +509,10 @@ mod tests {
                 char_start,
                 char_end,
                 ..
-            } = passage.anchor;
+            } = passage.anchor
+            else {
+                unreachable!("text segmentation always emits text anchors")
+            };
             let recovered: String = text
                 .chars()
                 .skip(char_start as usize)
@@ -358,6 +520,38 @@ mod tests {
                 .collect();
             assert_eq!(recovered, passage.text);
         }
+    }
+
+    #[test]
+    fn pdf_passage_anchors_preserve_page_and_local_offsets() {
+        let pages = vec![
+            (1, "first page evidence".to_string()),
+            (2, "second page evidence".to_string()),
+        ];
+        let passages = split_pdf_passages(&pages, 80, 8);
+        assert_eq!(passages.len(), 2);
+        assert_eq!(passages[0].ordinal, 0);
+        assert_eq!(passages[1].ordinal, 1);
+        assert_eq!(
+            passages[0].anchor,
+            EvidenceAnchor::PdfPage {
+                page: 1,
+                char_start: 0,
+                char_end: 19,
+                line_start: 1,
+                line_end: 1,
+            }
+        );
+        assert_eq!(
+            passages[1].anchor,
+            EvidenceAnchor::PdfPage {
+                page: 2,
+                char_start: 0,
+                char_end: 20,
+                line_start: 1,
+                line_end: 1,
+            }
+        );
     }
 
     #[cfg(unix)]

@@ -23,7 +23,7 @@ struct Arguments {
 
 #[derive(Debug, Subcommand)]
 enum Command {
-    /// Index an explicitly selected text file or directory.
+    /// Index an explicitly selected text, Markdown, or PDF file or directory.
     Index { path: PathBuf },
     /// Search active passages and print evidence-backed hits.
     Search {
@@ -33,6 +33,8 @@ enum Command {
     },
     /// Print canonical library counts.
     Stats,
+    /// Print the canonical extraction identity, warnings, and anchors for one indexed source.
+    Inspect { path: PathBuf },
     /// Compare canonical passages with the derived FTS5 projection.
     FtsHealth,
     /// Repair the derived FTS5 projection and print before/after evidence.
@@ -180,6 +182,13 @@ fn main() -> Result<(), Box<dyn Error>> {
         Command::Stats => {
             let library = Library::open(arguments.database)?;
             println!("{}", serde_json::to_string_pretty(&library.stats()?)?);
+        }
+        Command::Inspect { path } => {
+            let library = Library::open(arguments.database)?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&library.inspect_source(path)?)?
+            );
         }
         Command::FtsHealth => {
             let library = Library::open(arguments.database)?;
@@ -668,6 +677,7 @@ fn anchor_matches(
                 && expected_source_anchor_matches(expected, expected_source)
                 && phrase_is_highlighted(hit, contains)
         }
+        _ => false,
     }
 }
 

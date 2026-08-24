@@ -169,11 +169,19 @@ pub(crate) fn project_fts_evidence(
             "highlight range exceeds the stored passage".into(),
         ));
     }
-    let EvidenceAnchor::Text {
-        char_start,
-        line_start,
-        ..
-    } = passage_anchor;
+    let (char_start, line_start, page) = match passage_anchor {
+        EvidenceAnchor::Text {
+            char_start,
+            line_start,
+            ..
+        } => (*char_start, *line_start, None),
+        EvidenceAnchor::PdfPage {
+            page,
+            char_start,
+            line_start,
+            ..
+        } => (*char_start, *line_start, Some(*page)),
+    };
     let matched_line_start = line_start
         + characters[..first_start]
             .iter()
@@ -184,11 +192,20 @@ pub(crate) fn project_fts_evidence(
             .iter()
             .filter(|character| **character == '\n')
             .count() as u64;
-    let anchor = EvidenceAnchor::Text {
-        char_start: char_start + first_start as u64,
-        char_end: char_start + last_end as u64,
-        line_start: matched_line_start,
-        line_end: matched_line_end,
+    let anchor = match page {
+        Some(page) => EvidenceAnchor::PdfPage {
+            page,
+            char_start: char_start + first_start as u64,
+            char_end: char_start + last_end as u64,
+            line_start: matched_line_start,
+            line_end: matched_line_end,
+        },
+        None => EvidenceAnchor::Text {
+            char_start: char_start + first_start as u64,
+            char_end: char_start + last_end as u64,
+            line_start: matched_line_start,
+            line_end: matched_line_end,
+        },
     };
     Ok((EvidenceExcerpt { segments }, anchor))
 }

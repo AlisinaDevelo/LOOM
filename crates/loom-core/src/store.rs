@@ -17,13 +17,17 @@ use crate::{
         SourceRootStatus,
     },
     error::{io_error, LoomError, Result},
-    ingest::{self, PassageDraft, StableDocument, EXTRACTOR_ID, EXTRACTOR_VERSION},
+    ingest::{
+        self, PassageDraft, StableDocument, EXTRACTOR_ID, EXTRACTOR_VERSION, PDF_EXTRACTOR_ID,
+        PDF_EXTRACTOR_VERSION,
+    },
     observe::{self, ObservationEvent},
     search::{collision_free_markers, compile_query, project_fts_evidence},
 };
 
-const SCHEMA_VERSION: i64 = 3;
-const PREVIOUS_SCHEMA_VERSION: i64 = 2;
+const SCHEMA_VERSION: i64 = 4;
+const PREVIOUS_SCHEMA_VERSION: i64 = 3;
+const LEGACY_SCHEMA_VERSION: i64 = 2;
 const LEGACY_SCHEMA_TABLES: &[&str] = &[
     "source_roots",
     "artifacts",
@@ -47,6 +51,7 @@ const CURRENT_SCHEMA_TABLES: &[&str] = &[
 pub struct LibraryLimits {
     pub max_file_bytes: u64,
     pub max_files_per_request: usize,
+    pub max_pdf_pages: usize,
     pub passage_target_chars: usize,
     pub passage_overlap_chars: usize,
 }
@@ -56,6 +61,7 @@ impl Default for LibraryLimits {
         Self {
             max_file_bytes: 8 * 1024 * 1024,
             max_files_per_request: 20_000,
+            max_pdf_pages: 2_048,
             passage_target_chars: 1_000,
             passage_overlap_chars: 120,
         }
@@ -412,7 +418,12 @@ impl Library {
                 units_processed_this_run += 1;
                 continue;
             }
-            match ingest::read_stable(&path, &selected_path, self.limits.max_file_bytes) {
+            match ingest::read_stable_with_limits(
+                &path,
+                &selected_path,
+                self.limits.max_file_bytes,
+                self.limits.max_pdf_pages,
+            ) {
                 Ok(document) => {
                     let bytes = document.byte_size;
                     report.bytes_read += bytes;
@@ -501,12 +512,17 @@ impl Library {
         job_id: &str,
         next_unit: u64,
     ) -> Result<bool> {
+        let (extractor_id, extractor_version) = if document.media_type == "application/pdf" {
+            (PDF_EXTRACTOR_ID, PDF_EXTRACTOR_VERSION)
+        } else {
+            (EXTRACTOR_ID, EXTRACTOR_VERSION)
+        };
         self.index_document_with_extractor_and_checkpoint(
             root_id,
             path,
             document,
-            EXTRACTOR_ID,
-            EXTRACTOR_VERSION,
+            extractor_id,
+            extractor_version,
             Some((job_id, next_unit)),
         )
     }
@@ -545,11 +561,25 @@ impl Library {
             .and_then(|value| value.to_str())
             .unwrap_or(&source_uri)
             .to_string();
-        let passages = ingest::split_passages(
-            &document.normalized_text,
-            self.limits.passage_target_chars,
-            self.limits.passage_overlap_chars,
-        );
+        let passages = document
+            .pdf_pages
+            .as_deref()
+            .map(|pages| {
+                ingest::split_pdf_passages(
+                    pages,
+                    self.limits.passage_target_chars,
+                    self.limits.passage_overlap_chars,
+                )
+            })
+            .unwrap_or_else(|| {
+                ingest::split_passages(
+                    &document.normalized_text,
+                    self.limits.passage_target_chars,
+                    self.limits.passage_overlap_chars,
+                )
+            });
+        let parse_warnings_json = serde_json::to_string(&document.parse_warnings)?;
+        let page_count = document.page_count.map(|value| value as i64);
         let now = Utc::now().to_rfc3339();
         let mut connection = self.lock()?;
         let transaction = connection.transaction()?;
@@ -616,8 +646,8 @@ impl Library {
         let inserted = transaction.execute(
             "INSERT OR IGNORE INTO artifact_versions(
                 id, artifact_id, content_hash, hash_algorithm, byte_size, source_modified_ns,
-                extractor_id, extractor_version, status, created_at
-             ) VALUES (?1, ?2, ?3, 'blake3', ?4, ?5, ?6, ?7, 'ready', ?8)",
+                extractor_id, extractor_version, parse_warnings_json, page_count, status, created_at
+             ) VALUES (?1, ?2, ?3, 'blake3', ?4, ?5, ?6, ?7, ?8, ?9, 'ready', ?10)",
             params![
                 version_id,
                 artifact_id,
@@ -626,6 +656,8 @@ impl Library {
                 document.modified_ns,
                 extractor_id,
                 extractor_version,
+                parse_warnings_json,
+                page_count,
                 now
             ],
         )?;
@@ -1019,20 +1051,37 @@ impl Library {
             .map_err(|source| io_error(requested_path, source))?;
         let source_uri = utf8_path(&source_path)?;
         let connection = self.lock()?;
-        let version: Option<(String, String, String, String)> = connection
+        let version: Option<(String, String, String, String, Option<i64>, String)> = connection
             .query_row(
-                "SELECT v.id, v.content_hash, v.extractor_id, v.extractor_version
+                "SELECT v.id, v.content_hash, v.extractor_id, v.extractor_version,
+                        v.page_count, v.parse_warnings_json
                  FROM artifact_locators l
                  JOIN artifacts a ON a.id = l.artifact_id
                  JOIN artifact_versions v ON v.id = a.active_version_id
-                 WHERE l.kind = 'file' AND l.locator = ?1 AND l.active = 1
+                WHERE l.kind = 'file' AND l.locator = ?1 AND l.active = 1
                    AND a.state = 'active'",
                 [&source_uri],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                    ))
+                },
             )
             .optional()?;
-        let (version_id, content_hash, extractor_id, extractor_version) =
-            version.ok_or_else(|| LoomError::ArtifactNotFound(source_uri.clone()))?;
+        let (
+            version_id,
+            content_hash,
+            extractor_id,
+            extractor_version,
+            page_count,
+            parse_warnings_json,
+        ) = version.ok_or_else(|| LoomError::ArtifactNotFound(source_uri.clone()))?;
+        let parse_warnings = serde_json::from_str(&parse_warnings_json)?;
         let passages = {
             let mut statement = connection.prepare_cached(
                 "SELECT ordinal, text_hash, locator_json
@@ -1068,6 +1117,8 @@ impl Library {
             content_hash,
             extractor_id,
             extractor_version,
+            page_count: page_count.and_then(|value| u32::try_from(value).ok()),
+            parse_warnings,
             passages,
         })
     }
@@ -1229,7 +1280,10 @@ fn configure(connection: &Connection) -> Result<()> {
 fn migrate(connection: &mut Connection) -> Result<()> {
     let existing_version = stored_schema_version(connection)?;
     if let Some(version) = existing_version {
-        if version != SCHEMA_VERSION && version != PREVIOUS_SCHEMA_VERSION {
+        if !matches!(
+            version,
+            SCHEMA_VERSION | PREVIOUS_SCHEMA_VERSION | LEGACY_SCHEMA_VERSION
+        ) {
             return Err(LoomError::UnsupportedSchemaVersion(version.to_string()));
         }
         validate_schema_shape(connection, version)?;
@@ -1283,6 +1337,9 @@ fn migrate(connection: &mut Connection) -> Result<()> {
             source_modified_ns INTEGER,
             extractor_id TEXT NOT NULL,
             extractor_version TEXT NOT NULL,
+            parse_warnings_json TEXT NOT NULL DEFAULT '[]'
+              CHECK(json_valid(parse_warnings_json)),
+            page_count INTEGER CHECK(page_count IS NULL OR page_count >= 0),
             status TEXT NOT NULL CHECK(status IN ('ready', 'failed', 'superseded')),
             created_at TEXT NOT NULL,
             UNIQUE(artifact_id, content_hash, extractor_id, extractor_version)
@@ -1354,6 +1411,18 @@ fn migrate(connection: &mut Connection) -> Result<()> {
             INSERT INTO passages_fts(rowid, text) VALUES (new.rowid, new.text);
          END;",
     )?;
+    if matches!(
+        existing_version,
+        Some(PREVIOUS_SCHEMA_VERSION | LEGACY_SCHEMA_VERSION)
+    ) {
+        transaction.execute_batch(
+            "ALTER TABLE artifact_versions
+                ADD COLUMN parse_warnings_json TEXT NOT NULL DEFAULT '[]'
+                  CHECK(json_valid(parse_warnings_json));
+             ALTER TABLE artifact_versions
+                ADD COLUMN page_count INTEGER CHECK(page_count IS NULL OR page_count >= 0);",
+        )?;
+    }
     transaction.execute(
         "INSERT INTO schema_meta(key, value) VALUES ('schema_version', ?1)
          ON CONFLICT(key) DO UPDATE SET value = excluded.value",
@@ -1366,7 +1435,7 @@ fn migrate(connection: &mut Connection) -> Result<()> {
 }
 
 fn validate_schema_shape(connection: &Connection, version: i64) -> Result<()> {
-    let tables = if version == SCHEMA_VERSION {
+    let tables = if version != LEGACY_SCHEMA_VERSION {
         CURRENT_SCHEMA_TABLES
     } else {
         LEGACY_SCHEMA_TABLES
@@ -1438,17 +1507,19 @@ fn validate_schema_shape(connection: &Connection, version: i64) -> Result<()> {
         ("relationships", "created_at"),
     ]
     .into_iter()
-    .chain((version == SCHEMA_VERSION).then_some(("index_jobs", "id")))
-    .chain((version == SCHEMA_VERSION).then_some(("index_jobs", "source_root_id")))
-    .chain((version == SCHEMA_VERSION).then_some(("index_jobs", "selection_locator")))
-    .chain((version == SCHEMA_VERSION).then_some(("index_jobs", "discovery_fingerprint")))
-    .chain((version == SCHEMA_VERSION).then_some(("index_jobs", "total_units")))
-    .chain((version == SCHEMA_VERSION).then_some(("index_jobs", "next_unit")))
-    .chain((version == SCHEMA_VERSION).then_some(("index_jobs", "state")))
-    .chain((version == SCHEMA_VERSION).then_some(("index_jobs", "last_error")))
-    .chain((version == SCHEMA_VERSION).then_some(("index_jobs", "started_at")))
-    .chain((version == SCHEMA_VERSION).then_some(("index_jobs", "updated_at")))
-    .chain((version == SCHEMA_VERSION).then_some(("index_jobs", "completed_at")))
+    .chain((version == SCHEMA_VERSION).then_some(("artifact_versions", "parse_warnings_json")))
+    .chain((version == SCHEMA_VERSION).then_some(("artifact_versions", "page_count")))
+    .chain((version != LEGACY_SCHEMA_VERSION).then_some(("index_jobs", "id")))
+    .chain((version != LEGACY_SCHEMA_VERSION).then_some(("index_jobs", "source_root_id")))
+    .chain((version != LEGACY_SCHEMA_VERSION).then_some(("index_jobs", "selection_locator")))
+    .chain((version != LEGACY_SCHEMA_VERSION).then_some(("index_jobs", "discovery_fingerprint")))
+    .chain((version != LEGACY_SCHEMA_VERSION).then_some(("index_jobs", "total_units")))
+    .chain((version != LEGACY_SCHEMA_VERSION).then_some(("index_jobs", "next_unit")))
+    .chain((version != LEGACY_SCHEMA_VERSION).then_some(("index_jobs", "state")))
+    .chain((version != LEGACY_SCHEMA_VERSION).then_some(("index_jobs", "last_error")))
+    .chain((version != LEGACY_SCHEMA_VERSION).then_some(("index_jobs", "started_at")))
+    .chain((version != LEGACY_SCHEMA_VERSION).then_some(("index_jobs", "updated_at")))
+    .chain((version != LEGACY_SCHEMA_VERSION).then_some(("index_jobs", "completed_at")))
     {
         let exists: bool = connection.query_row(
             "SELECT EXISTS(
@@ -1647,12 +1718,21 @@ fn insert_passages(
          ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
     )?;
     for passage in passages {
-        let EvidenceAnchor::Text {
-            char_start,
-            char_end,
-            line_start,
-            line_end,
-        } = passage.anchor;
+        let (char_start, char_end, line_start, line_end) = match passage.anchor {
+            EvidenceAnchor::Text {
+                char_start,
+                char_end,
+                line_start,
+                line_end,
+            }
+            | EvidenceAnchor::PdfPage {
+                char_start,
+                char_end,
+                line_start,
+                line_end,
+                ..
+            } => (char_start, char_end, line_start, line_end),
+        };
         statement.execute(params![
             Uuid::new_v4().to_string(),
             version_id,
@@ -1805,7 +1885,7 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(schema_version, "3");
+        assert_eq!(schema_version, "4");
 
         let foreign_keys: i64 = connection
             .query_row("PRAGMA foreign_keys", [], |row| row.get(0))
@@ -1864,6 +1944,21 @@ mod tests {
                 .unwrap();
             assert_eq!(rows, 0, "empty migration populated {table}");
         }
+        for column in ["parse_warnings_json", "page_count"] {
+            let exists: bool = connection
+                .query_row(
+                    "SELECT EXISTS(
+                        SELECT 1 FROM pragma_table_info('artifact_versions') WHERE name = ?1
+                    )",
+                    [column],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert!(
+                exists,
+                "migration did not create artifact_versions.{column}"
+            );
+        }
     }
 
     #[test]
@@ -1888,7 +1983,7 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(schema_version, "3");
+        assert_eq!(schema_version, "4");
         let checkpoint_table: bool = connection
             .query_row(
                 "SELECT EXISTS(
@@ -2321,7 +2416,10 @@ mod tests {
             char_start,
             char_end,
             ..
-        } = anchor;
+        } = anchor
+        else {
+            panic!("text fixture unexpectedly returned a PDF page anchor")
+        };
         source
             .chars()
             .skip(*char_start as usize)

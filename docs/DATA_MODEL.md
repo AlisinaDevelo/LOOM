@@ -1,6 +1,6 @@
 # Data model
 
-This document describes the schema currently created by LOOM schema version 3. The supported
+This document describes the schema currently created by LOOM schema version 4. The supported
 version matrix and migration policy are maintained in [SCHEMA_COMPATIBILITY.md](SCHEMA_COMPATIBILITY.md).
 
 ## Identity and source records
@@ -11,7 +11,7 @@ version matrix and migration policy are maintained in [SCHEMA_COMPATIBILITY.md](
 | source_roots      | An explicitly selected file or directory  | kind, unique locator, enabled, timestamps                                                 |
 | artifacts         | A logical source under a root             | title, media_type, state, active_version_id                                               |
 | artifact_locators | Resolves an artifact to a source location | kind, locator, active, first/last seen timestamps                                         |
-| artifact_versions | Immutable content observations            | content_hash, hash_algorithm, byte_size, source mtime, extractor identity/version, status |
+| artifact_versions | Immutable content observations            | content_hash, byte_size, mtime, extractor/version, page_count, parse_warnings_json, status|
 | passages          | Normalized text and exact anchors         | artifact version, ordinal, text, text hash, JSON locator, character/line offsets          |
 | relationships     | Reserved source-to-source relationships   | source/target artifacts, optional evidence passage, method, confidence                    |
 | index_jobs        | Durable progress for one root scan        | discovery fingerprint, total/next unit, state, error, timestamps                          |
@@ -34,7 +34,7 @@ passages stores the normalized passage text for one artifact version:
 - ordinal preserves passage order;
 - text is normalized UTF-8 text;
 - text_hash identifies the passage text;
-- locator_json stores the serialized text anchor;
+- locator_json stores the serialized text or PDF-page anchor;
 - char_start and char_end are character offsets;
 - line_start and line_end are one-based line offsets;
 - created_at records insertion time.
@@ -43,6 +43,12 @@ The current segmenter targets 1,000 characters and overlaps adjacent passages by
 Offsets are calculated without splitting Unicode scalar boundaries. The source content hash is
 BLAKE3 over the bytes read before line-ending normalization; the passage offsets therefore apply to
 the normalized text stored in the passage.
+
+PDF passages are segmented independently per one-based page. Their `pdf_page` anchor retains the
+page number plus local character/line offsets, so a result can be opened against the original PDF
+without treating a concatenated text projection as a page identity. `artifact_versions.page_count`
+and `parse_warnings_json` retain parser/page outcomes; an empty text layer is an explicit bounded
+failure rather than a successful zero-evidence index.
 
 ## Lexical index
 

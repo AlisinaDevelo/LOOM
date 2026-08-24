@@ -22,6 +22,9 @@ pub enum LoomError {
     #[error("unsupported source: {0}")]
     UnsupportedSource(String),
 
+    #[error("PDF extraction failed: {0}")]
+    PdfExtraction(String),
+
     #[error("source changed while it was being read: {0}")]
     SourceChanged(String),
 
