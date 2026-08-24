@@ -69,8 +69,10 @@ content.
 The hash provider is a deterministic contract baseline, not a semantic-quality claim. The current
 linear scan is appropriate only for the bounded MVP corpus. A neural model, approximate index,
 browser capture, or sync layer requires a separate measured decision and privacy review. This issue
-is implementation/device-verified locally; it is not independently reviewed or merged to protected
-main yet.
+is implementation/device-verified locally and has been reproduced against merged main at
+`ae102616700a0913f21af118609e727df9617e26`. Main is not protected (the branch-protection API
+returned 404) and no independent GitHub approval was present; those governance limitations remain
+explicit.
 
 ## Promotion-branch reproduction
 
@@ -88,6 +90,25 @@ exact source commit before publishing the promotion PR.
   completeness 1.0, median latency 0.192042 ms, p95 latency 0.57425 ms
 
 All device steps passed again, including native Vision, MSRV, npm, semantic drop/rebuild,
-security, Tauri, and mixed-corpus recovery. This is a promotion-branch reproduction, not yet a
-reproduction against a commit on main; the promotion PR must still receive the repository's
-independent review and merge gate.
+security, Tauri, and mixed-corpus recovery. This is a promotion-branch reproduction; the final
+merged-main reproduction is recorded below.
+
+## Final merged-main reproduction
+
+The portability fix was merged to main as
+`ae102616700a0913f21af118609e727df9617e26`. The complete device harness was rerun against that
+exact source commit on the target Mac.
+
+- Verification directory: /tmp/loom-0203-main-fix-device.27JXBI
+- Summary SHA-256: 6435cdb602d4a728ac0546a99b597f1f7e883bd49b2f25554a7ad3d34b24fbfc
+- Commands SHA-256: a9625ca3f983fa7552d0ced9ac0b49ad0569b3b5a9c9e3c09bbbfa54ce727a8d
+- Semantic summary SHA-256: b5a4a7631831fcb22819951733d143d0c675c5bb7d94fe1ee4bad81f73e70514
+- Log manifest: /tmp/loom-0203-main-fix-device.27JXBI/log-sha256.txt
+- Semantic rebuild: 0.66 s end-to-end; maximum resident set size 13,336,576 bytes
+- Retrieval benchmark: Recall@1/5 1.0, anchor precision 1.0, false-positive rate 0.0,
+  completeness 1.0, median latency 0.193875 ms, p95 latency 0.543208 ms
+
+The full local pipe passed on this merged-main SHA, including rustfmt, warnings-denied Clippy,
+workspace tests, Rust 1.88 MSRV checks/tests, npm checks, retrieval, semantic drop/rebuild,
+security, Tauri debug build, and mixed-corpus recovery. No screenshot was needed; any future
+desktop capture must be cropped to the relevant result/evidence panel.
