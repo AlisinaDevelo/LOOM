@@ -275,7 +275,10 @@ def public_body(issue: dict[str, Any], milestone: dict[str, Any]) -> str:
     parent = f"Roadmap parent: `{issue['parent']}`" if issue.get("parent") else "Roadmap phase epic."
     blockers = issue["depends_on"]
     prerequisite_text = "\n".join(f"- Blocked by roadmap `{task_id}`" for task_id in blockers) if blockers else "No blocking roadmap issues."
-    criteria = "\n".join(f"- [ ] {criterion}" for criterion in issue["acceptance_criteria"])
+    # The manifest is the execution source of truth. Reflect a completed item
+    # in the public checklist so a closed issue does not present stale work.
+    checkbox = "x" if issue.get("status") == "done" else " "
+    criteria = "\n".join(f"- [{checkbox}] {criterion}" for criterion in issue["acceptance_criteria"])
     return f"""{issue_marker(issue['id'])}
 
 Roadmap ID: `{issue['id']}`<br>
