@@ -113,6 +113,18 @@ class RoadmapTests(unittest.TestCase):
         self.assertNotIn("gpt-", body.lower())
         self.assertNotIn(".forge", body.lower())
 
+    def test_done_issue_body_marks_acceptance_criteria_satisfied(self) -> None:
+        done = next(item for item in self.manifest["issues"] if item["status"] == "done")
+        body = roadmap.public_body(done, self.milestone_by_key[done["quarter"]])
+        self.assertEqual(len(done["acceptance_criteria"]), body.count("- [x] "))
+        self.assertNotIn("- [ ] ", body)
+
+    def test_open_issue_body_keeps_acceptance_criteria_unchecked(self) -> None:
+        open_item = next(item for item in self.manifest["issues"] if item["status"] != "done")
+        body = roadmap.public_body(open_item, self.milestone_by_key[open_item["quarter"]])
+        self.assertEqual(len(open_item["acceptance_criteria"]), body.count("- [ ] "))
+        self.assertNotIn("- [x] ", body)
+
     def test_duplicate_live_marker_fails_before_mutation(self) -> None:
         issues = [
             {"number": 1, "body": "<!-- loom-roadmap:v1 id=0001 -->", "user": {"login": "AlisinaDevelo"}},
