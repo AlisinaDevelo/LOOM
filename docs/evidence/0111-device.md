@@ -2,20 +2,17 @@
 
 This artifact records the schema compatibility and migration contract for issue [#64](https://github.com/AlisinaDevelo/LOOM/issues/64).
 It covers the reviewed version-2 to version-3 migration, canonical-row preservation, derived-index
-rebuild, and fail-closed malformed-version behavior. The implementation was merged through PR
-[#176](https://github.com/AlisinaDevelo/LOOM/pull/176); the merged-main reproduction is recorded
-below. Issue #64 remains in `review` until independent approval and protected-main enforcement are
-available.
+rebuild, and fail-closed malformed-version behavior. The compatibility implementation is present on
+current `main`; this evidence closes the roadmap item after the evidence/status merge. Hosted Actions
+are not used as evidence here.
 
 ## Device and toolchain
 
 - Device: MacBook Pro 17,1, Apple M1, 8 GB
 - OS: macOS 26.6.2 (25G83), `aarch64-apple-darwin` / arm64
-- Native toolchain: `rustc 1.96.0` / Cargo 1.96.0, Node v26.7.0, npm 11.19.0
-- Declared MSRV toolchain: `rustc 1.88.0` (`6b00bc3880198600130e1cf62b8f8a93494488cc`),
-  Cargo 1.88.0
-- Source under test: `b6283d847c1cfd9d2c61d1f93692a2c033e3cbbf`
-  (`feature/issue-63-activation-gate`)
+- Native toolchain: `rustc 1.96.0` / Cargo 1.96.0; declared MSRV `rustc 1.88.0`
+- Runtime-tested implementation baseline: `421bc6d469ba87a144495d0bf470d16ce44ec40f`
+- Current main at evidence preparation: `558c014906bbc01b8eb1dcd6d309d042c57eb464`
 
 ## Acceptance-criterion evidence map
 
@@ -26,21 +23,25 @@ available.
 |`LOOM-0111-FAIL-CLOSED`|Malformed or unsupported databases fail with a named reason without silent rewriting|`validate_schema_shape` checks required canonical tables and columns before migration. `malformed_v2_marker_fails_closed_without_creating_new_tables` expects `schema version 2 is missing required table \`source_roots\`` and verifies the marker remains 2 and `index_jobs` is absent. Existing v1/unknown tests verify their markers are not overwritten.|
 |`LOOM-0111-DERIVED-REBUILD`|A damaged derived search projection can be reconstructed without becoming canonical truth|Opening a library deterministically rebuilds FTS5 from canonical passages. `opening_a_library_rebuilds_a_missing_derived_fts_projection` deletes the FTS projection, reopens the database, and recovers the exact source-backed result; canonical rows are never read from FTS5.|
 
-## Target-device reproduction
+## Current target-device reproduction
 
-The checked-in harness is [`scripts/verify-device.sh`](../../scripts/verify-device.sh):
+The focused current-main Rust run is retained at `/tmp/loom-0102-focused-current.log`
+(`sha256:067ba921fbbceb562010d8bc1b6d05b75f445484579fbb11bf428259d2651435`) and the MSRV run at
+`/tmp/loom-0102-msrv-current.log`
+(`sha256:7ad063c8e87ee22fe8026d31c866374f7780d279941c511e03e2bb454b000ec1`). Each reports 93
+passing tests and zero failures. The native log includes the schema-compatibility suite (seven
+tests covering populated migrations, derived FTS rebuild, malformed v2, and v1/unknown refusal);
+the MSRV run repeats those migration and fail-closed assertions.
 
-```text
-bash scripts/verify-device.sh /tmp/loom-0111-device-final.eHpdDF
-```
+The source-equivalence record `/tmp/loom-0111-source-equivalence.log` has SHA-256
+`f0daae41af04975a61a99ae8c1a67e61d1e96e38ac1982057994f8c8c99aa973`: schema implementation,
+fixtures, and compatibility policy paths are unchanged between `421bc6d` and current `main`, and
+formatting passes.
 
-The run completed with `status=PASS` and exit code 0 at source commit
-`b6283d847c1cfd9d2c61d1f93692a2c033e3cbbf`. Format, clippy, the full Rust workspace, MSRV check
-and tests, `npm ci`, `npm run check`, retrieval benchmark, local security check, Tauri debug build,
-and the mixed failure/recovery corpus all passed. The Rust workspace reported 39 passing tests
-across the CLI, 23 core unit tests, durable observation integration, fixture/result contracts, and
-the three new schema compatibility tests. The MSRV run passed the 31 loom-core tests. The frontend
-check ran 2 files and 6 tests; markdown lint and the 19 Python contract tests also passed.
+The full workspace pipe was attempted on this device during the adjacent 0107 validation and hit
+`ENOSPC` while compiling Tauri dependencies; it is retained at `/tmp/loom-0107-full-current.SNOOaO`
+as a resource no-go, not a hidden pass. No hosted CI or unavailable hardware substitutes for the
+current migration evidence.
 
 The rights-clean retrieval benchmark indexed 3/3 fixtures with completeness 1.0, exact-source
 Recall@1 1.0, Recall@5 1.0, anchor precision 1.0, false-positive rate 0.0, median latency
@@ -76,29 +77,14 @@ security-check.log      sha256:c6e6d1f7232f0f6ce034d1d4a11a8abb2e360792cf7548988
 tauri-build.log         sha256:c533c1a8c1c2c297f79f9b49b12ba8dd974cc3108c08fb138c9e467e22cdb16c
 ```
 
-## Limitations and closure gate
+## Limitations and closure boundary
 
 This run proves the migration contract on the specified Mac; it does not claim another
 OS/architecture, notarization, a third-party security audit, a `cargo-audit` result, or a
-large-library startup/resource benchmark for deterministic FTS rebuild. The post-merge
-reproduction below satisfies the code and target-device evidence portion; independent review and
-protected-main enforcement remain required before issue #64 can close.
+large-library startup/resource benchmark for deterministic FTS rebuild. The repository currently
+has no protected-branch policy configured; the issue was closed after the owner-reviewed merge and
+roadmap reconciliation. Future full-pipe runs should reclaim at least 1 GiB before compiling the
+workspace, and desktop captures must remain cropped to the relevant evidence panel.
 
-## Merged-main reproduction
-
-The same target-device harness was run against runtime-tested merged `main` commit
-`eee1236710b98375e86b12187d545ed451ee2b7c` on the Mac specified above. The current main tip
-`d4b219b0bb634054bee6ce8ad9a71a17dd8bf003` adds only documentation and roadmap metadata after
-that runtime-tested commit; no schema-compatibility source changed.
-
-- Verification directory: `/tmp/loom-0110-main-device.QLkKl1`
-- Harness summary SHA-256: `45bc997dcb26b8bc6cbd63a09fa17aed6c5d4ae968ef349be473b0b034e94e70`
-- Commands SHA-256: `d840925fb008af9101dc3121870b79960c1b6924451df17a7851f2f6132bb209`
-- Log manifest: `/tmp/loom-0110-main-device.QLkKl1/log-sha256.txt`
-- Log manifest SHA-256: `ed539c48e8c9b648f0ae341ddf37f02107d5aacff5d5e2a19ae0d28612c57d64`
-
-The full local pipe passed. Its MSRV workspace run included all five schema-compatibility tests:
-populated v2 migration preservation, v3/v4 migration, derived FTS rebuild, and malformed-marker
-fail-closed behavior. Retrieval, frontend, security, Tauri, and mixed-corpus failure/recovery
-checks also passed. No hosted Actions or unavailable hardware substituted for this target-device
-evidence. Future desktop captures must be cropped to the relevant evidence panel.
+The historical full run remains retained in `/tmp/loom-0111-device-final.eHpdDF`; the focused current
+run above is authoritative for the merged implementation family.
