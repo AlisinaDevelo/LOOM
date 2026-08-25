@@ -21,7 +21,7 @@ window.
 | Artifact ID | Acceptance criterion | Retained evidence |
 | --- | --- | --- |
 | `LOOM-0107-CI-PARITY` | CI runs Rust fmt/clippy/tests and frontend lint/tests/build on supported runners | [`.github/workflows/ci.yml`](../../.github/workflows/ci.yml) contains roadmap, Rust, MSRV, advisory, frontend, and macOS Tauri jobs. The new [`scripts/test-ci-contract.py`](../../scripts/test-ci-contract.py) asserts those jobs and commands. Current focused Rust native/MSRV suites passed 93 tests each (`/tmp/loom-0102-focused-current.log`, `/tmp/loom-0102-msrv-current.log`); current frontend `npm run check` passed 23 tests (`/tmp/loom-0107-current-device.JPIIub/npm-check.log`). The full current pipe attempted Clippy and workspace tests, then hit the device `ENOSPC` boundary; it is retained as a no-go, not converted into a pass. |
-| `LOOM-0107-DEPENDENCIES` | Dependabot covers Cargo, npm, and Actions; dependency review runs on pull requests | [`.github/dependabot.yml`](../../.github/dependabot.yml) declares weekly Cargo, npm, and GitHub Actions updates. [`.github/workflows/dependency-review.yml`](../../.github/workflows/dependency-review.yml) uses a pinned dependency-review action. Current `npm audit --audit-level=high` and locked `cargo metadata` both passed in the focused probe. |
+| `LOOM-0107-DEPENDENCIES` | Dependabot covers Cargo, npm, and Actions; dependency review runs on pull requests | [`.github/dependabot.yml`](../../.github/dependabot.yml) declares weekly Cargo, npm, and GitHub Actions updates. [`.github/workflows/dependency-review.yml`](../../.github/workflows/dependency-review.yml) uses a pinned dependency-review action. Current `npm audit --audit-level=high` and locked `cargo metadata` both passed in the focused probe. GitHub currently reports one open medium transitive `glib 0.18.5` advisory ([GHSA-wrw7-89jp-8q8g](https://github.com/advisories/GHSA-wrw7-89jp-8q8g)); it is recorded, not suppressed, and requires a follow-up upgrade/remediation task. |
 | `LOOM-0107-SECRET-SCAN` | A secret scan passes before public push | [`scripts/security-check.sh`](../../scripts/security-check.sh) requires gitleaks and dependency checks. Current gitleaks 8.30.1 scanned the repository with `no leaks found`; npm audit reported zero vulnerabilities. |
 | `LOOM-0107-RELEASE-HYGIENE` | Formatting and release hygiene are checked before publication | The focused probe passed `cargo fmt --all --check`, `git diff --check`, ShellCheck, actionlint, roadmap validation, the CI contract suite, and all 20 Python tests. `scripts/verify-device.sh` now records diff-check and CI-contract steps. No generated output is tracked. |
 
@@ -83,7 +83,8 @@ exercise the same implementation, while the new static checks exercise the chang
 The final merged `main` SHA is recorded by the merge PR and the subsequent roadmap reconciliation.
 
 This evidence does not claim a cargo-audit result, a notarization result, another OS/architecture,
-or a hosted Actions result. The repository currently has no protected-branch policy configured;
+or a hosted Actions result. The open `glib` advisory is a known transitive Linux Tauri dependency
+and remains a follow-up rather than a hidden pass. The repository currently has no protected-branch policy configured;
 the merge was performed by the repository owner after the local checks above. Future full-pipe
 runs should reclaim at least 1 GiB of device storage before compiling the workspace, and desktop
 captures should remain cropped to the relevant evidence panel.
