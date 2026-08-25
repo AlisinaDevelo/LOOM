@@ -80,7 +80,29 @@ The Rust, Tauri, frontend, workflow, and dependency source paths at `3c0d257` ar
 the runtime-tested `421bc6d469ba87a144495d0bf470d16ce44ec40f`; this change adds only the CI contract,
 device-runner hygiene, and a corrected roadmap test. The focused current Rust logs therefore
 exercise the same implementation, while the new static checks exercise the changed files directly.
-The final merged `main` SHA is recorded by the merge PR and the subsequent roadmap reconciliation.
+The implementation merge is PR [#238](https://github.com/AlisinaDevelo/LOOM/pull/238), merge commit
+`bb483a3ee3366f389bedee7dcfdcd1ef80fdfa96`. The roadmap write closed GitHub issue [#16](https://github.com/AlisinaDevelo/LOOM/issues/16)
+at `2026-08-25T03:41:25Z`.
+
+## Roadmap reconciliation and public audit
+
+The v2 reconciler ran as the sole public writer after the implementation merge. Its preflight planned
+one `update_issue` for `0107`, with no label, milestone, parent-edge, or dependency-edge mutations.
+The apply log and both post-apply plans are retained:
+
+```text
+/tmp/loom-0107-roadmap-plan-before.json  sha256:61d4a21a11d200a6a8e312e44428d0fb5607afbc19a75ccdd24e2718c04db39c
+/tmp/loom-0107-roadmap-apply.log         sha256:b38c1854f955730c392b9bc636379c80c87df972a80388105857e760dc605720
+/tmp/loom-0107-roadmap-plan-after.json   sha256:de11779046e5cbcf4ea4e7bbe88d19c641676058a6cb88254f80357b752941f1
+/tmp/loom-0107-roadmap-plan-second.json  sha256:de11779046e5cbcf4ea4e7bbe88d19c641676058a6cb88254f80357b752941f1
+```
+
+The reconciler verified 154 active issues, 4 retired issues, 20 milestones, 13 phases, 141 parent
+edges, 314 dependency edges, 21 closed issues, and `mutation_count: 0` after apply. A fresh public
+issue audit at `/tmp/loom-0107-live-issues.json` (SHA-256
+`d75106572306f4be6c40c3d45eedc43bce6d747a6079dc700af8b1bb33d52fd8`) found 158 issues (137 open,
+21 closed), 154 `loom-roadmap:v2` markers, 20 milestones, and zero unsafe Forge/agent/model
+metadata.
 
 This evidence does not claim a cargo-audit result, a notarization result, another OS/architecture,
 or a hosted Actions result. The open `glib` advisory is a known transitive Linux Tauri dependency
