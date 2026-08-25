@@ -52,6 +52,8 @@ class CiContractTests(unittest.TestCase):
             "run_step fmt cargo fmt --all --check",
             "run_step diff-check git diff --check",
             "run_step ci-contract python3 scripts/test-ci-contract.py",
+            "run_step native-host-build cargo build --locked -q -p loom --bin loom-native-host",
+            "run_step native-host-contract python3 scripts/test-native-host.py --host target/debug/loom-native-host",
             "run_step security-check bash scripts/security-check.sh",
         ):
             self.assertIn(marker, DEVICE)

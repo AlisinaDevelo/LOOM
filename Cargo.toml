@@ -1,5 +1,11 @@
 [workspace]
-members = ["crates/loom-cli", "crates/loom-core", "crates/loom-ocr-macos", "src-tauri"]
+members = [
+    "crates/loom-browser-capture",
+    "crates/loom-cli",
+    "crates/loom-core",
+    "crates/loom-ocr-macos",
+    "src-tauri",
+]
 resolver = "2"
 
 [workspace.package]
@@ -25,6 +31,9 @@ tempfile = "3"
 thiserror = "2.0.20"
 uuid = { version = "1.25.0", features = ["serde", "v4"] }
 walkdir = "2.5.0"
+hmac = "0.12.1"
+sha2 = "0.10.9"
+url = "2.5.7"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

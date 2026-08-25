@@ -194,7 +194,7 @@ async function payloadFrames({request, snapshotText, session}) {
       protocol: {major: 1, minor: 0},
       type: "capture.payload",
       request_id: request.request_id,
-      session: request.session,
+      session: {id: request.session.id, counter: request.session.counter},
       sequence,
       final: offset + chunk.length >= bytes.length,
       content_type: "text/html",

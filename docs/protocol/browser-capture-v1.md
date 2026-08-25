@@ -1,8 +1,9 @@
 # Browser capture protocol v1
 
-Status: proposed for roadmap `0300` (Q05). This is a security and provenance contract for a
-future explicit-save browser extension. It does not implement a browser extension, native host,
-HTML sanitizer, or web archive.
+Status: protocol contract plus a checked native-messaging receiver for roadmap `0300`/`0301`
+(Q05). The browser extension and sanitizer are implemented in `browser-extension/`; the Rust
+receiver is `loom-native-host`. The pairing UI/Keychain provider, signed distribution, and a
+consented interactive browser session remain release gates. This is not a complete web archive.
 
 ## Boundary and non-goals
 
@@ -228,8 +229,12 @@ signed native host. Those are separate release threat-model and notarization gat
 An implementation may start only after this document and the fixture contract are reviewed. The
 fixture-driven validator at `scripts/test-browser-capture-protocol.py` checks the required fields,
 canonical HMAC test vector, limits, status semantics, forbidden fields, replay counter, downgrade,
-missing-consent, and oversized-payload rejection cases. It is a protocol contract test, not a
-claim that the browser extension exists.
+missing-consent, and oversized-payload rejection cases. The Rust receiver adds length-prefixed
+framing, duplicate-key rejection, constant-time HMAC verification, session expiry, monotonic
+counters, single-use intents, rate limits, payload hash/chunk checks, hostile HTML rejection, and
+atomic local spooling. `scripts/test-native-host.py` speaks the real stdio frame format against
+the built host on the target device. Neither suite claims that browser permissions, Keychain
+pairing, signing/notarization, or browser-store review has happened.
 
 Before roadmap `0301` can close, the extension and host must add cross-browser tests for redirect,
 SPA, offline, denied-capture, malformed-frame, revocation, and recovery cases. A consented device

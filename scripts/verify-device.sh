@@ -150,6 +150,8 @@ run_step accessibility-contract python3 scripts/test-accessibility-contract.py
 run_step ci-contract python3 scripts/test-ci-contract.py
 run_step npm-install npm ci
 run_step npm-check npm run check
+run_step native-host-build cargo build --locked -q -p loom --bin loom-native-host
+run_step native-host-contract python3 scripts/test-native-host.py --host target/debug/loom-native-host
 run_step security-check bash scripts/security-check.sh
 run_step tauri-build npm run tauri build -- --debug --no-bundle
 
