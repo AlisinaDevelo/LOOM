@@ -66,6 +66,7 @@ test("builds an authenticated complete request and chunked sanitized payload", a
   assert.match(result.request.auth.mac, /^[0-9a-f]{64}$/);
   assert.ok(result.payloads.length >= 1);
   assert.ok(result.payloads.every((payload) => payload.type === "capture.payload"));
+  assert.deepEqual(Object.keys(result.payloads[0].session).sort(), ["counter", "id"]);
   assert.ok(result.payloads.every((payload) => /^[0-9a-f]+$/.test(payload.auth.mac)));
   assert.deepEqual(result.payloads.map((payload) => payload.sequence), [...result.payloads.keys()]);
   assert.ok(result.payloads.at(-1).final);
