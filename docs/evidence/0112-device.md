@@ -112,6 +112,19 @@ full-pipe artifact above remains labeled with its original source commit. The di
 re-selection limit and the requirement to crop future desktop captures to the evidence panel
 remain explicit.
 
+## Roadmap reconciliation
+
+After PR [#245](https://github.com/AlisinaDevelo/LOOM/pull/245) merged at `e3bbf38`, the single-writer
+reconciler updated issue [#65](https://github.com/AlisinaDevelo/LOOM/issues/65) and verified it
+closed. The retained plan artifacts are:
+
+- preflight `/tmp/loom-0112-roadmap-plan-before.json` — SHA-256 `820edac224fa21e2cac7ab067a30cf88bbd72883033c9c571f8df5eb492cad62`
+- apply log `/tmp/loom-0112-roadmap-apply.log` — SHA-256 `56b11dea12b551dfa1c88c7acb837015f5922680bd9b52c51ba9ffbf6bacc3ca`
+- after and second plan — both SHA-256 `de11779046e5cbcf4ea4e7bbe88d19c641676058a6cb88254f80357b752941f1`
+
+The verified graph contained 154 active and 4 retired managed issues, 20 milestones, 13 phases,
+141 parent edges, and 314 dependency edges. The second plan requested zero mutations.
+
 ## Historical merged-main full-pipe reproduction
 
 The earlier target-device harness passed against runtime-tested merged `main` commit
