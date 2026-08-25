@@ -84,7 +84,8 @@ The final merged `main` SHA is recorded by the merge PR and the subsequent roadm
 
 This evidence does not claim a cargo-audit result, a notarization result, another OS/architecture,
 or a hosted Actions result. The open `glib` advisory is a known transitive Linux Tauri dependency
-and remains a follow-up rather than a hidden pass. The repository currently has no protected-branch policy configured;
+and remains a follow-up rather than a hidden pass. The repository currently has no protected-branch
+policy configured;
 the merge was performed by the repository owner after the local checks above. Future full-pipe
 runs should reclaim at least 1 GiB of device storage before compiling the workspace, and desktop
 captures should remain cropped to the relevant evidence panel.
