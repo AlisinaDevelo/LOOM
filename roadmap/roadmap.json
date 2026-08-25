@@ -1096,7 +1096,7 @@
         "area:security",
         "area:privacy"
       ],
-      "closure_evidence": "Record the exact tests, fixtures, measurements, review artifacts, or consented study evidence that satisfy every criterion; report only work actually performed.",
+      "closure_evidence": "Evidence IDs LOOM-0300-THREAT, LOOM-0300-AUTH, LOOM-0300-FIELDS, and LOOM-0300-SNAPSHOT are retained in docs/evidence/0300-device.md. Current merged main cccba967426387a6e84d7b22de572a6cc2886ea2 was verified on a MacBook Pro 17,1 Apple M1 8 GB, macOS 26.6.2 arm64, rustc 1.96.0 with Rust 1.88.0 MSRV, Node 26.7.0 and npm 11.19.0. The focused protocol and browser-extension suites passed 10 tests each; the full device runner passed with summary digest e09cb582c99c6d6632c24265fee0cd70598b4a05f0a6020ec17c6b4217abea3c and log manifest digest 5ccb5d690b98235ecf3eaa23ac4ddd4203418267ee29233cfa99cca3b1f7623d. Protocol-only limitations and the interactive 0301 boundary are recorded in the evidence document; no hosted Actions result is claimed.",
       "product_boundary": "LOOM remains local-first and evidence-first. Canonical source identity and evidence stay authoritative; derived indexes, model output, snapshots, and transport state remain inspectable, rebuildable, and explicitly uncertain."
     },
     {
