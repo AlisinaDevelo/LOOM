@@ -54,6 +54,8 @@ All results below are from merged-main SHA `7694d51c0dc5630e8308156ab4c9d1edcdf7
 - `markdownlint-cli2 '**/*.md' '#node_modules' '#target' '#.forge'` — 0 issues in 0 files.
 - CLI smoke on a fresh temporary database and fixture — first import `imported: 1`, second
   identical import `unchanged: 1`, both with `remote_fetches: 0` and no failures.
+- Final live audit after closure — 158 issues (144 open, 14 closed), 68 pull requests (4 open,
+  64 closed), zero unsafe public bodies, and active `main-protection` ruleset `21332347`.
 - `git diff --check` and `cargo fmt --all -- --check` — clean before the implementation merge;
   merged-main working tree remained clean during reproduction.
 
@@ -88,6 +90,9 @@ committing generated output to the repository.
 | `/tmp/loom-0303-merged-roadmap.log` | `df36f3da734b1902d0f0e6711aeb03645bc9f04afad31993b9275c55f1a82c96` |
 | `/tmp/loom-0303-merged-python.log` | `3abd2a402775222934c0517eec420f5456c385bce37f3211d74c7358ae5eb1bf` |
 | `/tmp/loom-0303-merged-markdown.log` | `10c1246d61198634e4ff20fc3d1d4d5d0a7af4fc6b13e3a3db7a3e71c008e8fd` |
+| `/tmp/loom-0303-roadmap-apply-final.log` | `dd9be20c85ddbba7616962d6eac2af119029b4bdc8f5e3d420af80aa011693b5` |
+| `/tmp/loom-0303-live-audit.log` | `16ee5fe1476da2becd32174997eca119d6c2106ea76d36d39ce88380b5b573c3` |
+| `/tmp/loom-0303-rulesets-final.json` | `09fc243d7c638969882e3c03f336844c623d61a710c90aff18159e42896c97ca` |
 
 No screenshot artifact was needed for this parser/CLI change, so no full-screen screenshot was
 captured. The UI behavior is covered by the focused React test; if visual evidence is added later,
