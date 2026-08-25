@@ -154,5 +154,26 @@ tauri-build.log            9c45973ff4a1979b4c4e30365e4d6e3d2a85fc67f2fb9890065ed
 ## Closure decision
 
 All four acceptance criteria map to source code, focused tests, CLI output, and the merged-main
-device run. The roadmap entry can be promoted to `done`; the live issue may be closed only after
-this evidence PR is merged and the final roadmap reconciliation reports zero delta.
+device run. The roadmap entry was promoted to `done` in [PR #230](https://github.com/AlisinaDevelo/LOOM/pull/230),
+and the live issue is closed as completed after the final reconciliation below.
+
+## Final roadmap reconciliation
+
+The final repository `main` after the roadmap-status merge is
+`9084ae29b0d6b036b987b76c4e238e2c9a782388`. The single-writer command was:
+
+```text
+python3 scripts/roadmap.py --apply
+```
+
+The dry-run found one intended issue update for `0304` and no label, milestone, parent, or
+dependency mutations. The apply adopted and sanitized issue [#33](https://github.com/AlisinaDevelo/LOOM/issues/33)
+and its verifier reported 154 active issues, 4 retired issues, 20 milestones, 13 phases, 141
+parent edges, and 314 dependency edges. The second plan reported zero mutations and zero unmanaged
+relationships. The apply log SHA-256 is
+`98e430a818196dae28a119f709f7412175189ed59e864554a0c1b31bddf4bdc8`.
+
+The final live issue audit found 158 real issues (143 open, 15 closed), 158 unique v2 roadmap
+markers, and no public Forge, agent, model, or routing metadata. The tracked manifest validator
+reported 154 active issues, 4 retired issues, 20 milestones, 13 phases, 141 parent edges, and 314
+dependency edges.
