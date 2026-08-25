@@ -15,7 +15,7 @@
     "lint": "npm run lint:code && npm run lint:markdown",
     "lint:code": "eslint . --max-warnings=0",
     "lint:markdown": "markdownlint-cli2 '**/*.md' '#node_modules' '#target' '#.forge'",
-    "test": "vitest run",
+    "test": "vitest run && npm run test:browser-extension",
     "test:browser-extension": "node --test browser-extension/test/capture.test.js",
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit",
