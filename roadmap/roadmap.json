@@ -388,7 +388,7 @@
     {
       "id": "0106",
       "title": "Build the Tauri desktop truth path",
-      "status": "review",
+      "status": "done",
       "quarter": "Q01",
       "phase": "v0.1 Thread",
       "workstream": "foundation",

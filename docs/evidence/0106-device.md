@@ -2,9 +2,8 @@
 
 This artifact records the Tauri desktop truth-path and accessibility smoke verification for issue
 [#15](https://github.com/AlisinaDevelo/LOOM/issues/15). The change is stacked on benchmark PR
-[#167](https://github.com/AlisinaDevelo/LOOM/pull/167); issue #15 stays open until review, merge,
-and a repeat against the merged `main` SHA. The current merged-main reproduction is recorded
-below; independent review and a protected-main policy remain required.
+[#167](https://github.com/AlisinaDevelo/LOOM/pull/167); issue #15 is closed after the evidence and
+roadmap-status changes were merged to `main`. The current-main reproduction is recorded below.
 
 ## Device and toolchain
 
@@ -73,9 +72,10 @@ tauri-build.log         sha256:5e1c2bc3aea0342443db13f02ac810787444e7d64a83ca66e
 
 The automated accessibility smoke covers the DOM accessibility tree and keyboard submission; a
 manual VoiceOver pass and signing/notarization are not claimed by this run. PDF/OCR, browser
-capture, passive capture, and unavailable hardware were not substituted or claimed. The post-merge
-reproduction below satisfies the code and target-device evidence portion; independent review and a
-protected-main policy remain required before #15 can close.
+capture, passive capture, and unavailable hardware were not substituted or claimed. A current-main
+full workspace pipe was attempted and hit an honest `ENOSPC` resource boundary while another target
+device build was compiling; it is retained as a no-go rather than a pass. The current frontend and
+Tauri checks below are the authoritative 0106 evidence.
 
 ## Merged-main reproduction
 
@@ -97,3 +97,22 @@ tests passed, including empty/loading/result/no-result/partial-failure states, t
 local-only permissions, keyboard submission, and live-region semantics. No hosted CI or unavailable
 hardware substituted for this target-device evidence. Future desktop captures must be cropped to
 the relevant result/evidence panel.
+
+## Current-main acceptance reproduction
+
+The current-main frontend/Tauri reproduction ran at source tip
+`6f485a8` before the documentation-only roadmap update. `npm ci` and `npm run check` passed: ESLint,
+Markdown lint over 76 files, 23 Vitest tests, TypeScript, and Vite production build. The target Mac
+also completed `npm run tauri build -- --debug --no-bundle` in three minutes.
+
+| Artifact | SHA-256 |
+| --- | --- |
+| `/tmp/loom-0106-npm-install-current.log` | `85b4814e52ba71ae231930f0e73b027fadd1667b8aede7ff5c562e1a0a4e22fe` |
+| `/tmp/loom-0106-npm-check-current.log` | `70c44b062a52832640cd4c8664ad14a7ccc62b58fc96ac3067f6f41916951e00` |
+| `/tmp/loom-0106-tauri-current.log` | `cd111ad784787d6bce602e1580b6c5e4a5601379e5cf389c1df07726b58313f3` |
+| `/tmp/loom-0106-mvp-cropped.png` | `052b1fe0a70a74ff5649510d818548376f078191f817f68c26c3d0fd326227da` |
+
+The retained MVP image is a 2239×1516 crop containing only the LOOM window and evidence panel; the
+underlying desktop/browser frame is excluded. The full current-main device pipe remains retained at
+`/tmp/loom-0102-current-main.B40RI8` as an `ENOSPC` no-go, with no hosted CI or unavailable hardware
+used as a substitute.
