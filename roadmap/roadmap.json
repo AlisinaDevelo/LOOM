@@ -416,7 +416,7 @@
     {
       "id": "0107",
       "title": "Add CI and supply-chain baseline checks",
-      "status": "review",
+      "status": "done",
       "quarter": "Q01",
       "phase": "v0.1 Thread",
       "workstream": "foundation",

@@ -87,6 +87,7 @@ loom_cli() {
   "$LOOM_BINARY" --database "$1" "${@:2}"
 }
 
+# shellcheck disable=SC2329
 clear_rust_outputs() {
   # The target-device runner exercises both Rust and Tauri. Keep their debug
   # artifacts sequential so a small development disk does not turn a later
@@ -98,6 +99,7 @@ clear_rust_outputs() {
   fi
 }
 
+# shellcheck disable=SC2329
 stage_cli_binary() {
   local staged_binary="$EVIDENCE_DIR/loom"
   cp "$ROOT/target/debug/loom" "$staged_binary"
@@ -108,20 +110,23 @@ stage_cli_binary() {
 
 mkdir -p "$EVIDENCE_DIR"
 : > "$COMMANDS"
-printf 'LOOM target-device verification\n' > "$SUMMARY"
-printf 'root=%s\n' "$ROOT" >> "$SUMMARY"
-sw_vers >> "$SUMMARY"
-printf 'architecture=' >> "$SUMMARY"
-uname -m >> "$SUMMARY"
-rustc --version --verbose >> "$SUMMARY"
-cargo --version >> "$SUMMARY"
-rustc +1.88.0 --version --verbose >> "$SUMMARY"
-cargo +1.88.0 --version >> "$SUMMARY"
-node --version >> "$SUMMARY"
-npm --version >> "$SUMMARY"
-git rev-parse HEAD >> "$SUMMARY"
+{
+  printf 'LOOM target-device verification\n'
+  printf 'root=%s\n' "$ROOT"
+  sw_vers
+  printf 'architecture='
+  uname -m
+  rustc --version --verbose
+  cargo --version
+  rustc +1.88.0 --version --verbose
+  cargo +1.88.0 --version
+  node --version
+  npm --version
+  git rev-parse HEAD
+} > "$SUMMARY"
 
 run_step fmt cargo fmt --all --check
+run_step diff-check git diff --check
 run_step clippy cargo clippy --workspace --all-targets --locked -- -D warnings
 run_step clear-clippy-target clear_rust_outputs
 run_step rust-workspace cargo test --workspace --locked
@@ -142,6 +147,7 @@ run_step performance-budget-tests python3 scripts/test-performance-budget.py
 run_mixed_corpus
 run_step performance-budget python3 scripts/performance-budget.py --evidence-dir "$EVIDENCE_DIR/performance" --loom "$EVIDENCE_DIR/loom"
 run_step accessibility-contract python3 scripts/test-accessibility-contract.py
+run_step ci-contract python3 scripts/test-ci-contract.py
 run_step npm-install npm ci
 run_step npm-check npm run check
 run_step security-check bash scripts/security-check.sh

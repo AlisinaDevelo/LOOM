@@ -29,6 +29,7 @@ security-check:
 
 roadmap-check:
 	python3 scripts/roadmap.py --validate-only
+	python3 scripts/test-ci-contract.py
 	python3 -m unittest discover -s tests -v
 
 verify-device:
