@@ -30,6 +30,24 @@ A successful result should identify:
 If the index is incomplete or no evidence supports a result, LOOM should say so. It should not turn
 an uncertain match into an authoritative summary.
 
+## Portfolio boundary
+
+- **Primary object:** an explicit local source artifact—file, document, screenshot, page, or
+  bookmark—together with its stable version, content hash, and evidence anchor.
+- **Primary question:** “Where is the exact thing I remember, and what source evidence makes this
+  match trustworthy?”
+- **Explicit non-goals:** LOOM is not an ambient event journal or continuous activity recorder,
+  and it is not a TypeScript architecture analyzer. Its boundary is intentional local source
+  retrieval and exact evidence viewing.
+
+## Current validation decision
+
+The 154-issue program is an option set, not a near-term build queue. After the current v0.3
+foundation gates, LOOM's next product proof is the existing design-partner alpha (roadmap `0306`):
+known-item recovery, evidence-open success, capture friction, privacy/storage cost, and repeated
+use. Do not add roadmap scope or broaden into passive capture, sync, or connector breadth until
+that study produces a continue, narrow, or stop decision.
+
 ## Who LOOM is for first
 
 | Segment                                       | First job to solve                                                                            | Why now                                                                             |
