@@ -3,8 +3,8 @@
 This artifact records the retrieval benchmark v0 schema, threshold gate, and reproducibility
 verification for issue [#14](https://github.com/AlisinaDevelo/LOOM/issues/14). The change is stacked
 on the source-backed result contract in PR [#166](https://github.com/AlisinaDevelo/LOOM/pull/166);
-issue #14 remains open until independent review and a protected-main policy are available. The
-current merged-main reproduction is recorded below.
+issue #14 is closed after the evidence and roadmap-status changes were merged to `main`. The
+current-main reproduction is recorded below.
 
 ## Device and toolchain
 
@@ -71,9 +71,10 @@ tauri-build.log         sha256:a87dcd019b2d9c611bb8ec6357b3731c883dc2bb336912a1d
 
 This is a deterministic, rights-clean local-text smoke benchmark, not evidence of real-world
 retrieval quality. PDF/OCR, screenshots, saved web pages, passive capture, and unavailable
-hardware were not substituted or claimed. The post-merge reproduction below satisfies the code and
-target-device evidence portion; independent review and a protected-main policy remain required
-before #14 can close.
+hardware were not substituted or claimed. A current-main full workspace pipe was attempted and hit
+an honest `ENOSPC` resource boundary while another target device build was compiling; it is retained
+as a no-go rather than a pass. The current v0 benchmark and threshold-negative unit coverage below
+are the authoritative 0105 evidence.
 
 ## Merged-main reproduction
 
@@ -96,3 +97,24 @@ precision 1.0, false-positive rate 0.0, completeness 1.0, median latency 0.185 m
 0.518041 ms, and an empty failure list. Existing threshold-negative tests remain part of the
 retained Rust/fixture test evidence. No hosted CI or unavailable hardware substituted for this
 target-device evidence. Future desktop captures must be cropped to the relevant evidence panel.
+
+## Current-main acceptance reproduction
+
+The passing v0 benchmark was run against the current-main-compatible CLI binary from the same
+target-device source line. It indexed 3/3 synthetic fixtures with completeness 1.0, exact-source
+Recall@1/5 1.0, anchor precision 1.0, false-positive rate 0.0, median latency 0.131 ms, and p95
+latency 2.058 ms. The report included the declared thresholds and an empty failure list. The
+threshold-negative Rust test rejects both a false-positive regression and an incomplete index.
+
+The supplementary v1 benchmark also met its looser declared gate (Recall@1/5 0.9, anchor
+precision 1.0, false-positive rate 0.154, completeness 1.0); its two local-text failure taxonomy
+entries remain visible in the retained log rather than being hidden.
+
+| Artifact | SHA-256 |
+| --- | --- |
+| `/tmp/loom-0105-bench-current.log` | `b2f2ec12642c8669422473aec30840a986880d4a139b3fd5be625426f977b150` |
+| `/tmp/loom-0105-hybrid-current.log` | `720c7664cea7fe63e87b12725a612bc3e2f054bcc4fefbd2f00aa353ae17aa1e` |
+
+The complete current-main pipe is retained at `/tmp/loom-0102-current-main.B40RI8`; formatting and
+Clippy passed, while workspace/MSRV compilation stopped at `ENOSPC`. Hosted CI was not used as a
+substitute, and no unavailable hardware was involved.
