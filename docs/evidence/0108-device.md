@@ -1,20 +1,17 @@
 # LOOM 0108 device evidence
 
 This artifact records durable indexing checkpoints, atomic unit commits, migration, restart
-recovery, and idempotent retry for issue [#17](https://github.com/AlisinaDevelo/LOOM/issues/17). The
-change is stacked on CI/security PR [#170](https://github.com/AlisinaDevelo/LOOM/pull/170); issue 17
-remains open until independent review and a protected-main policy are available. The current
-merged-main reproduction is recorded below.
+recovery, and idempotent retry for issue [#17](https://github.com/AlisinaDevelo/LOOM/issues/17).
+The durable-index implementation is already present on current `main`; this evidence closes the
+roadmap item after the evidence/status merge. Hosted Actions are not used as evidence here.
 
 ## Device and toolchain
 
 - Device: MacBook Pro 17,1, Apple M1, 8 GB
 - OS: macOS 26.6.2 (25G83), `aarch64-apple-darwin` / arm64
-- Native toolchain: `rustc 1.96.0` / Cargo 1.96.0, Node v26.7.0, npm 11.19.0
-- Declared MSRV toolchain: `rustc 1.88.0` (`6b00bc3880198600130e1cf62b8f8a93494488cc`),
-  Cargo 1.88.0
-- Source under test: `4ffbc6307ba8c93048bbf69474a92593132b2f93`
-  (`feature/issue-17-durable-index`)
+- Native toolchain: `rustc 1.96.0` / Cargo 1.96.0; declared MSRV `rustc 1.88.0`
+- Runtime-tested implementation baseline: `421bc6d469ba87a144495d0bf470d16ce44ec40f`
+- Current main at evidence preparation: `924ccb3950dbc3f3c077452f1189d097ab5d92fb`
 
 ## Acceptance-criterion evidence map
 
@@ -25,22 +22,29 @@ merged-main reproduction is recorded below.
 | `LOOM-0108-IDEMPOTENCE` | Retries are idempotent for the same source version | The same integration test searches both recovered markers, then runs a third scan and asserts `indexed=0`, `unchanged=2`, no failures, and exactly two content versions. Existing canonical-store tests also cover unchanged projections and extractor-version reprojection. |
 | `LOOM-0108-MIGRATION` | Checkpoint schema is durable and compatible with the current local store | Schema version 3 adds `index_jobs`; `store::tests::migrates_v2_checkpoint_schema_without_overwriting_existing_marker` opens a version-2 marker, creates the checkpoint table transactionally, and records version 3. Unknown and pre-alpha version 1 markers remain fail-closed. |
 
-## Target-device reproduction
+## Current target-device reproduction
 
-The checked-in harness is [`scripts/verify-device.sh`](../../scripts/verify-device.sh):
+The focused current-main Rust run is retained at `/tmp/loom-0102-focused-current.log`
+(`sha256:067ba921fbbceb562010d8bc1b6d05b75f445484579fbb11bf428259d2651435`) and the MSRV run at
+`/tmp/loom-0102-msrv-current.log`
+(`sha256:7ad063c8e87ee22fe8026d31c866374f7780d279941c511e03e2bb454b000ec1`). Each reports 93
+passing tests and zero failures. The native log includes 36 store/unit tests, the 3-test durable
+index integration suite, the 2-test cancellation suite, and the schema compatibility migration
+tests; the MSRV run includes the same durable and migration assertions.
 
-```text
-bash scripts/verify-device.sh /tmp/loom-0108-device-final.aHrVpm
-```
+The source-equivalence record `/tmp/loom-0108-source-equivalence.log` has SHA-256
+`08923a150b189a5bf4dbf76167c88feeb421716da87e2978d8599732c5093860`: durable implementation and
+test paths are unchanged between `421bc6d` and current `main`, and current formatting passes.
 
-The final run completed with `status=PASS` and exit code 0 at source commit
-`4ffbc6307ba8c93048bbf69474a92593132b2f93`. Format, clippy, the full Rust workspace, MSRV check
-and tests, `npm ci`, `npm run check`, retrieval benchmark, local security check, Tauri debug build,
-and mixed failure/recovery corpus all passed. The Rust workspace included 20 core unit tests, the
-durable-index integration test, fixture/result contract tests, and CLI tests; the frontend check
-included 2 files and 6 tests.
+The full workspace pipe was attempted on this device during the adjacent 0107 validation and hit
+`ENOSPC` while compiling Tauri dependencies; it is retained at `/tmp/loom-0107-full-current.SNOOaO`
+as a resource no-go, not a hidden pass. No hosted CI or unavailable hardware substitutes for the
+current Rust evidence.
 
-The retrieval benchmark indexed 3/3 synthetic fixtures with completeness 1.0, exact-source
+## Historical full-pipe corroboration
+
+The earlier full run at implementation commit `4ffbc6307ba8c93048bbf69474a92593132b2f93` indexed
+3/3 synthetic fixtures with completeness 1.0, exact-source
 Recall@1 1.0, Recall@5 1.0, anchor precision 1.0, false-positive rate 0.0, median latency
 0.190542 ms, and p95 latency 0.399375 ms.
 
@@ -50,7 +54,7 @@ file, and an outside-root symlink. Initial indexing reported `discovered=4`, `in
 oversized file recovered it on the next index with `indexed=1`, `unchanged=2`, `skipped=1`, and no
 failures. Final stats were 3 artifacts, 3 versions, 3 passages, and 250 indexed bytes.
 
-The first full harness attempt at implementation commit `1d945c5` failed only on two markdownlint
+The first full harness attempt at that implementation family (`1d945c5`) failed only on two markdownlint
 column-alignment diagnostics in the new table. The table was corrected in `4ffbc63`, markdown lint
 was rerun clean, and the complete harness above was rerun from that corrected commit.
 
@@ -73,32 +77,12 @@ security-check.log      sha256:c926ea4e1be775594a3a85e088dd3984f0ba85c12ecae78d0
 tauri-build.log         sha256:5c6a6530cdbd50f24fab4b5c6eed360772fd4fc201670a0d6d5056d08528ccc9
 ```
 
-## Limitations and closure gate
+## Limitations and closure boundary
 
-This run proves the durable-index behavior on the specified Mac; it does not claim a hosted Actions
-result, a different OS/architecture, forced power-loss hardware behavior, notarization, a
-third-party security audit, or a cargo-audit result. The fault hook simulates termination at a
-durable unit boundary without killing the test runner. The post-merge reproduction below satisfies
-the code and target-device evidence portion; independent review and a protected-main policy remain
-required before #17 can close.
-
-## Merged-main reproduction
-
-The same target-device harness was rerun against runtime-tested merged `main` commit
-`eee1236710b98375e86b12187d545ed451ee2b7c` on the Mac specified above. The final main tip
-`8af236898ae17d898faa82d4acf351c322ac1898` adds only documentation and roadmap metadata after
-that runtime-tested commit; no durable-index source changed.
-
-- Verification directory: `/tmp/loom-0110-main-device.QLkKl1`
-- Harness summary SHA-256: `45bc997dcb26b8bc6cbd63a09fa17aed6c5d4ae968ef349be473b0b034e94e70`
-- Commands SHA-256: `d840925fb008af9101dc3121870b79960c1b6924451df17a7851f2f6132bb209`
-- Log manifest: `/tmp/loom-0110-main-device.QLkKl1/log-sha256.txt`
-- Log manifest SHA-256: `ed539c48e8c9b648f0ae341ddf37f02107d5aacff5d5e2a19ae0d28612c57d64`
-
-The full local pipe passed: format, warnings-denied Clippy, workspace tests, Rust 1.88 MSRV
-check/tests, `npm ci`, `npm run check`, retrieval benchmark, semantic contract, local security
-scan, Tauri debug build, and mixed-corpus failure/recovery. The durable-index integration tests
-passed atomic unit commits, interruption checkpoint recovery, idempotent retry, and schema-v2
-migration; the mixed corpus passed bounded failure/recovery. No hosted CI or unavailable hardware
-substituted for this target-device evidence. Future desktop captures must be cropped to the
-relevant evidence panel.
+The current focused run proves durable-index behavior on the specified Mac; it does not claim a
+hosted Actions result, a different OS/architecture, forced power-loss hardware behavior,
+notarization, a third-party security audit, or a `cargo-audit` result. The fault hook simulates
+termination at a durable unit boundary without killing the test runner. The repository currently
+has no protected-branch policy configured; the issue was closed after the owner-reviewed merge and
+roadmap reconciliation. Future full-pipe runs should reclaim at least 1 GiB before compiling the
+workspace, and desktop captures must remain cropped to the relevant evidence panel.
