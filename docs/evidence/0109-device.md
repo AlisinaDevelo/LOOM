@@ -2,19 +2,16 @@
 
 This artifact records approved-root observation hints, deterministic coalescing, content-hash
 reconciliation, and restart recovery for issue [#18](https://github.com/AlisinaDevelo/LOOM/issues/18).
-The change is stacked on durable-index PR [#171](https://github.com/AlisinaDevelo/LOOM/pull/171);
-issue 18 remains open until independent review and a protected-main policy are available. The
-current merged-main reproduction is recorded below.
+The observation implementation is present on current `main`; this evidence closes the roadmap item
+after the evidence/status merge. Hosted Actions are not used as evidence here.
 
 ## Device and toolchain
 
 - Device: MacBook Pro 17,1, Apple M1, 8 GB
 - OS: macOS 26.6.2 (25G83), `aarch64-apple-darwin` / arm64
-- Native toolchain: `rustc 1.96.0` / Cargo 1.96.0, Node v26.7.0, npm 11.19.0
-- Declared MSRV toolchain: `rustc 1.88.0` (`6b00bc3880198600130e1cf62b8f8a93494488cc`),
-  Cargo 1.88.0
-- Source under test: `738dfac97f4cbecc979079d7df12a0177d54d5a7`
-  (`feature/issue-18-observation`)
+- Native toolchain: `rustc 1.96.0` / Cargo 1.96.0; declared MSRV `rustc 1.88.0`
+- Runtime-tested implementation baseline: `421bc6d469ba87a144495d0bf470d16ce44ec40f`
+- Current main at evidence preparation: `7648eca51c7832c0ae0fe297b8882d8700f8cfcb`
 
 ## Acceptance-criterion evidence map
 
@@ -25,20 +22,23 @@ current merged-main reproduction is recorded below.
 | `LOOM-0109-RENAME-DELETE` | Rename and deletion reconcile without stale searchable evidence | The target-device integration fixture renames `old.md`, deletes `retained.md`, and sends the coalesced hints. The old marker disappears, the renamed marker remains source-backed, and no failure is reported. |
 | `LOOM-0109-MISSED-EVENT` | Overflow/missed-event recovery converges through a full scan | The same fixture adds a new file and sends an `overflow` event; the full rescan makes its marker searchable. A restart then runs `reconcile_approved_roots` and reports one scanned root, zero failed roots, one full rescan, and no failures. |
 
-## Target-device reproduction
+## Current target-device reproduction
 
-The checked-in harness is [`scripts/verify-device.sh`](../../scripts/verify-device.sh):
+The focused current-main Rust run is retained at `/tmp/loom-0102-focused-current.log`
+(`sha256:067ba921fbbceb562010d8bc1b6d05b75f445484579fbb11bf428259d2651435`) and the MSRV run at
+`/tmp/loom-0102-msrv-current.log`
+(`sha256:7ad063c8e87ee22fe8026d31c866374f7780d279941c511e03e2bb454b000ec1`). Each reports 93
+passing tests and zero failures. The native run includes the durable/observation integration suite
+and source-root persistence tests; the MSRV run repeats the same observation and restart cases.
 
-```text
-bash scripts/verify-device.sh /tmp/loom-0109-device-rerun.eMgOjj
-```
+The source-equivalence record `/tmp/loom-0108-source-equivalence.log` (SHA-256
+`08923a150b189a5bf4dbf76167c88feeb421716da87e2978d8599732c5093860`) proves the observation paths
+are unchanged between runtime baseline `421bc6d` and current `main`, with formatting passing.
 
-The run completed with `status=PASS` and exit code 0 at source commit
-`738dfac97f4cbecc979079d7df12a0177d54d5a7`. Format, clippy, the full Rust workspace, MSRV check
-and tests, `npm ci`, `npm run check`, retrieval benchmark, local security check, Tauri debug build,
-and mixed failure/recovery corpus all passed. The Rust workspace included 23 core unit tests, 3
-durable/observation integration tests, fixture/result contracts, and CLI tests; the frontend check
-included 2 files and 6 tests.
+The full workspace pipe was attempted on this device during the adjacent 0107 validation and hit
+`ENOSPC` while compiling Tauri dependencies; it is retained at `/tmp/loom-0107-full-current.SNOOaO`
+as a resource no-go, not a hidden pass. No hosted CI or unavailable hardware substitutes for the
+current observation evidence.
 
 The retrieval benchmark indexed 3/3 synthetic fixtures with completeness 1.0, exact-source
 Recall@1 1.0, Recall@5 1.0, anchor precision 1.0, false-positive rate 0.0, median latency
@@ -69,33 +69,13 @@ security-check.log      sha256:8bbd30f4da5b54b078926531ae0c45850eb90689a9d12b701
 tauri-build.log         sha256:883e22f7931142c09051cc0e0bb6e7f2d5482180606ed3b6bd6c303a63aaa76b
 ```
 
-## Limitations and closure gate
+## Limitations and closure boundary
 
 This run proves the bounded persisted-root reconciliation boundary on the specified Mac; it does
 not claim native FSEvents parity, a continuous watcher latency/resource benchmark, another
-OS/architecture, notarization, a third-party security audit, or a cargo-audit result. The current
-desktop path performs a startup reconciliation of persisted roots; a native event adapter can be
-added later without changing the scope/content-hash contract. The post-merge reproduction below
-satisfies the code and target-device evidence portion; independent review and a protected-main
-policy remain required before issue 18 can close.
-
-## Merged-main reproduction
-
-The same target-device harness was rerun against runtime-tested merged `main` commit
-`eee1236710b98375e86b12187d545ed451ee2b7c` on the Mac specified above. The final main tip
-`8af236898ae17d898faa82d4acf351c322ac1898` adds only documentation and roadmap metadata after
-that runtime-tested commit; no observation source changed.
-
-- Verification directory: `/tmp/loom-0110-main-device.QLkKl1`
-- Harness summary SHA-256: `45bc997dcb26b8bc6cbd63a09fa17aed6c5d4ae968ef349be473b0b034e94e70`
-- Commands SHA-256: `d840925fb008af9101dc3121870b79960c1b6924451df17a7851f2f6132bb209`
-- Log manifest: `/tmp/loom-0110-main-device.QLkKl1/log-sha256.txt`
-- Log manifest SHA-256: `ed539c48e8c9b648f0ae341ddf37f02107d5aacff5d5e2a19ae0d28612c57d64`
-
-The full local pipe passed: format, warnings-denied Clippy, workspace tests, Rust 1.88 MSRV
-check/tests, `npm ci`, `npm run check`, retrieval benchmark, semantic contract, local security
-scan, Tauri debug build, and mixed-corpus failure/recovery. Observation integration tests passed
-approved-root scope/restart, deterministic coalescing, rename/delete reconciliation, overflow
-full-rescan recovery, and persisted-root restart behavior. No hosted CI or unavailable hardware
-substituted for this target-device evidence. Future desktop captures must be cropped to the
-relevant evidence panel.
+OS/architecture, notarization, a third-party security audit, or a `cargo-audit` result. The current
+desktop path performs startup reconciliation of persisted roots; a native event adapter can be
+added later without changing the scope/content-hash contract. The repository currently has no
+protected-branch policy configured; the issue was closed after the owner-reviewed merge and roadmap
+reconciliation. Future full-pipe runs should reclaim at least 1 GiB before compiling the workspace,
+and desktop captures must remain cropped to the relevant evidence panel.
