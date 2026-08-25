@@ -216,7 +216,7 @@
         "area:core",
         "area:product"
       ],
-      "closure_evidence": "Evidence retained in docs/evidence/0301-device.md: LOOM-0301-INTENT, LOOM-0301-SANITIZE, and LOOM-0301-CONTRACT map the least-privilege manifests, visible-action wiring, sanitizer, authenticated payload fixtures, redirect/offline/denied cases, and cross-browser contract tests. The exact merged-main device rerun is 84dff076c0b397ea703c96905279a70d3ac82b25 on MacBook Pro 17,1 Apple M1 8GB, macOS 26.6.2 (25G83) arm64, rustc/cargo 1.96.0 with Rust 1.88.0 MSRV, Node 26.7.0/npm 11.19.0; scripts/verify-device.sh returned PASS. Retained summary SHA-256 d69b7c440244370d489b9cc853853148a6cb3667a591156871b4b20f94c0026f, npm-check SHA-256 1df3da73093047a1e222f9a2d05818b04c2fd308946d03f8d2dce00c05ac4f9d, log manifest SHA-256 ccffb72c8c64f4570fc3dd6d201f7b8d9b4b47d6f8780f5116ae5489b616541d, and performance report SHA-256 adffa915103e31eb7d63262f162d2aac94bf05de9cf544e6cc33dca592f5bf4f. The interactive browser permission/native-host session remains an explicit review gate; no success is claimed.",
+      "closure_evidence": "Record the exact tests, fixtures, measurements, review artifacts, or consented study evidence that satisfy every criterion; report only work actually performed.",
       "product_boundary": "LOOM remains local-first and evidence-first. Canonical source identity and evidence stay authoritative; derived indexes, model output, snapshots, and transport state remain inspectable, rebuildable, and explicitly uncertain."
     },
     {
@@ -1124,7 +1124,7 @@
         "area:connector",
         "area:ingestion"
       ],
-      "closure_evidence": "Record the exact tests, fixtures, measurements, review artifacts, or consented study evidence that satisfy every criterion; report only work actually performed.",
+      "closure_evidence": "Evidence retained in docs/evidence/0301-device.md: LOOM-0301-INTENT, LOOM-0301-SANITIZE, and LOOM-0301-CONTRACT map the least-privilege manifests, visible-action wiring, sanitizer, authenticated payload fixtures, redirect/offline/denied cases, and cross-browser contract tests. The exact merged-main device rerun is 84dff076c0b397ea703c96905279a70d3ac82b25 on MacBook Pro 17,1 Apple M1 8GB, macOS 26.6.2 (25G83) arm64, rustc/cargo 1.96.0 with Rust 1.88.0 MSRV, Node 26.7.0/npm 11.19.0; scripts/verify-device.sh returned PASS. Retained summary SHA-256 d69b7c440244370d489b9cc853853148a6cb3667a591156871b4b20f94c0026f, npm-check SHA-256 1df3da73093047a1e222f9a2d05818b04c2fd308946d03f8d2dce00c05ac4f9d, log manifest SHA-256 ccffb72c8c64f4570fc3dd6d201f7b8d9b4b47d6f8780f5116ae5489b616541d, and performance report SHA-256 adffa915103e31eb7d63262f162d2aac94bf05de9cf544e6cc33dca592f5bf4f. The interactive browser permission/native-host session remains an explicit review gate; no success is claimed.",
       "product_boundary": "LOOM remains local-first and evidence-first. Canonical source identity and evidence stay authoritative; derived indexes, model output, snapshots, and transport state remain inspectable, rebuildable, and explicitly uncertain."
     },
     {
