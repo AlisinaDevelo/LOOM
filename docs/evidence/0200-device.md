@@ -4,9 +4,9 @@ This artifact records the bounded PDF extraction and page-evidence contract for 
 [#19](https://github.com/AlisinaDevelo/LOOM/issues/19), roadmap ID `0200`. PDF source bytes remain
 canonical; extraction output, page anchors, warnings, and FTS rows are inspectable derived
 records. The renderer/open operation remains bound to the verified original path.
-The implementation was merged through PR [#179](https://github.com/AlisinaDevelo/LOOM/pull/179);
-the current merged-main reproduction is recorded below. Issue #19 remains in `review` until
-independent approval and protected-main enforcement are available.
+The implementation was merged through PR [#179](https://github.com/AlisinaDevelo/LOOM/pull/179).
+The current-main focused rerun is recorded at the end of this artifact; the roadmap status is
+advanced after that evidence is merged and reconciled.
 
 ## Device and toolchain
 
@@ -97,8 +97,8 @@ outcomes, and local original-path verification. The current slice does not embed
 promise pixel-perfect in-app page scrolling; the verified source path remains the render authority
 for the user's PDF viewer. It also does not claim OCR for image-only PDFs, another OS/architecture,
 notarization, a third-party security audit, or a large-library performance benchmark. The
-post-merge reproduction below satisfies the code and target-device evidence portion; independent
-review and protected-main enforcement remain required before issue #19 can close.
+current focused rerun below is the code/device authority; no hosted Actions result or
+protected-branch enforcement was used.
 
 ## Merged-main reproduction
 
@@ -118,3 +118,14 @@ anchors, warnings, malformed/encrypted/image-only/oversized fail-closed behavior
 frontend checks preserved the PDF page label and anchor. Retrieval, security, Tauri, and mixed
 failure/recovery checks also passed. No hosted Actions or unavailable hardware substituted for this
 target-device evidence. Future desktop captures must be cropped to the relevant evidence panel.
+
+## Current merged-main focused rerun
+
+The focused PDF suite was run against source-equivalent current `main` commit
+`56203c442faeb6a72d52702c125db64e823fa6a9` (implementation source remains equivalent to
+`87d1e03ffe2a43fed33826df58360e456ca4c753`) on the target Mac. The low-footprint log
+`/tmp/loom-0200-03-focused-current.xxCDT1/focused.log` (SHA-256
+`dc8a8d5d21c063ef17bb39bc927c1dc98f40a1ce5f89411fd23682fb68352f83`) records 2 PDF tests passed,
+5 image-OCR tests passed, and 6 semantic-index tests passed. The current frontend `npm run check`
+also passed 23 tests, TypeScript, lint, and Vite build; its log SHA-256 is
+`66dc7617e127acdc9f5a5fb533e8fa146a6a6faffac91def5ecec437595d42d3`.

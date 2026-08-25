@@ -3,9 +3,9 @@
 This artifact records issue [#21](https://github.com/AlisinaDevelo/LOOM/issues/21) at
 implementation commit [`b98862e`](https://github.com/AlisinaDevelo/LOOM/commit/b98862ebc36c0e5b3222c6415335da4b4084621a).
 The viewer and native OCR provider were exercised on the target Mac, not in hosted CI.
-The viewer was merged through PR [#181](https://github.com/AlisinaDevelo/LOOM/pull/181); the
-current merged-main reproduction is recorded below. Issue #21 remains in `review` until
-independent approval and protected-main enforcement are available.
+The viewer was merged through PR [#181](https://github.com/AlisinaDevelo/LOOM/pull/181). The
+current-main focused rerun is recorded at the end of this artifact; the roadmap status is advanced
+after that evidence is merged and reconciled.
 
 ## Reproduction environment
 
@@ -75,10 +75,9 @@ document renderer. OCR confidence, coordinates, extractor identity, and source h
 so a user can open the original when visual inspection is required. No screenshot was used as
 acceptance evidence; any future UI capture must be cropped to the relevant result/viewer region.
 
-The post-merge reproduction below satisfies the code and target-device evidence portion. Merge
-remains gated on independent approval and protected `main`; the target repository currently
-reports `main` unprotected. Future desktop captures must be cropped to the relevant result/viewer
-region.
+The focused current-main rerun below is the code/device authority. The target repository currently
+reports `main` unprotected; that governance limitation remains explicit. Future desktop captures
+must be cropped to the relevant result/viewer region.
 
 ## Merged-main reproduction
 
@@ -98,3 +97,15 @@ changed originals, rotation/HiDPI projection, local command capabilities, and ac
 states; native Vision and PDF fixtures also passed. No hosted Actions or unavailable hardware
 substituted for this target-device evidence. The original path remains authoritative and future
 desktop captures must be cropped to the relevant evidence panel.
+
+## Current merged-main focused rerun
+
+The focused PDF/image suites were run against source-equivalent current `main` commit
+`56203c442faeb6a72d52702c125db64e823fa6a9` (implementation source remains equivalent to
+`87d1e03ffe2a43fed33826df58360e456ca4c753`) on the target Mac. The low-footprint log
+`/tmp/loom-0200-03-focused-current.xxCDT1/focused.log` (SHA-256
+`dc8a8d5d21c063ef17bb39bc927c1dc98f40a1ce5f89411fd23682fb68352f83`) records 2 PDF and 5 image-OCR
+tests passed; the current frontend check passed 23 tests, including verified evidence, stale-state,
+and coordinate projection behavior, plus TypeScript, lint, and Vite build. No hosted Actions result
+was used. The cropped MVP evidence capture remains `/tmp/loom-0106-mvp-cropped.png` (2239×1516,
+SHA-256 `052b1fe0a70a74ff5649510d818548376f078191f817f68c26c3d0fd326227da`).

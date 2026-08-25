@@ -3,9 +3,9 @@
 This artifact records issue [#20](https://github.com/AlisinaDevelo/LOOM/issues/20) at
 implementation commit [`ce09aee`](https://github.com/AlisinaDevelo/LOOM/commit/ce09aee8a3d0e1d26f6252f8880de1656ea4e9ba).
 The OCR provider was exercised on the target Mac, not in hosted CI.
-The implementation was merged through PR [#180](https://github.com/AlisinaDevelo/LOOM/pull/180);
-the current merged-main reproduction is recorded below. Issue #20 remains in `review` until
-independent approval and protected-main enforcement are available.
+The implementation was merged through PR [#180](https://github.com/AlisinaDevelo/LOOM/pull/180).
+The current-main focused rerun is recorded at the end of this artifact; the roadmap status is
+advanced after that evidence is merged and reconciled.
 
 ## Reproduction environment
 
@@ -68,10 +68,9 @@ and image-only PDF rendering remain outside this issue. The database still conta
 and is not encrypted at rest. No screenshot was used as acceptance evidence; any future UI capture
 must be cropped to the relevant result/control.
 
-The issue is implementation-ready for review. The post-merge reproduction below satisfies the code
-and target-device evidence portion; independent approval and protected-main enforcement remain
-required. The target repository currently reports `main` unprotected. Future desktop captures must
-be cropped to the relevant result/control panel.
+The focused current-main rerun below is the code/device authority. The target repository currently
+reports `main` unprotected; that governance limitation and the macOS-only provider boundary remain
+explicit. Future desktop captures must be cropped to the relevant result/control panel.
 
 ## Merged-main reproduction
 
@@ -91,3 +90,14 @@ malformed-input recovery, derived-record purge/re-enable, and source-backed imag
 the focused OCR contract also passed under Rust 1.88. No hosted Actions or unavailable hardware
 substituted for this target-device evidence. The database-derived OCR and non-macOS limitations
 remain explicit.
+
+## Current merged-main focused rerun
+
+The focused image-OCR suite was run against source-equivalent current `main` commit
+`56203c442faeb6a72d52702c125db64e823fa6a9` (implementation source remains equivalent to
+`87d1e03ffe2a43fed33826df58360e456ca4c753`) on the target Mac. The low-footprint log
+`/tmp/loom-0200-03-focused-current.xxCDT1/focused.log` (SHA-256
+`dc8a8d5d21c063ef17bb39bc927c1dc98f40a1ce5f89411fd23682fb68352f83`) records all 5 image-OCR
+tests passed, including native Vision metadata/geometry, malformed recovery, and purge/re-enable.
+The same current frontend check passed 23 tests, TypeScript, lint, and Vite build; no hosted Actions
+result was used.

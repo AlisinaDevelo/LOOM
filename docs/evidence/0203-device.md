@@ -3,7 +3,8 @@
 - Issue: [#22](https://github.com/AlisinaDevelo/LOOM/issues/22)
 - Implementation commit: d46dd803506d0a681bee451765e2276f37065432
 - Implementation PR: [#182](https://github.com/AlisinaDevelo/LOOM/pull/182)
-- Roadmap status: `review`; independent approval and protected-main enforcement remain pending.
+- Roadmap status is advanced after the current-main focused evidence is merged and reconciled;
+  protected-main enforcement remains a documented governance limitation.
 - Verification run: /tmp/loom-0203-device-final.mpz6X2
 - Verification status: PASS
 - Verification date: 2026-08-24
@@ -128,3 +129,13 @@ metadata after that run, so no semantic implementation changed. The retained run
 semantic drop/rebuild and fail-closed provider tests alongside the full retrieval, security,
 frontend, Tauri, and mixed-corpus checks. No hosted Actions or unavailable hardware substituted;
 future desktop captures must be cropped to the relevant evidence panel.
+
+## Current merged-main focused rerun
+
+The focused semantic-index suite was run against source-equivalent current `main` commit
+`56203c442faeb6a72d52702c125db64e823fa6a9` (implementation source remains equivalent to
+`87d1e03ffe2a43fed33826df58360e456ca4c753`) on the target Mac. The low-footprint log
+`/tmp/loom-0200-03-focused-current.xxCDT1/focused.log` (SHA-256
+`dc8a8d5d21c063ef17bb39bc927c1dc98f40a1ce5f89411fd23682fb68352f83`) records all 6 semantic-index
+tests passed, including deterministic rebuild, source-version drift, incompatible manifests, and
+tampered passage fail-closed behavior. No hosted Actions result was used.
