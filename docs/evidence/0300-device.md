@@ -92,3 +92,28 @@ roadmap validation: 154 active, 4 retired, 20 milestones, 13 phases, 141 parent 
 
 No hosted Actions result or interactive browser session is used for this protocol-only closure;
 those implementation and permission boundaries remain visible in the dependent issues.
+
+## Current merged-main full device rerun
+
+The repository device runner was rerun against the exact merged-main SHA
+`cccba967426387a6e84d7b22de572a6cc2886ea2` on the target Mac. It completed with `status=PASS`.
+The runner exercised rustfmt, warnings-denied Clippy, the locked stable workspace, Rust 1.88
+check/tests, retrieval v0/v1, adversarial PDF, hybrid ablation, semantic drop/rebuild, mixed
+failure/recovery, 10k/100k performance, accessibility, npm lint/tests/typecheck/build, security,
+and the debug Tauri build.
+
+```text
+runner directory: /tmp/loom-0300-merged-device
+summary sha256: e09cb582c99c6d6632c24265fee0cd70598b4a05f0a6020ec17c6b4217abea3c
+commands sha256: 378b9e3475cf7ef87961ccf8f3f11f9b937e28300b3d1d9a737c75d1328ca1e8
+log manifest sha256: 5ccb5d690b98235ecf3eaa23ac4ddd4203418267ee29233cfa99cca3b1f7623d
+performance report sha256: 47df7dc895742365af2f7905bec1327e55dbf37c78411793e2494cf80b21d51a
+```
+
+The 100k release gate passed with 1,202.03 artifacts/s minimum throughput, 0.43125 ms warm
+query p95, 127,959,040-byte maximum RSS, 10.0365× database amplification, 0.6051 CPU seconds
+per 1,000 artifacts, and 6.4623-second FTS rebuild. The current-main focused browser/protocol
+rerun remains under `/tmp/loom-0300-merged-focused`; it recorded 10 protocol tests and 10
+extension contract tests on the same merged SHA. No user source bytes were uploaded. Interactive
+browser permission and native-host behavior remain explicitly outside 0300 and are tracked by
+0301.
