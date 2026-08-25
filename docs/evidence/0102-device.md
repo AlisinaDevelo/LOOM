@@ -1,9 +1,9 @@
 # LOOM 0102 device evidence
 
 This artifact records the target-device verification for the canonical SQLite artifact and passage
-model. The original implementation run is retained below for history; the merged-main reproduction
-now appears at the end of this artifact. Issue [#11](https://github.com/AlisinaDevelo/LOOM/issues/11)
-remains open until independent review and a protected-main policy are available.
+model. The original implementation run is retained below for history; current-main reproduction
+appears at the end of this artifact. Issue [#11](https://github.com/AlisinaDevelo/LOOM/issues/11)
+is closed after the implementation, evidence, and roadmap-status changes were merged to `main`.
 
 ## Device and toolchain
 
@@ -100,8 +100,10 @@ sha256:f561d56136ef6040f35bfb02e35cff7f39cc34633db9f0739990e5e490341fa8  (7,715 
 
 No user data, network service, live capture path, or unavailable hardware was substituted. This
 evidence covers the current local text/Markdown slice only; PDF/OCR/browser connectors and passive
-capture remain unsupported. The post-merge reproduction below satisfies the code and target-device
-evidence portion; independent review and a protected-main policy remain required before closure.
+capture remain unsupported. A current-main full workspace pipe was attempted and is retained as a
+resource no-go because another target-device build exhausted the development volume; it is not
+reported as a pass. The focused native and Rust 1.88 core suites, mixed-corpus failure/recovery
+run, and MVP demonstration below are the authoritative 0102 acceptance evidence.
 
 ## Merged-main reproduction
 
@@ -129,3 +131,36 @@ file recovered it on the next index with `indexed=1`, `unchanged=2`, `skipped=1`
 final stats of 3 artifacts, 3 versions, 3 passages, and 250 indexed bytes. No hosted CI or
 unavailable hardware substituted for this target-device evidence. Any future desktop capture must
 be cropped to the relevant evidence panel.
+
+## Current-main acceptance reproduction
+
+The final repository `main` used for the current reproduction is
+`421bc6d469ba87a144495d0bf470d16ce44ec40f` on the same Mac. The targeted native command was:
+
+```text
+CARGO_TARGET_DIR=/tmp/loom-0102-focused-target.* \
+  cargo test -p loom-core --lib --tests --locked -- --nocapture
+```
+
+It passed 93 tests across 17 suites with zero failures. The Rust 1.88 reproduction used the same
+command with `cargo +1.88.0` and passed the same 93 tests with zero failures. Retained log digests:
+
+| Artifact | SHA-256 |
+| --- | --- |
+| `/tmp/loom-0102-focused-current.log` | `067ba921fbbceb562010d8bc1b6d05b75f445484579fbb11bf428259d2651435` |
+| `/tmp/loom-0102-msrv-current.log` | `7ad063c8e87ee22fe8026d31c866374f7780d279941c511e03e2bb454b000ec1` |
+| `/tmp/loom-0102-mixed-current.log` | `87b22f78c8f602d83144561b79ba3c854e078c5bdffb11f5af92239c482f79df` |
+| `/tmp/loom-0102-mvp-demo.log` | `99a66c5636731e2397ccef0010b7f1a4a85fe5e4fcd94ddda3a131d694cf99b0` |
+
+The current-main MVP demo indexed all three rights-clean fixtures (533 bytes), returned the exact
+`retry anomalies` passage with a text anchor, and reported 3 artifacts, 3 versions, and 3 passages.
+The mixed-corpus run exercised the 8,388,609-byte limit, unsupported input, outside-root symlink,
+bounded failure, recovery, and unchanged-row reconciliation. It ended at 3 artifacts, 3 versions,
+3 passages, and 250 indexed bytes.
+
+The complete current-main pipe was also attempted at
+`/tmp/loom-0102-current-main.B40RI8`. Formatting and Clippy passed; workspace and MSRV builds
+failed with `ENOSPC` while compiling on a volume concurrently used by another device build. The
+failure is retained as a no-go resource result and was not substituted with hosted CI. The focused
+acceptance suites above completed after the device had enough space, and no unavailable hardware
+was involved.
