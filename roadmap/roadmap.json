@@ -584,7 +584,7 @@
     {
       "id": "0113",
       "title": "Add bounded indexing progress and cancellation",
-      "status": "review",
+      "status": "done",
       "quarter": "Q02",
       "phase": "v0.1 Thread",
       "workstream": "ingestion",

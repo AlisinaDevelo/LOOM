@@ -4,9 +4,9 @@ This artifact records bounded indexing progress and cooperative cancellation for
 [#66](https://github.com/AlisinaDevelo/LOOM/issues/66), roadmap ID `0113`. It extends the durable
 `index_jobs` checkpoint from #0108: a report carries a stable run ID and explicit unit counts, the
 desktop can request cancellation, and the worker stops only between complete SQLite units.
-The implementation was merged through PR [#178](https://github.com/AlisinaDevelo/LOOM/pull/178);
-the merged-main reproduction is recorded below. Issue #66 remains in `review` until independent
-approval and protected-main enforcement are available.
+The implementation was merged through PR [#178](https://github.com/AlisinaDevelo/LOOM/pull/178).
+The current-main focused reproduction is recorded below; the roadmap status is advanced after that
+evidence is merged and reconciled.
 
 ## Device and toolchain
 
@@ -90,26 +90,33 @@ This run proves the bounded cancellation contract on the specified Mac; it does 
 OS/architecture, continuous progress streaming, cancellation inside one individual file read,
 notarization, a third-party security audit, a `cargo-audit` result, or a large-library resource
 benchmark. The current desktop stop action is cooperative and waits for the current bounded unit
-to finish. The post-merge reproduction below satisfies the code and target-device evidence
-portion; independent review and protected-main enforcement remain required before issue #66 can
-close.
+to finish. A default profile clean rebuild attempted on current `main` exhausted the device
+filesystem before the test binary was produced (`/tmp/loom-0112-focused-current.mjj5wg/source-
+roots.log`, SHA-256 `8232052f286f7da873fb5420033ab6b0ec238364b9d0f3f54b5150dcc89b2d03`). The
+successful focused rerun below used `CARGO_PROFILE_DEV_DEBUG=0`, `CARGO_INCREMENTAL=0`, and one
+build job; no hosted Actions result or protected-branch enforcement was used.
 
-## Merged-main reproduction
+## Current merged-main focused reproduction
 
-The same target-device harness was run against runtime-tested merged `main` commit
-`eee1236710b98375e86b12187d545ed451ee2b7c` on the Mac specified above. The current main tip
-`d4b219b0bb634054bee6ce8ad9a71a17dd8bf003` adds only documentation and roadmap metadata after
-that runtime-tested commit; no cancellation source changed.
+The focused cancellation suite was run against source-equivalent merged `main`: implementation
+source commit `87d1e03ffe2a43fed33826df58360e456ca4c753`, with documentation-only current tip
+`e3bbf38daf827f7bade210a699d134f84417c7ab`, on the Mac specified above. Both cancellation tests
+passed: complete-unit commits and resumable checkpoints, plus pre-cancelled zero-write behavior.
+The same low-footprint run also passed the five source-scope tests and two FTS5 repair tests used
+by adjacent v0.1 gates.
 
-- Verification directory: `/tmp/loom-0110-main-device.QLkKl1`
-- Harness summary SHA-256: `45bc997dcb26b8bc6cbd63a09fa17aed6c5d4ae968ef349be473b0b034e94e70`
-- Commands SHA-256: `d840925fb008af9101dc3121870b79960c1b6924451df17a7851f2f6132bb209`
-- Log manifest: `/tmp/loom-0110-main-device.QLkKl1/log-sha256.txt`
-- Log manifest SHA-256: `ed539c48e8c9b648f0ae341ddf37f02107d5aacff5d5e2a19ae0d28612c57d64`
+- Verification directory: `/tmp/loom-0112-14-focused-current.WFJUFQ`
+- Focused log SHA-256: `99827fb413c87051a3a2085c134e05cff0ab44d858b5cf30bdfc1789819d32e2`
+- Toolchain: `rustc 1.96.0` / Cargo `1.96.0`, arm64 Apple Silicon
+- Result: source roots `5 passed`, cancellation `2 passed`, FTS repair `2 passed`
 
-The full local pipe passed. Its MSRV workspace run included both cancellation fixtures and the
-durable-index interruption/recovery tests; the reports verified stable run IDs, complete-unit
-commits, resumable checkpoints, and convergence to uninterrupted rows. Retrieval, frontend,
-security, Tauri, and mixed-corpus failure/recovery checks also passed. No hosted Actions or
-unavailable hardware substituted for this target-device evidence. Future desktop captures must
-be cropped to the relevant evidence panel.
+This focused rerun does not substitute for the unavailable full workspace pipe; the historical
+full-pipe artifact above remains labeled with its original source commit. Future desktop captures
+must be cropped to the relevant evidence panel.
+
+## Historical merged-main full-pipe reproduction
+
+The earlier target-device harness passed against runtime-tested merged `main` commit
+`eee1236710b98375e86b12187d545ed451ee2b7c`; its retained logs and limitations remain useful for
+the broader integration claim, but it predates the current documentation-only commits and is not
+used to represent the focused current-main rerun above.
