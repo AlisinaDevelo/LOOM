@@ -1072,7 +1072,7 @@
     {
       "id": "0300",
       "title": "Specify the browser capture and provenance protocol",
-      "status": "review",
+      "status": "done",
       "quarter": "Q05",
       "phase": "v0.3 Pattern",
       "workstream": "foundation",

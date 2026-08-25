@@ -4,9 +4,10 @@
 - Implementation PR: [#217](https://github.com/AlisinaDevelo/LOOM/pull/217)
 - Reconciler-fix PR: [#219](https://github.com/AlisinaDevelo/LOOM/pull/219)
 - Merged-main SHA: `193ee538a62ce04d64dea13c690287c35166379d`
-- Roadmap status: `review`
-- Verification status: PASS for the protocol specification and offline contract; the issue remains
-  open while prerequisite `0202` is still in review.
+- Roadmap status: `done`
+- Verification status: PASS for the protocol specification and offline contract; prerequisite
+  `0202` is now closed. Browser/permission implementation remains in `0301` and is not claimed by
+  this record.
 
 ## Target and retained evidence
 
@@ -69,4 +70,25 @@ against a compromised macOS account, Keychain, browser process, or signed native
 
 The PRs were locally diff-reviewed and merged to the active protected `main` ruleset. The repository
 owner is the only available collaborator, so no independent GitHub approval is claimed. Issue #29
-therefore remains in `review` until its declared prerequisite/review governance is satisfied.
+is ready for closure because its declared protocol acceptance and prerequisite are satisfied. The
+interactive browser and native-host gates remain explicitly assigned to issue #30.
+
+## Current merged-main focused rerun
+
+The protocol and extension-boundary contracts were rerun against current merged `main`
+`6b140986d36de41da3c7005c808a46c46a90f8e0` on the target Mac. The retained focused artifacts are
+under `/tmp/loom-0300-current-focused`:
+
+```text
+python3 scripts/test-browser-capture-protocol.py: 10 passed
+  sha256: cf8d3a2572a7898fcf32a4c2dd1445509b3d59e66061853243c4627f80695068
+node --test browser-extension/test/capture.test.js: 10 passed
+  sha256: f167a1ddf9d4a3470b68c52d361e46c8fea87e20bf205bc874ade4bdbb3b32a6
+python3 -m unittest discover -s tests -p 'test_*.py': 20 passed
+  sha256: 2ffd7985716b2e09b1f0ff6ece102745b256c3dfebc0891c03dbb315dd164b39
+roadmap validation: 154 active, 4 retired, 20 milestones, 13 phases, 141 parent edges, 314 dependencies
+  sha256: df36f3da734b1902d0f0e6711aeb03645bc9f04afad31993b9275c55f1a82c96
+```
+
+No hosted Actions result or interactive browser session is used for this protocol-only closure;
+those implementation and permission boundaries remain visible in the dependent issues.
