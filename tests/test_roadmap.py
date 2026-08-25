@@ -173,9 +173,9 @@ class RoadmapTests(unittest.TestCase):
 
     def test_unexpected_closed_issue_fails_live_verification(self) -> None:
         snapshot = self.matching_snapshot()
-        snapshot.issue_by_task["0102"]["state"] = "closed"
+        snapshot.issue_by_task["0107"]["state"] = "closed"
         plan = roadmap.build_plan(self.manifest, snapshot, include_relationships=True)
-        self.assertEqual(["0102"], plan["warnings"]["unexpected_closed"])
+        self.assertEqual(["0107"], plan["warnings"]["unexpected_closed"])
         with self.assertRaisesRegex(ValueError, "unexpected closed issues"):
             roadmap.verify_live(self.manifest, snapshot, plan)
 
