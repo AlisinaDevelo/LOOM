@@ -153,6 +153,12 @@ nav { display: grid; gap: 6px; }
 .ocr-controls { margin-top: 18px; padding-top: 14px; border-top: 1px solid var(--line); }
 .ocr-control-row { display: flex; justify-content: space-between; align-items: center; margin-top: 9px; color: var(--muted); font: 10px ui-monospace, monospace; text-transform: uppercase; }
 .ocr-controls > .scope-action { margin-top: 8px; }
+.storage-controls { margin-top: 18px; padding-top: 14px; border-top: 1px solid var(--line); }
+.storage-inspect-button { display: block; margin-top: 9px; }
+.storage-summary { display: grid; grid-template-columns: 1fr 1fr; gap: 7px 10px; margin: 10px 0 3px; }
+.storage-summary div { display: flex; flex-direction: column-reverse; gap: 2px; min-width: 0; }
+.storage-summary dt { color: var(--faint); font-size: 9px; }
+.storage-summary dd { margin: 0; color: #c5d79e; font: 10px ui-monospace, monospace; }
 .capture-controls { margin-top: 18px; padding-top: 14px; border-top: 1px solid var(--line); }
 .capture-button-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 5px; margin-top: 10px; }
 .capture-action { padding: 5px 3px; border: 1px solid var(--line-strong); border-radius: 5px; text-transform: capitalize; }

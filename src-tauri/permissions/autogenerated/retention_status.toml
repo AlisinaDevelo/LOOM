@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-retention-status"
+description = "Enables the retention_status command without any pre-configured scope."
+commands.allow = ["retention_status"]
+
+[[permission]]
+identifier = "deny-retention-status"
+description = "Denies the retention_status command without any pre-configured scope."
+commands.deny = ["retention_status"]

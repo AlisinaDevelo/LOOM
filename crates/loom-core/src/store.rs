@@ -8,22 +8,23 @@ use std::{
     },
 };
 
-use chrono::Utc;
+use chrono::{DateTime, Duration, Utc};
 use rusqlite::{params, Connection, OptionalExtension, Transaction};
 use uuid::Uuid;
 
 use crate::{
     bookmarks::{self, BOOKMARK_EXTRACTOR_ID, BOOKMARK_EXTRACTOR_VERSION},
     domain::{
-        ArtifactObservation, BookmarkEntry, BookmarkImportReport, BookmarkRecord, EvidenceAnchor,
-        EvidenceExcerpt, EvidenceSegment, EvidenceView, FtsHealthReport, FtsRepairReport,
-        IndexCancellationToken, IndexCheckpoint, IndexFailure, IndexReport, LibraryStats,
-        ObservationReport, OcrPurgeReport, OcrStatus, PassageObservation, RankContributions,
-        RelationshipEndpoint, RelationshipInput, RelationshipKind, RelationshipOrigin,
-        RelationshipRecord, RelationshipView, ResolveEvidenceRequest, SearchHit, SearchRequest,
-        SemanticCandidate, SemanticDropReport, SemanticIndexConfig, SemanticIndexManifest,
-        SemanticIndexStatus, SemanticProviderMeasurement, SemanticRebuildReport, SourceRootInfo,
-        SourceRootStatus,
+        ArtifactObservation, BookmarkEntry, BookmarkImportReport, BookmarkRecord, DeletionReport,
+        EvidenceAnchor, EvidenceExcerpt, EvidenceSegment, EvidenceView, FtsHealthReport,
+        FtsRepairReport, IndexCancellationToken, IndexCheckpoint, IndexFailure, IndexReport,
+        LibraryStats, ObservationReport, OcrPurgeReport, OcrStatus, PassageObservation,
+        RankContributions, RelationshipEndpoint, RelationshipInput, RelationshipKind,
+        RelationshipOrigin, RelationshipRecord, RelationshipView, ResolveEvidenceRequest,
+        RetentionPolicy, RetentionReport, SearchHit, SearchRequest, SemanticCandidate,
+        SemanticDropReport, SemanticIndexConfig, SemanticIndexManifest, SemanticIndexStatus,
+        SemanticProviderMeasurement, SemanticRebuildReport, SourceRootInfo, SourceRootStatus,
+        StorageEntry, StorageInspection,
     },
     error::{io_error, LoomError, Result},
     ingest::{
@@ -38,6 +39,15 @@ use crate::{
         cosine_similarity, decode_vector, encode_vector, measure_providers, HashEmbeddingProvider,
     },
 };
+
+type BookmarkRecordProjection = (
+    String,
+    String,
+    String,
+    Option<String>,
+    Option<String>,
+    String,
+);
 
 const SCHEMA_VERSION: i64 = 7;
 const RELATIONSHIP_SCHEMA_VERSION: i64 = 6;
@@ -73,6 +83,17 @@ const PRE_BOOKMARK_SCHEMA_TABLES: &[&str] = &[
     "passages",
     "relationships",
     "index_jobs",
+];
+
+/// Directories LOOM may create for disposable local derivatives. The names are deliberately
+/// fixed so inspection and cleanup never recurse through an arbitrary application-data tree.
+const DISPOSABLE_DIRECTORIES: &[(&str, &str)] = &[
+    ("cache", "cache"),
+    ("model-cache", "model_cache"),
+    ("thumbnails", "thumbnails"),
+    ("ocr-scratch", "ocr_scratch"),
+    ("tmp-exports", "temporary_export"),
+    ("logs", "log"),
 ];
 
 type VersionProjection = (String, String, String, String, Option<i64>, String, String);
@@ -117,6 +138,7 @@ pub struct Library {
     connection: Mutex<Connection>,
     limits: LibraryLimits,
     ocr_enabled: AtomicBool,
+    database_path: Option<PathBuf>,
 }
 
 impl Library {
@@ -132,15 +154,23 @@ impl Library {
             fs::create_dir_all(parent).map_err(|source| io_error(parent, source))?;
         }
         let connection = Connection::open(path)?;
-        Self::from_connection(connection, limits)
+        Self::from_connection(connection, limits, Some(path.to_path_buf()))
     }
 
     /// Opens an isolated in-memory library for tests and evaluation.
     pub fn open_in_memory() -> Result<Self> {
-        Self::from_connection(Connection::open_in_memory()?, LibraryLimits::default())
+        Self::from_connection(
+            Connection::open_in_memory()?,
+            LibraryLimits::default(),
+            None,
+        )
     }
 
-    fn from_connection(mut connection: Connection, limits: LibraryLimits) -> Result<Self> {
+    fn from_connection(
+        mut connection: Connection,
+        limits: LibraryLimits,
+        database_path: Option<PathBuf>,
+    ) -> Result<Self> {
         configure(&connection)?;
         migrate(&mut connection)?;
         ensure_semantic_schema(&connection)?;
@@ -149,6 +179,7 @@ impl Library {
             connection: Mutex::new(connection),
             limits,
             ocr_enabled: AtomicBool::new(ocr_enabled),
+            database_path,
         })
     }
 
@@ -247,14 +278,7 @@ impl Library {
         };
         for (ordinal, entry) in export.bookmarks.iter().enumerate() {
             let entry_hash = bookmark_entry_hash(entry);
-            let existing_record: Option<(
-                String,
-                String,
-                String,
-                Option<String>,
-                Option<String>,
-                String,
-            )> = transaction
+            let existing_record: Option<BookmarkRecordProjection> = transaction
                 .query_row(
                     "SELECT id, title, entry_hash, added_at, modified_at, artifact_id
                      FROM bookmark_records WHERE url = ?1 AND folder_path = ?2",
@@ -1811,52 +1835,350 @@ impl Library {
         })
     }
 
+    /// Accounts for canonical source records, SQLite sidecars, and known disposable files.
+    ///
+    /// The report is an estimate rather than a forensic disk-usage claim: canonical source bytes
+    /// come from the recorded version size, while database and disposable entries use filesystem
+    /// sizes. Symlinks are never followed, and unknown sibling directories are not inspected.
+    pub fn inspect_storage(&self) -> Result<StorageInspection> {
+        let generated_at = Utc::now().to_rfc3339();
+        let database_path = self.database_path.clone();
+        let mut entries = Vec::new();
+        let mut source_bytes = 0_u64;
+
+        {
+            let connection = self.lock()?;
+            let mut statement = connection.prepare(
+                "SELECT l.locator, COALESCE(SUM(v.byte_size), 0), COUNT(DISTINCT a.id)
+                 FROM artifacts a
+                 JOIN artifact_locators l ON l.artifact_id = a.id AND l.active = 1
+                 LEFT JOIN artifact_versions v ON v.artifact_id = a.id
+                 GROUP BY l.locator
+                 ORDER BY l.locator",
+            )?;
+            let rows = statement.query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?.max(0) as u64,
+                    row.get::<_, i64>(2)?.max(0) as u64,
+                ))
+            })?;
+            for row in rows {
+                let (source_uri, bytes, files) = row?;
+                source_bytes = source_bytes.saturating_add(bytes);
+                entries.push(StorageEntry {
+                    category: "source".into(),
+                    path: source_uri.clone(),
+                    source_uri: Some(source_uri),
+                    bytes,
+                    files,
+                    exists: true,
+                });
+            }
+
+            let canonical_bytes = storage_sql_bytes(
+                &connection,
+                "SELECT COALESCE(SUM(length(id) + length(title) + length(media_type) + length(state)), 0)
+                 FROM artifacts",
+            )?;
+            if canonical_bytes > 0 {
+                entries.push(StorageEntry {
+                    category: "canonical_records".into(),
+                    path: database_path
+                        .as_ref()
+                        .map(|path| path.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| "<memory>".into()),
+                    source_uri: None,
+                    bytes: canonical_bytes,
+                    files: 1,
+                    exists: true,
+                });
+            }
+
+            let derived_bytes = storage_sql_bytes(
+                &connection,
+                "SELECT
+                    (SELECT COALESCE(SUM(length(text) + length(locator_json)), 0) FROM passages) +
+                    (SELECT COALESCE(SUM(length(vector_blob)), 0) FROM semantic_embeddings) +
+                    (SELECT COALESCE(SUM(length(term)), 0) FROM passages_fts_vocab)",
+            )?;
+            if derived_bytes > 0 {
+                entries.push(StorageEntry {
+                    category: "derived_records".into(),
+                    path: database_path
+                        .as_ref()
+                        .map(|path| path.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| "<memory>".into()),
+                    source_uri: None,
+                    bytes: derived_bytes,
+                    files: 1,
+                    exists: true,
+                });
+            }
+        }
+
+        if let Some(path) = database_path.as_ref() {
+            let database_path_text = path.to_string_lossy().into_owned();
+            let database_bytes = regular_file_size(path)?;
+            if database_bytes > 0 {
+                entries.push(StorageEntry {
+                    category: "database".into(),
+                    path: database_path_text,
+                    source_uri: None,
+                    bytes: database_bytes,
+                    files: 1,
+                    exists: true,
+                });
+            }
+            for suffix in ["-wal", "-shm", "-journal"] {
+                let sidecar = PathBuf::from(format!("{}{}", path.display(), suffix));
+                let bytes = regular_file_size(&sidecar)?;
+                if bytes > 0 {
+                    entries.push(StorageEntry {
+                        category: "sqlite_sidecar".into(),
+                        path: sidecar.to_string_lossy().into_owned(),
+                        source_uri: None,
+                        bytes,
+                        files: 1,
+                        exists: true,
+                    });
+                }
+            }
+            if let Some(root) = path.parent() {
+                for (directory, category) in DISPOSABLE_DIRECTORIES {
+                    let directory_path = root.join(directory);
+                    let (bytes, files) = directory_size(&directory_path)?;
+                    if bytes > 0 || directory_path.exists() {
+                        entries.push(StorageEntry {
+                            category: (*category).into(),
+                            path: directory_path.to_string_lossy().into_owned(),
+                            source_uri: None,
+                            bytes,
+                            files,
+                            exists: directory_path.exists(),
+                        });
+                    }
+                }
+                let captures = root.join("captures");
+                let (bytes, files) = directory_size(&captures)?;
+                if bytes > 0 || captures.exists() {
+                    entries.push(StorageEntry {
+                        category: "capture".into(),
+                        path: captures.to_string_lossy().into_owned(),
+                        source_uri: None,
+                        bytes,
+                        files,
+                        exists: captures.exists(),
+                    });
+                }
+            }
+        }
+
+        let total_bytes = entries
+            .iter()
+            .map(|entry| entry.bytes)
+            .fold(0_u64, u64::saturating_add);
+        let canonical_bytes = entries
+            .iter()
+            .filter(|entry| entry.category == "source" || entry.category == "canonical_records")
+            .map(|entry| entry.bytes)
+            .fold(0_u64, u64::saturating_add);
+        let derived_bytes = entries
+            .iter()
+            .filter(|entry| {
+                matches!(
+                    entry.category.as_str(),
+                    "derived_records" | "sqlite_sidecar"
+                )
+            })
+            .map(|entry| entry.bytes)
+            .fold(0_u64, u64::saturating_add);
+        let disposable_bytes = entries
+            .iter()
+            .filter(|entry| {
+                matches!(
+                    entry.category.as_str(),
+                    "cache"
+                        | "model_cache"
+                        | "thumbnails"
+                        | "ocr_scratch"
+                        | "temporary_export"
+                        | "log"
+                )
+            })
+            .map(|entry| entry.bytes)
+            .fold(0_u64, u64::saturating_add);
+
+        Ok(StorageInspection {
+            database_path: database_path.map(|path| path.to_string_lossy().into_owned()),
+            generated_at,
+            entries,
+            total_bytes,
+            canonical_bytes,
+            derived_bytes,
+            disposable_bytes,
+            source_bytes,
+        })
+    }
+
+    /// Permanently deletes one artifact and every canonical/derived row attached to it.
+    pub fn purge_artifact(&self, artifact_id: &str) -> Result<DeletionReport> {
+        validate_relationship_id(artifact_id, "artifact")?;
+        let mut connection = self.lock()?;
+        let transaction = connection.transaction()?;
+        let report = delete_artifact_transaction(&transaction, artifact_id)?;
+        transaction.commit()?;
+        drop(connection);
+        self.finish_deletion(report)
+    }
+
+    /// Permanently deletes every artifact rooted at one exact persisted locator.
+    pub fn purge_root(&self, locator: &str) -> Result<DeletionReport> {
+        if locator.trim().is_empty() || locator.chars().any(char::is_control) {
+            return Err(LoomError::InvalidPath(
+                "source root locator is invalid".into(),
+            ));
+        }
+        let mut connection = self.lock()?;
+        let transaction = connection.transaction()?;
+        let artifact_ids = artifact_ids_for_root(&transaction, locator)?;
+        let mut report = DeletionReport {
+            selector: format!("root:{locator}"),
+            ..DeletionReport::default()
+        };
+        for artifact_id in artifact_ids {
+            merge_deletion_reports(
+                &mut report,
+                delete_artifact_transaction(&transaction, &artifact_id)?,
+            );
+        }
+        transaction.execute("DELETE FROM source_roots WHERE locator = ?1", [locator])?;
+        transaction.commit()?;
+        drop(connection);
+        self.finish_deletion(report)
+    }
+
+    /// Permanently deletes artifacts created before an RFC3339 cutoff.
+    pub fn purge_before(&self, cutoff: &str) -> Result<DeletionReport> {
+        let cutoff = normalize_timestamp(cutoff)?;
+        let mut connection = self.lock()?;
+        let transaction = connection.transaction()?;
+        let mut statement = transaction
+            .prepare("SELECT id FROM artifacts WHERE created_at < ?1 ORDER BY created_at, id")?;
+        let artifact_ids = statement
+            .query_map([cutoff.as_str()], |row| row.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        drop(statement);
+        let mut report = DeletionReport {
+            selector: format!("before:{cutoff}"),
+            ..DeletionReport::default()
+        };
+        for artifact_id in artifact_ids {
+            merge_deletion_reports(
+                &mut report,
+                delete_artifact_transaction(&transaction, &artifact_id)?,
+            );
+        }
+        transaction.commit()?;
+        drop(connection);
+        self.finish_deletion(report)
+    }
+
+    /// Returns the persisted retention policy without mutating the library.
+    pub fn retention_policy(&self) -> Result<RetentionPolicy> {
+        let connection = self.lock()?;
+        let days = connection
+            .query_row(
+                "SELECT value FROM schema_meta WHERE key = 'retention_days'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?
+            .and_then(|value| value.parse::<u32>().ok());
+        Ok(RetentionPolicy { days })
+    }
+
+    /// Sets or clears the local retention policy. It does not delete until `apply_retention` is
+    /// explicitly invoked, keeping destructive behavior visible and reversible at the policy step.
+    pub fn set_retention_days(&self, days: Option<u32>) -> Result<RetentionPolicy> {
+        if days.is_some_and(|days| days == 0 || days > 36_500) {
+            return Err(LoomError::InvalidPath(
+                "retention must be between 1 and 36500 days, or disabled".into(),
+            ));
+        }
+        let connection = self.lock()?;
+        connection.execute(
+            "INSERT INTO schema_meta(key, value) VALUES ('retention_days', ?1)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            [days.map_or_else(|| "".into(), |value| value.to_string())],
+        )?;
+        Ok(RetentionPolicy { days })
+    }
+
+    /// Applies the configured retention policy at the current UTC clock instant.
+    pub fn apply_retention(&self) -> Result<RetentionReport> {
+        self.apply_retention_at(&Utc::now().to_rfc3339())
+    }
+
+    /// Deterministic retention entry point used by device and migration tests.
+    pub fn apply_retention_at(&self, evaluated_at: &str) -> Result<RetentionReport> {
+        let evaluated_at = normalize_timestamp(evaluated_at)?;
+        let policy = self.retention_policy()?;
+        let Some(days) = policy.days else {
+            return Ok(RetentionReport {
+                policy,
+                evaluated_at,
+                ..RetentionReport::default()
+            });
+        };
+        let evaluated = DateTime::parse_from_rfc3339(&evaluated_at)
+            .map_err(|error| LoomError::InvalidPath(format!("invalid retention clock: {error}")))?
+            .with_timezone(&Utc);
+        let cutoff = (evaluated - Duration::days(i64::from(days))).to_rfc3339();
+        let deletion = self.purge_before(&cutoff)?;
+        Ok(RetentionReport {
+            policy,
+            evaluated_at,
+            cutoff: Some(cutoff),
+            deletion,
+        })
+    }
+
+    /// Deletes files in LOOM's known disposable directories and checkpoints SQLite sidecars.
+    /// User-selected source files and managed captures are not touched by this operation.
+    pub fn purge_disposable_storage(&self) -> Result<DeletionReport> {
+        let mut report = DeletionReport {
+            selector: "disposable-storage".into(),
+            ..DeletionReport::default()
+        };
+        if let Some(database_path) = self.database_path.as_ref() {
+            {
+                let connection = self.lock()?;
+                checkpoint_and_vacuum(&connection)?;
+            }
+            for suffix in ["-wal", "-shm", "-journal"] {
+                let sidecar = PathBuf::from(format!("{}{}", database_path.display(), suffix));
+                remove_regular_file(&sidecar, &mut report)?;
+            }
+            if let Some(root) = database_path.parent() {
+                for (directory, _) in DISPOSABLE_DIRECTORIES {
+                    remove_directory_contents(&root.join(directory), &mut report)?;
+                }
+            }
+        }
+        Ok(report)
+    }
+
     /// Permanently removes one exact source root and its canonical evidence rows.
     ///
     /// This method is intentionally locator-bound and is used by the explicit capture purge
     /// control. It cannot broaden to a parent directory or delete another source root.
     pub fn purge_source_root(&self, locator: &str) -> Result<crate::CapturePurgeReport> {
-        let mut connection = self.lock()?;
-        let transaction = connection.transaction()?;
-        let root_id: Option<String> = transaction
-            .query_row(
-                "SELECT id FROM source_roots WHERE locator = ?1",
-                [locator],
-                |row| row.get(0),
-            )
-            .optional()?;
-        let Some(root_id) = root_id else {
-            return Ok(crate::CapturePurgeReport::default());
-        };
-        let artifacts_deleted: i64 = transaction.query_row(
-            "SELECT COUNT(*) FROM artifacts WHERE source_root_id = ?1",
-            [&root_id],
-            |row| row.get(0),
-        )?;
-        let versions_deleted: i64 = transaction.query_row(
-            "SELECT COUNT(*) FROM artifact_versions WHERE artifact_id IN
-                (SELECT id FROM artifacts WHERE source_root_id = ?1)",
-            [&root_id],
-            |row| row.get(0),
-        )?;
-        let passages_deleted: i64 = transaction.query_row(
-            "SELECT COUNT(*) FROM passages WHERE artifact_version_id IN
-                (SELECT id FROM artifact_versions WHERE artifact_id IN
-                    (SELECT id FROM artifacts WHERE source_root_id = ?1))",
-            [&root_id],
-            |row| row.get(0),
-        )?;
-        transaction.execute(
-            "DELETE FROM artifacts WHERE source_root_id = ?1",
-            [&root_id],
-        )?;
-        transaction.execute("DELETE FROM source_roots WHERE id = ?1", [&root_id])?;
-        transaction.commit()?;
-        rebuild_fts(&connection)?;
+        let report = self.purge_root(locator)?;
         Ok(crate::CapturePurgeReport {
-            artifacts_deleted: artifacts_deleted.max(0) as u64,
-            versions_deleted: versions_deleted.max(0) as u64,
-            passages_deleted: passages_deleted.max(0) as u64,
+            artifacts_deleted: report.artifacts_deleted,
+            versions_deleted: report.versions_deleted,
+            passages_deleted: report.passages_deleted,
         })
     }
 
@@ -2346,6 +2668,13 @@ impl Library {
 
     fn lock(&self) -> Result<MutexGuard<'_, Connection>> {
         self.connection.lock().map_err(|_| LoomError::LockPoisoned)
+    }
+
+    fn finish_deletion(&self, report: DeletionReport) -> Result<DeletionReport> {
+        let connection = self.lock()?;
+        rebuild_fts(&connection)?;
+        checkpoint_and_vacuum(&connection)?;
+        Ok(report)
     }
 
     fn source_modified_ns(&self, version_id: &str) -> Result<Option<i64>> {
@@ -3373,7 +3702,7 @@ fn upsert_bookmark_artifact(
         )
         .optional()?;
     if active.as_ref().is_some_and(|(_, hash, version)| {
-        hash == &content_hash && version == BOOKMARK_EXTRACTOR_VERSION
+        hash == content_hash && version == BOOKMARK_EXTRACTOR_VERSION
     }) {
         transaction.execute(
             "UPDATE artifacts SET title = ?1, last_seen_at = ?2 WHERE id = ?3",
@@ -3517,6 +3846,198 @@ fn count_where(connection: &Connection, table: &str, predicate: &str) -> Result<
     let sql = format!("SELECT COUNT(*) FROM {table} WHERE {predicate}");
     let value: i64 = connection.query_row(&sql, [], |row| row.get(0))?;
     Ok(value.max(0) as u64)
+}
+
+fn storage_sql_bytes(connection: &Connection, query: &str) -> Result<u64> {
+    let value: i64 = connection.query_row(query, [], |row| row.get(0))?;
+    Ok(value.max(0) as u64)
+}
+
+fn regular_file_size(path: &Path) -> Result<u64> {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+        Err(error) => return Err(io_error(path, error)),
+    };
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Ok(0);
+    }
+    Ok(metadata.len())
+}
+
+fn directory_size(path: &Path) -> Result<(u64, u64)> {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok((0, 0)),
+        Err(error) => return Err(io_error(path, error)),
+    };
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Ok((0, 0));
+    }
+    let mut bytes = 0_u64;
+    let mut files = 0_u64;
+    for entry in fs::read_dir(path).map_err(|error| io_error(path, error))? {
+        let entry = entry.map_err(|error| io_error(path, error))?;
+        let child = entry.path();
+        let child_metadata =
+            fs::symlink_metadata(&child).map_err(|error| io_error(&child, error))?;
+        if child_metadata.file_type().is_symlink() {
+            continue;
+        }
+        if child_metadata.is_dir() {
+            let (child_bytes, child_files) = directory_size(&child)?;
+            bytes = bytes.saturating_add(child_bytes);
+            files = files.saturating_add(child_files);
+        } else if child_metadata.is_file() {
+            bytes = bytes.saturating_add(child_metadata.len());
+            files = files.saturating_add(1);
+        }
+    }
+    Ok((bytes, files))
+}
+
+fn remove_regular_file(path: &Path, report: &mut DeletionReport) -> Result<()> {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(io_error(path, error)),
+    };
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Ok(());
+    }
+    fs::remove_file(path).map_err(|error| io_error(path, error))?;
+    report.files_deleted = report.files_deleted.saturating_add(1);
+    report.bytes_deleted = report.bytes_deleted.saturating_add(metadata.len());
+    report.paths.push(path.to_string_lossy().into_owned());
+    Ok(())
+}
+
+fn remove_directory_contents(path: &Path, report: &mut DeletionReport) -> Result<()> {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(io_error(path, error)),
+    };
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Ok(());
+    }
+    for entry in fs::read_dir(path).map_err(|error| io_error(path, error))? {
+        let entry = entry.map_err(|error| io_error(path, error))?;
+        let child = entry.path();
+        let child_metadata =
+            fs::symlink_metadata(&child).map_err(|error| io_error(&child, error))?;
+        if child_metadata.file_type().is_symlink() {
+            continue;
+        }
+        if child_metadata.is_dir() {
+            remove_directory_contents(&child, report)?;
+            let _ = fs::remove_dir(&child);
+        } else {
+            remove_regular_file(&child, report)?;
+        }
+    }
+    Ok(())
+}
+
+fn checkpoint_and_vacuum(connection: &Connection) -> Result<()> {
+    connection.execute_batch(
+        "PRAGMA wal_checkpoint(TRUNCATE);
+         VACUUM;
+         PRAGMA wal_checkpoint(TRUNCATE);",
+    )?;
+    Ok(())
+}
+
+fn normalize_timestamp(value: &str) -> Result<String> {
+    DateTime::parse_from_rfc3339(value)
+        .map(|timestamp| timestamp.with_timezone(&Utc).to_rfc3339())
+        .map_err(|error| LoomError::InvalidPath(format!("timestamp must be RFC3339: {error}")))
+}
+
+fn artifact_ids_for_root(transaction: &Transaction<'_>, locator: &str) -> Result<Vec<String>> {
+    let root_id: Option<String> = transaction
+        .query_row(
+            "SELECT id FROM source_roots WHERE locator = ?1",
+            [locator],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let Some(root_id) = root_id else {
+        return Ok(Vec::new());
+    };
+    let mut statement = transaction
+        .prepare("SELECT id FROM artifacts WHERE source_root_id = ?1 ORDER BY created_at, id")?;
+    let ids = statement
+        .query_map([root_id], |row| row.get::<_, String>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(ids)
+}
+
+fn delete_artifact_transaction(
+    transaction: &Transaction<'_>,
+    artifact_id: &str,
+) -> Result<DeletionReport> {
+    let exists: bool = transaction.query_row(
+        "SELECT EXISTS(SELECT 1 FROM artifacts WHERE id = ?1)",
+        [artifact_id],
+        |row| row.get(0),
+    )?;
+    if !exists {
+        return Err(LoomError::ArtifactNotFound(artifact_id.to_string()));
+    }
+    let versions_deleted: i64 = transaction.query_row(
+        "SELECT COUNT(*) FROM artifact_versions WHERE artifact_id = ?1",
+        [artifact_id],
+        |row| row.get(0),
+    )?;
+    let passages_deleted: i64 = transaction.query_row(
+        "SELECT COUNT(*) FROM passages WHERE artifact_version_id IN
+            (SELECT id FROM artifact_versions WHERE artifact_id = ?1)",
+        [artifact_id],
+        |row| row.get(0),
+    )?;
+    let relationships_deleted: i64 = transaction.query_row(
+        "SELECT COUNT(*) FROM relationships
+         WHERE source_artifact_id = ?1 OR target_artifact_id = ?1",
+        [artifact_id],
+        |row| row.get(0),
+    )?;
+    let bookmark_records_deleted: i64 = transaction.query_row(
+        "SELECT COUNT(*) FROM bookmark_records WHERE artifact_id = ?1",
+        [artifact_id],
+        |row| row.get(0),
+    )?;
+    transaction.execute("DELETE FROM artifacts WHERE id = ?1", [artifact_id])?;
+    Ok(DeletionReport {
+        selector: format!("artifact:{artifact_id}"),
+        artifacts_deleted: 1,
+        versions_deleted: versions_deleted.max(0) as u64,
+        passages_deleted: passages_deleted.max(0) as u64,
+        relationships_deleted: relationships_deleted.max(0) as u64,
+        bookmark_records_deleted: bookmark_records_deleted.max(0) as u64,
+        ..DeletionReport::default()
+    })
+}
+
+fn merge_deletion_reports(target: &mut DeletionReport, source: DeletionReport) {
+    target.artifacts_deleted = target
+        .artifacts_deleted
+        .saturating_add(source.artifacts_deleted);
+    target.versions_deleted = target
+        .versions_deleted
+        .saturating_add(source.versions_deleted);
+    target.passages_deleted = target
+        .passages_deleted
+        .saturating_add(source.passages_deleted);
+    target.relationships_deleted = target
+        .relationships_deleted
+        .saturating_add(source.relationships_deleted);
+    target.bookmark_records_deleted = target
+        .bookmark_records_deleted
+        .saturating_add(source.bookmark_records_deleted);
+    target.files_deleted = target.files_deleted.saturating_add(source.files_deleted);
+    target.bytes_deleted = target.bytes_deleted.saturating_add(source.bytes_deleted);
+    target.paths.extend(source.paths);
 }
 
 fn purge_ocr_records_transaction(transaction: &Transaction<'_>) -> Result<OcrPurgeReport> {

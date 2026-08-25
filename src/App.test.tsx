@@ -617,6 +617,47 @@ describe("desktop truth path", () => {
     expect(await screen.findByText("disabled")).toBeInTheDocument();
   });
 
+  it("shows bounded storage accounting and clears only disposable files", async () => {
+    const inspection = {
+      database_path: "/Users/test/Library/Application Support/LOOM/library.sqlite3",
+      generated_at: "2026-08-25T00:00:00Z",
+      entries: [],
+      total_bytes: 4096,
+      canonical_bytes: 1200,
+      derived_bytes: 2896,
+      disposable_bytes: 64,
+      source_bytes: 800,
+    };
+    invokeMock.mockImplementation(async (command) => {
+      if (command === "reconcile_approved_roots") return {};
+      if (command === "list_source_roots") return [];
+      if (command === "library_stats") return emptyStats;
+      if (command === "storage_inspection") return inspection;
+      if (command === "purge_disposable_storage") return {
+        selector: "disposable-storage",
+        artifacts_deleted: 0,
+        versions_deleted: 0,
+        passages_deleted: 0,
+        relationships_deleted: 0,
+        bookmark_records_deleted: 0,
+        files_deleted: 3,
+        bytes_deleted: 64,
+        paths: ["/tmp/loom/cache/query.cache"],
+      };
+      throw new Error(`unexpected command: ${command}`);
+    });
+
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "Inspect local storage" }));
+    expect(await screen.findByText("4.0 KB")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Clear disposable files" }));
+    await waitFor(() => {
+      expect(invokeMock).toHaveBeenCalledWith("purge_disposable_storage");
+      expect(invokeMock).toHaveBeenCalledWith("storage_inspection");
+    });
+    expect(await screen.findByRole("status")).toHaveTextContent("Removed 3 disposable files");
+  });
+
   it("keeps intentional capture explicit, pausable, excluded, and purgeable", async () => {
     const captureStatus = { paused: false, excluded_apps: [], capture_root: "/Users/test/Library/Application Support/LOOM/captures" };
     invokeMock.mockImplementation(async (command, args) => {

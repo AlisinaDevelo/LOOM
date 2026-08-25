@@ -40,8 +40,8 @@ service attack. There is no supported remote service in this slice.
    authority.
 5. The bookmark parser accepts only a selected local Netscape export, validates URL schemes, and
    writes metadata plus an explicit no-fetch outcome; it has no network boundary.
-6. Tauri IPC exposes indexing, cooperative cancellation, scope status/revocation, bookmark import, search,
-   statistics, and source opening to the UI.
+6. Tauri IPC exposes indexing, cooperative cancellation, scope status/revocation, bookmark import,
+   storage inspection/deletion/retention, search, statistics, and source opening to the UI.
 7. The host external application receives an original path when the user requests opening it.
 8. Relationship creation validates both artifact endpoints and optional passage evidence before
    writing the canonical graph row; the bounded read API exposes endpoint versions and hashes.
@@ -56,8 +56,9 @@ service attack. There is no supported remote service in this slice.
 |Reading changing bytes|No-follow descriptor, root containment, device/inode, size/mtime, post-read checks, and retries|Network or hostile filesystems can still deny service|
 |Unsupported or malformed text/image|Extension allowlist, UTF-8 requirement, bounded image dimensions, Vision fail-closed errors|No malware scanning or general document sandbox|
 |FTS query injection|Search terms and phrases are compiled as safe FTS5 input|Search is lexical and does not defend a compromised database|
-|Stale evidence|Complete rescans hide missing/failed sources; open is bound to artifact/version/hash and rehashes current bytes|Historical extracted text remains until a purge feature exists|
-|Local data disclosure|No network path in the current slice; OCR provider is local-only; UI displays source-backed results|SQLite and WAL files are unencrypted|
+|Stale evidence|Complete rescans hide missing/failed sources; open is bound to artifact/version/hash and rehashes current bytes|Historical extracted text remains until an explicit artifact/root/time purge|
+|Local data disclosure|No network path in the current slice; OCR provider is local-only; storage inspector and bounded deletion cover known sidecars/caches/logs|SQLite and WAL files are unencrypted; filesystem snapshots/backups are outside the erasure contract|
+|Deletion residue|Transactional cascades remove canonical/derived rows, FTS is rebuilt, SQLite is checkpointed/vacuumed, and device tests inspect WAL/journal/cache/log/OCR/temp paths|Secure erase from SSD snapshots, backups, swap, or external source paths is not claimed|
 |Persisted scope drift|Exact locators, status inspection, explicit re-selection, and revocation hide active artifacts|Direct-distribution build lacks security-scoped bookmarks|
 |Tauri command overreach|Narrow command set; backend-owned selection; no arbitrary path command; hash-bound open|Capabilities and host permissions need release hardening|
 |Dependency compromise|Locked dependency resolution and ordinary build review|No reproducible-build or signed-release guarantee yet|

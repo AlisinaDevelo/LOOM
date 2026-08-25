@@ -84,7 +84,7 @@ fn changed_exports_merge_metadata_and_report_duplicate_url_conflicts() {
     assert!(records
         .iter()
         .any(|record| record.folder_path == "Engineering / Later"));
-    assert!(records.iter().all(|record| record.import_id != ""));
+    assert!(records.iter().all(|record| !record.import_id.is_empty()));
 }
 
 #[test]

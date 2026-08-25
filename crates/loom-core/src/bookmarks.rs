@@ -13,6 +13,8 @@ use crate::{
 pub(crate) const BOOKMARK_EXTRACTOR_ID: &str = "loom.bookmark";
 pub(crate) const BOOKMARK_EXTRACTOR_VERSION: &str = "0.1.0";
 
+type BookmarkTag = (usize, usize, bool, String, BTreeMap<String, String>);
+
 pub fn parse_bookmark_export(input: &str) -> Result<BookmarkExport> {
     if !input
         .to_ascii_lowercase()
@@ -102,10 +104,7 @@ pub fn parse_bookmark_export(input: &str) -> Result<BookmarkExport> {
     })
 }
 
-fn next_tag(
-    input: &str,
-    mut cursor: usize,
-) -> Result<Option<(usize, usize, bool, String, BTreeMap<String, String>)>> {
+fn next_tag(input: &str, mut cursor: usize) -> Result<Option<BookmarkTag>> {
     while let Some(relative) = input[cursor..].find('<') {
         let start = cursor + relative;
         if input[start..].starts_with("<!--") {

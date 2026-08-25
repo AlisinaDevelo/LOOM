@@ -27,6 +27,10 @@ path, content hash, excerpt, and exact text or pixel-region anchor with every re
 - `loom-cli inspect path/to/source` prints the stored extractor identity, PDF page count/warnings,
   image OCR provider/model metadata, and exact anchors for an indexed source. `ocr-status`,
   `ocr-enable`, `ocr-disable`, and `ocr-purge` expose the local OCR policy and derived-record purge.
+- `loom-cli storage-inspect` accounts for source, canonical, derived, SQLite sidecar, capture, and
+  known disposable bytes without following symlinks. `purge-artifact`, `purge-root`, and
+  `purge-before` remove indexed evidence explicitly; retention is configured separately and only
+  applied on command. Disposable cleanup never deletes user-owned source files.
 - Results include the original path, BLAKE3 content hash, structured excerpt, and exact
   character/line or image-region pixel anchor. Literal source characters cannot become highlight
   instructions.
