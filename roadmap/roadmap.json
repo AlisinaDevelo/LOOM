@@ -445,7 +445,7 @@
     {
       "id": "0108",
       "title": "Make indexing crash-safe and resumable",
-      "status": "review",
+      "status": "done",
       "quarter": "Q02",
       "phase": "v0.1 Thread",
       "workstream": "foundation",
