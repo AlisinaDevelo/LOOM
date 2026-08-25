@@ -1160,7 +1160,7 @@
     {
       "id": "0303",
       "title": "Import browser bookmarks with source fidelity",
-      "status": "review",
+      "status": "done",
       "quarter": "Q05",
       "phase": "v0.3 Pattern",
       "workstream": "foundation",
