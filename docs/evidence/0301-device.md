@@ -3,7 +3,7 @@
 - Issue: [#30](https://github.com/AlisinaDevelo/LOOM/issues/30)
 - Implementation PR: [#257](https://github.com/AlisinaDevelo/LOOM/pull/257)
 - Implementation commit: `b76f0e8de2cf0f483e57514be333aacc2bbe3274`
-- Merged-main reproduction SHA: `8ba65303c2826b2d4f8bbd91f3047deaddf257df`
+- Merged-main reproduction SHA: `dbbd997221f93faeac6908b88657a3b25b3b1634`
 - Roadmap status: `review`
 - Verification status: the offline connector contract passes; the issue remains open for a
   consented interactive browser permission/native-host session.
@@ -17,7 +17,7 @@
 | Rust | rustc 1.96.0 / cargo 1.96.0 |
 | JavaScript | Node v26.7.0 / npm 11.19.0 |
 | Python | 3.9.6 |
-| Merged-main run | `/tmp/loom-0301-native-host-merged-device.NHnTRj` |
+| Merged-main run | `/tmp/loom-0301-final-device.34Wyvw` |
 | MVP demo run | `/tmp/loom-mvp-demo-proof` |
 | Main protection | Ruleset `main-protection` (`21332347`), active on `refs/heads/main` |
 
@@ -25,12 +25,12 @@ The run directory retains the source SHA, environment, extension tests, syntax c
 tests, Rust workspace/MSRV tests, retrieval fixtures, adversarial PDF checks, semantic and
 performance contracts, accessibility, security, native-host pipe, Tauri build, and the npm check
 that now invokes the browser contract. Its summary SHA-256 is
-`23865e2739c0b758183e04ce6b5073648250cb652e9cd7f5d6260c1267f27097`, the npm-check log SHA-256 is
-`3d1a74317f3950ba2226964cecd697373a09b7f89dcd5709136b2dd8e1a5040c`, the native-host log SHA-256
+`669ea8531a0e31feef2ecdd358244eaac5fd49bebda564be51eaa1a30f8d7b78`, the npm-check log SHA-256 is
+`c04241fbcae4670f986d80fea04986de87244f94920745c4a547dfcf7410083f`, the native-host log SHA-256
 is `f918857300bdf2ccf45fa7ed19cd738d77c3432b75d667c64ef9cc965d50fec1`, the Tauri build log
-SHA-256 is `9f119bd87dbbe51b9c868700f614180c3627fe2e998f4c1cc74dc2f4099cd6ae`, the log manifest
-SHA-256 is `82c6540b3a7b396ec56cd6c58dee869e0c96406b415550e4c3d8aefec1623e62`, and the performance
-report SHA-256 is `bddd58789e40836874024300ea1321624b412d2ddea6e4af8d9a0a515d321d89`.
+SHA-256 is `fbac0905bdbc0d212d224091ba52b0b16dfb5c6dd6c604d598cc9384d32bd1b8`, the log manifest
+SHA-256 is `845ab4b52d694ae07339e580125589ed2c25a9e421e58e7c47d00e749d9ad123`, and the performance
+report SHA-256 is `7f9d7938ed914f383c5a9c0a31e7ef44cd8dd58a6ef2fafdd61061f1032a3978`.
 
 ## Acceptance mapping
 
@@ -57,7 +57,7 @@ artifacts and seven passages. Its output is retained in `mvp-demo.log`.
 
 ## Merged-main checks
 
-The current merged-main device rerun at `8ba65303c2826b2d4f8bbd91f3047deaddf257df` returned
+The current merged-main device rerun at `dbbd997221f93faeac6908b88657a3b25b3b1634` returned
 `status=PASS`. In addition to the checks below, `npm run check` now executes
 `npm run test:browser-extension`: the frontend suite passed 23 tests and the browser contract
 passed 11 tests. The native-host device contract passed after `cargo build --locked -p loom
