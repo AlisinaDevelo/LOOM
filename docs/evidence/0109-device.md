@@ -79,3 +79,20 @@ added later without changing the scope/content-hash contract. The repository cur
 protected-branch policy configured; the issue was closed after the owner-reviewed merge and roadmap
 reconciliation. Future full-pipe runs should reclaim at least 1 GiB before compiling the workspace,
 and desktop captures must remain cropped to the relevant evidence panel.
+
+The implementation/evidence merge is PR [#242](https://github.com/AlisinaDevelo/LOOM/pull/242),
+merge commit `cd4c7887dc8d60605fd016ce183bb90b07aa2bc1`. The roadmap write closed issue [#18](https://github.com/AlisinaDevelo/LOOM/issues/18)
+at `2026-08-25T04:08:58Z`.
+
+The v2 reconciler preflight planned one `update_issue` for `0109` and no label, milestone, parent,
+or dependency changes. Its retained fingerprints are:
+
+```text
+/tmp/loom-0109-roadmap-plan-before.json  sha256:6186f06330f723f1e1c627a8b803b0c7b35dd10f62f98c6c810c7a2f74a5f3ec
+/tmp/loom-0109-roadmap-apply.log         sha256:b569e14aa78d50274bafa4b89a09d4d29efbfeb4f0ed0b40ace2bc86a30cf27b
+/tmp/loom-0109-roadmap-plan-after.json   sha256:de11779046e5cbcf4ea4e7bbe88d19c641676058a6cb88254f80357b752941f1
+/tmp/loom-0109-roadmap-plan-second.json  sha256:de11779046e5cbcf4ea4e7bbe88d19c641676058a6cb88254f80357b752941f1
+```
+
+Post-apply verification reports 154 active issues, 4 retired issues, 20 milestones, 13 phases,
+141 parent edges, 314 dependency edges, 23 closed issues, and `mutation_count: 0`.
