@@ -1188,7 +1188,7 @@
     {
       "id": "0304",
       "title": "Enforce exclusions, retention, deletion, and inspection controls",
-      "status": "backlog",
+      "status": "done",
       "quarter": "Q05",
       "phase": "v0.3 Pattern",
       "workstream": "foundation",
