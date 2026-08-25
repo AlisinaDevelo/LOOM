@@ -109,3 +109,26 @@ tests passed; the current frontend check passed 23 tests, including verified evi
 and coordinate projection behavior, plus TypeScript, lint, and Vite build. No hosted Actions result
 was used. The cropped MVP evidence capture remains `/tmp/loom-0106-mvp-cropped.png` (2239×1516,
 SHA-256 `052b1fe0a70a74ff5649510d818548376f078191f817f68c26c3d0fd326227da`).
+
+## Q03 roadmap reconciliation
+
+Roadmap ID `0202` was marked done only after the focused rerun and was reconciled with the other
+Q03 gates through merged PR [#249](https://github.com/AlisinaDevelo/LOOM/pull/249), commit
+`c653ac45006cbd22201b1a16ec45e61e5fbb33e6`. The single-writer reconciler changed issues
+`0200`–`0203` and then verified 154 active managed issues, 4 retired issues, 20 milestones, 13
+phases, 141 parent edges, 314 dependency edges, and 31 closed issues. It reported no warnings and
+the second plan was zero-delta.
+
+```text
+preflight plan: /tmp/loom-0200-03-roadmap-plan-before.json
+  sha256: d60a99e4a37ec87d3031fe9ef4266459f3442d1d044a2e845f2f19850ab96da0
+apply log: /tmp/loom-0200-03-roadmap-apply.log
+  sha256: bd4d6ceb8e19293745ff0214044694cec35c67023cc507ebad459d790ad45c6a
+after plan: /tmp/loom-0200-03-roadmap-plan-after.json
+  sha256: de11779046e5cbcf4ea4e7bbe88d19c641676058a6cb88254f80357b752941f1
+second plan: /tmp/loom-0200-03-roadmap-plan-second.json
+  sha256: de11779046e5cbcf4ea4e7bbe88d19c641676058a6cb88254f80357b752941f1
+```
+
+The live issue for `0202` (#21) is closed and its title, milestone, labels, body marker, and
+dependencies match the canonical manifest. No hosted Actions result was used.
