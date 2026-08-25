@@ -9,11 +9,11 @@ import {
   sanitizeHtml,
 } from "../src/capture.js";
 
-const SECRET = "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=";
+const SESSION_KEY = "test";
 const SESSION = {
   id: "session-test-1",
   keyId: "pairing-key-test-only",
-  secretBase64: SECRET,
+  secretBase64: SESSION_KEY,
   counter: 7,
   issuedAt: "2027-08-23T12:34:56Z",
   expiresAt: "2027-08-23T12:39:56Z",

@@ -160,6 +160,21 @@ returns `remote_fetches: 0`. URLs are searchable locators and evidence text, not
 any future live-page or snapshot action must be a separate explicit command with its own consent,
 capture status, and failure metadata.
 
+### Retention, storage inspection, and deletion
+
+The canonical database path is retained by `Library` so the core can inspect only its own known
+storage surface. Inspection combines source-version byte estimates with physical database,
+WAL/SHM/journal, capture, and fixed disposable-directory sizes. The walker uses `symlink_metadata`
+and never follows links or scans arbitrary sibling directories. Derived FTS5, semantic vectors,
+and OCR records remain rebuildable; they are included in the derived estimate.
+
+Artifact, exact-root, and RFC3339-cutoff deletion run in one transaction with foreign-key cascades,
+then rebuild FTS5 and run a checkpoint/vacuum cycle before returning. A retention policy is stored
+in `schema_meta` but is inert until an explicit apply command. Disposable cleanup removes only
+regular files in the allowlisted cache/model-cache/thumbnail/OCR-scratch/temp-export/log
+directories and SQLite sidecars, leaving user-owned sources and captures untouched. These are
+local deletion controls, not a secure-erasure guarantee against filesystem snapshots or backups.
+
 PDF ingestion uses the pure-Rust `pdf-extract` provider over source bytes already admitted by the
 stable-read boundary. Each page becomes a local `pdf_page` anchor with page number, character and
 line span; parser/page warnings and page count are stored on the immutable artifact version.

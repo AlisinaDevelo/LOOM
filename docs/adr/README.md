@@ -14,6 +14,7 @@ for the supported slice.
 | [0009](0009-browser-capture-protocol.md) | Bound browser capture to explicit, authenticated saves | Proposed |
 | [0010](0010-provenance-relationship-records.md) | Store provenance as typed source-backed relationships | Proposed |
 | [0011](0011-bookmark-metadata-import.md) | Import browser bookmarks as source-faithful metadata without fetching URLs | Accepted for pre-alpha |
+| [0012](0012-retention-storage-deletion.md) | Make retention and deletion explicit, inspectable, and bounded | Accepted for pre-alpha |
 
 New decisions should state context, the decision, consequences, and what is deliberately out of
 scope. Superseding a decision should link the replacement record.

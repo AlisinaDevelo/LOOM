@@ -10,9 +10,10 @@ use blake3::Hash;
 use chrono::Utc;
 use loom_core::{
     BookmarkImportReport, CaptureBounds, CaptureContext, CaptureMode, CapturePurgeReport,
-    CaptureReport, IndexCancellationToken, IndexReport, Library, LibraryStats, ObservationReport,
-    OcrPurgeReport, OcrStatus, OpenArtifactRequest, RelationshipView, ResolveEvidenceRequest,
-    SearchHit, SearchRequest, SourceRootInfo,
+    CaptureReport, DeletionReport, IndexCancellationToken, IndexReport, Library, LibraryStats,
+    ObservationReport, OcrPurgeReport, OcrStatus, OpenArtifactRequest, RelationshipView,
+    ResolveEvidenceRequest, RetentionPolicy, RetentionReport, SearchHit, SearchRequest,
+    SourceRootInfo, StorageInspection,
 };
 use serde::{Deserialize, Serialize};
 use tauri::{Manager, State};
@@ -302,6 +303,68 @@ fn library_stats(state: State<'_, AppState>) -> CommandResult<LibraryStats> {
 }
 
 #[tauri::command]
+fn storage_inspection(state: State<'_, AppState>) -> CommandResult<StorageInspection> {
+    state
+        .library
+        .inspect_storage()
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn purge_artifact(
+    state: State<'_, AppState>,
+    artifact_id: String,
+) -> CommandResult<DeletionReport> {
+    state
+        .library
+        .purge_artifact(&artifact_id)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn purge_root(state: State<'_, AppState>, locator: String) -> CommandResult<DeletionReport> {
+    state
+        .library
+        .purge_root(&locator)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn retention_status(state: State<'_, AppState>) -> CommandResult<RetentionPolicy> {
+    state
+        .library
+        .retention_policy()
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn set_retention_days(
+    state: State<'_, AppState>,
+    days: Option<u32>,
+) -> CommandResult<RetentionPolicy> {
+    state
+        .library
+        .set_retention_days(days)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn apply_retention(state: State<'_, AppState>) -> CommandResult<RetentionReport> {
+    state
+        .library
+        .apply_retention()
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn purge_disposable_storage(state: State<'_, AppState>) -> CommandResult<DeletionReport> {
+    state
+        .library
+        .purge_disposable_storage()
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
 fn ocr_status(state: State<'_, AppState>) -> CommandResult<OcrStatus> {
     state
         .library
@@ -550,6 +613,13 @@ pub fn run() {
             revoke_source_root,
             search,
             library_stats,
+            storage_inspection,
+            purge_artifact,
+            purge_root,
+            retention_status,
+            set_retention_days,
+            apply_retention,
+            purge_disposable_storage,
             ocr_status,
             set_ocr_enabled,
             purge_ocr_records,
@@ -596,6 +666,13 @@ mod tests {
             "allow-revoke-source-root",
             "allow-search",
             "allow-library-stats",
+            "allow-storage-inspection",
+            "allow-purge-artifact",
+            "allow-purge-root",
+            "allow-retention-status",
+            "allow-set-retention-days",
+            "allow-apply-retention",
+            "allow-purge-disposable-storage",
             "allow-ocr-status",
             "allow-set-ocr-enabled",
             "allow-purge-ocr-records",

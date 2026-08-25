@@ -40,6 +40,25 @@ enum Command {
     },
     /// Print canonical library counts.
     Stats,
+    /// Print canonical, derived, sidecar, and disposable storage estimates.
+    StorageInspect,
+    /// Permanently delete one artifact and its evidence.
+    PurgeArtifact { artifact_id: String },
+    /// Permanently delete all artifacts under one exact persisted root locator.
+    PurgeRoot { locator: String },
+    /// Permanently delete artifacts created before an RFC3339 timestamp.
+    PurgeBefore { cutoff: String },
+    /// Print the configured local retention policy.
+    RetentionStatus,
+    /// Set or clear the local retention policy; omission disables it.
+    RetentionSet {
+        #[arg(long)]
+        days: Option<u32>,
+    },
+    /// Apply the configured local retention policy now.
+    RetentionApply,
+    /// Remove known disposable local files and SQLite sidecars.
+    PurgeDisposable,
     /// Print the canonical extraction identity, warnings, and anchors for one indexed source.
     Inspect { path: PathBuf },
     /// Compare canonical passages with the derived FTS5 projection.
@@ -341,6 +360,62 @@ fn main() -> Result<(), Box<dyn Error>> {
         Command::Stats => {
             let library = Library::open(arguments.database)?;
             println!("{}", serde_json::to_string_pretty(&library.stats()?)?);
+        }
+        Command::StorageInspect => {
+            let library = Library::open(arguments.database)?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&library.inspect_storage()?)?
+            );
+        }
+        Command::PurgeArtifact { artifact_id } => {
+            let library = Library::open(arguments.database)?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&library.purge_artifact(&artifact_id)?)?
+            );
+        }
+        Command::PurgeRoot { locator } => {
+            let library = Library::open(arguments.database)?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&library.purge_root(&locator)?)?
+            );
+        }
+        Command::PurgeBefore { cutoff } => {
+            let library = Library::open(arguments.database)?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&library.purge_before(&cutoff)?)?
+            );
+        }
+        Command::RetentionStatus => {
+            let library = Library::open(arguments.database)?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&library.retention_policy()?)?
+            );
+        }
+        Command::RetentionSet { days } => {
+            let library = Library::open(arguments.database)?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&library.set_retention_days(days)?)?
+            );
+        }
+        Command::RetentionApply => {
+            let library = Library::open(arguments.database)?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&library.apply_retention()?)?
+            );
+        }
+        Command::PurgeDisposable => {
+            let library = Library::open(arguments.database)?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&library.purge_disposable_storage()?)?
+            );
         }
         Command::Inspect { path } => {
             let library = Library::open(arguments.database)?;

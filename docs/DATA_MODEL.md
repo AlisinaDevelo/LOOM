@@ -21,6 +21,9 @@ version matrix and migration policy are maintained in [SCHEMA_COMPATIBILITY.md](
 |semantic_index_meta|One disposable semantic-index manifest|provider/model/tokenizer, dimension, normalization, build parameters, revision, canonical digest/counts, vector bytes|
 |semantic_embeddings|Rebuildable vector per active passage|passage hash, provider/model/tokenizer, dimension, normalization, build parameters, revision, encoded vector bytes|
 
+Retention policy is stored as the `schema_meta` key `retention_days`; an absent or empty value
+means disabled. It is deliberately a policy value, not an implicit delete trigger.
+
 File ingestion creates file locators. The bookmark connector creates URL locators only for URLs
 present in an explicitly selected Netscape HTML export; it stores metadata and never resolves the
 URL. Managed-copy locators remain future work.
@@ -156,8 +159,25 @@ excerpt. `open_artifact` uses the same verified tuple before handing the origina
 
 The schema allows active, missing, and tombstoned artifact states and ready, failed, and superseded
 version states. A complete directory rescan marks deleted, unsupported, or failed-read prior
-artifacts missing and excludes them from retrieval. Stored historical text is not purged; secure
-erasure and a user-facing retention policy are not implemented.
+artifacts missing and excludes them from retrieval. Explicit artifact, root, and cutoff deletion
+removes cascaded versions, passages, relationships, bookmark records, FTS rows, and semantic
+vectors, then checkpoints/vacuums SQLite. The retention policy is disabled by default and only
+deletes when explicitly applied.
+
+## Storage accounting and deletion
+
+`storage_inspection` returns bounded `StorageEntry` records for source/version bytes, canonical
+and derived SQLite estimates, database sidecars, and the fixed disposable directories. It reports
+paths, approximate bytes, file counts, and whether the path exists; symlinks and unknown sibling
+directories are not followed. `purge_disposable_storage` removes regular files only from those
+known disposable directories and checkpoints the SQLite sidecars. It does not delete selected
+source files or managed captures.
+
+`purge_artifact`, `purge_root`, and `purge_before` are explicit destructive operations. Each uses a
+single SQLite transaction, records counts for every cascade class, rebuilds FTS5, checkpoints and
+vacuums, and returns a machine-readable deletion report. The device regression suite drops and
+reopens the database, checks search/FTS health, scans WAL/journal/log/cache/thumbnail/OCR/temp
+paths, and verifies that user-owned source bytes remain.
 
 ## Compatibility
 

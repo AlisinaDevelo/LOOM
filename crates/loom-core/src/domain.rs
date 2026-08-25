@@ -202,6 +202,64 @@ pub struct LibraryStats {
     pub indexed_bytes: u64,
 }
 
+/// A bounded estimate for one class of bytes retained under LOOM's application data directory.
+///
+/// The estimate is intentionally explicit about its category and source. Canonical source files
+/// remain user-owned and are never removed by storage cleanup; only paths inside LOOM's known
+/// disposable directories are eligible for cleanup.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StorageEntry {
+    pub category: String,
+    pub path: String,
+    pub source_uri: Option<String>,
+    pub bytes: u64,
+    pub files: u64,
+    pub exists: bool,
+}
+
+/// Read-only accounting for canonical records, derived indexes, SQLite sidecars, and disposable
+/// local files. It never follows symbolic links while walking known storage directories.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StorageInspection {
+    pub database_path: Option<String>,
+    pub generated_at: String,
+    pub entries: Vec<StorageEntry>,
+    pub total_bytes: u64,
+    pub canonical_bytes: u64,
+    pub derived_bytes: u64,
+    pub disposable_bytes: u64,
+    pub source_bytes: u64,
+}
+
+/// Counts and retained paths removed by an explicit deletion operation.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeletionReport {
+    pub selector: String,
+    pub artifacts_deleted: u64,
+    pub versions_deleted: u64,
+    pub passages_deleted: u64,
+    pub relationships_deleted: u64,
+    pub bookmark_records_deleted: u64,
+    pub files_deleted: u64,
+    pub bytes_deleted: u64,
+    pub paths: Vec<String>,
+}
+
+/// Explicit retention policy. `None` means retention cleanup is disabled.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RetentionPolicy {
+    pub days: Option<u32>,
+}
+
+/// Result of applying the configured retention policy at a known clock instant.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RetentionReport {
+    pub policy: RetentionPolicy,
+    pub evaluated_at: String,
+    pub cutoff: Option<String>,
+    pub deletion: DeletionReport,
+}
+
 /// Canonical extractor output for one stored passage.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PassageObservation {

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-purge-disposable-storage"
+description = "Enables the purge_disposable_storage command without any pre-configured scope."
+commands.allow = ["purge_disposable_storage"]
+
+[[permission]]
+identifier = "deny-purge-disposable-storage"
+description = "Denies the purge_disposable_storage command without any pre-configured scope."
+commands.deny = ["purge_disposable_storage"]

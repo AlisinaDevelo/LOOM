@@ -7,6 +7,12 @@ set -Eeuo pipefail
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 cd "$ROOT"
 
+# Keep the device runner reproducible on a small development disk. These defaults
+# only change disposable build artifacts; callers can override them explicitly.
+export CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-1}"
+export CARGO_INCREMENTAL="${CARGO_INCREMENTAL:-0}"
+export CARGO_PROFILE_DEV_DEBUG="${CARGO_PROFILE_DEV_DEBUG:-0}"
+
 if [[ $# -gt 1 ]]; then
   printf 'usage: %s [evidence-directory]\n' "$0" >&2
   exit 2
@@ -117,6 +123,7 @@ git rev-parse HEAD >> "$SUMMARY"
 
 run_step fmt cargo fmt --all --check
 run_step clippy cargo clippy --workspace --all-targets --locked -- -D warnings
+run_step clear-clippy-target clear_rust_outputs
 run_step rust-workspace cargo test --workspace --locked
 run_step clear-stable-target clear_rust_outputs
 run_step rust-msrv-check cargo +1.88.0 check --workspace --all-targets --locked

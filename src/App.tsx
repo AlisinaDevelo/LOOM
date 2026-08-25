@@ -12,6 +12,38 @@ type LibraryStats = {
   indexed_bytes: number;
 };
 
+type StorageEntry = {
+  category: string;
+  path: string;
+  source_uri: string | null;
+  bytes: number;
+  files: number;
+  exists: boolean;
+};
+
+type StorageInspection = {
+  database_path: string | null;
+  generated_at: string;
+  entries: StorageEntry[];
+  total_bytes: number;
+  canonical_bytes: number;
+  derived_bytes: number;
+  disposable_bytes: number;
+  source_bytes: number;
+};
+
+type DeletionReport = {
+  selector: string;
+  artifacts_deleted: number;
+  versions_deleted: number;
+  passages_deleted: number;
+  relationships_deleted: number;
+  bookmark_records_deleted: number;
+  files_deleted: number;
+  bytes_deleted: number;
+  paths: string[];
+};
+
 type IndexReport = {
   run_id: string;
   discovered: number;
@@ -437,6 +469,7 @@ function EvidenceViewer({
 
 function App() {
   const [stats, setStats] = useState<LibraryStats>(emptyStats);
+  const [storageInspection, setStorageInspection] = useState<StorageInspection | null>(null);
   const [query, setQuery] = useState("");
   const [hits, setHits] = useState<SearchHit[]>([]);
   const [ocrStatus, setOcrStatus] = useState<OcrStatus>({
@@ -459,6 +492,7 @@ function App() {
   const [captureWindowTitle, setCaptureWindowTitle] = useState("");
   const [captureExclusionInput, setCaptureExclusionInput] = useState("");
   const [captureBusy, setCaptureBusy] = useState<CaptureMode | "purge" | null>(null);
+  const [storageBusy, setStorageBusy] = useState<"inspect" | "purge" | null>(null);
   const searchInputRef = useRef<HTMLInputElement>(null);
   const resultsHeadingRef = useRef<HTMLHeadingElement>(null);
   const noResultsHeadingRef = useRef<HTMLHeadingElement>(null);
@@ -489,6 +523,36 @@ function App() {
       // Keep the controls at their safe defaults if the desktop bridge is still starting.
     }
   }, []);
+
+  const inspectStorage = async () => {
+    setError(null);
+    setStorageBusy("inspect");
+    try {
+      setStorageInspection(await invoke<StorageInspection>("storage_inspection"));
+      setNotice("Storage accounting refreshed; LOOM only inspected known local paths.");
+    } catch (caught) {
+      setError(errorMessage(caught));
+      setNotice("Storage inspection failed safely.");
+    } finally {
+      setStorageBusy(null);
+    }
+  };
+
+  const purgeDisposableStorage = async () => {
+    setError(null);
+    setStorageBusy("purge");
+    setNotice("Removing known disposable files and SQLite sidecars…");
+    try {
+      const report = await invoke<DeletionReport>("purge_disposable_storage");
+      setNotice(`Removed ${report.files_deleted} disposable file${report.files_deleted === 1 ? "" : "s"}; source files were not touched.`);
+      setStorageInspection(await invoke<StorageInspection>("storage_inspection"));
+    } catch (caught) {
+      setError(errorMessage(caught));
+      setNotice("Disposable cleanup stopped safely.");
+    } finally {
+      setStorageBusy(null);
+    }
+  };
 
   const refreshLibrary = useCallback(async () => {
     await Promise.all([refreshStats(), refreshSourceRoots(), refreshCaptureStatus()]);
@@ -691,6 +755,23 @@ function App() {
     }
   };
 
+  const purgeSourceData = async (root: SourceRootInfo) => {
+    setError(null);
+    setBusy("scope");
+    setNotice(`Deleting indexed evidence for ${compactPath(root.locator)}…`);
+    try {
+      const report = await invoke<DeletionReport>("purge_root", { locator: root.locator });
+      setNotice(`Deleted ${report.artifacts_deleted} artifact${report.artifacts_deleted === 1 ? "" : "s"} and its evidence rows. Original source files remain user-owned.`);
+      await refreshLibrary();
+      if (storageInspection) await inspectStorage();
+    } catch (caught) {
+      setError(errorMessage(caught));
+      setNotice("Indexed evidence deletion stopped safely.");
+    } finally {
+      setBusy(null);
+    }
+  };
+
   const toggleOcr = async () => {
     setError(null);
     setBusy("ocr");
@@ -875,6 +956,34 @@ function App() {
               Purge derived OCR now
             </button>
           </section>
+          <section className="storage-controls" aria-labelledby="storage-heading">
+            <div className="section-label" id="storage-heading">Storage inspector</div>
+            <button
+              type="button"
+              className="scope-action storage-inspect-button"
+              onClick={inspectStorage}
+              disabled={storageBusy !== null}
+            >
+              {storageBusy === "inspect" ? "Inspecting…" : "Inspect local storage"}
+            </button>
+            {storageInspection && (
+              <dl className="storage-summary" aria-label="Storage summary">
+                <div><dt>All counted</dt><dd>{formatBytes(storageInspection.total_bytes)}</dd></div>
+                <div><dt>Sources</dt><dd>{formatBytes(storageInspection.source_bytes)}</dd></div>
+                <div><dt>Derived</dt><dd>{formatBytes(storageInspection.derived_bytes)}</dd></div>
+                <div><dt>Disposable</dt><dd>{formatBytes(storageInspection.disposable_bytes)}</dd></div>
+              </dl>
+            )}
+            <button
+              type="button"
+              className="scope-action scope-revoke"
+              onClick={purgeDisposableStorage}
+              disabled={storageBusy !== null}
+            >
+              {storageBusy === "purge" ? "Cleaning…" : "Clear disposable files"}
+            </button>
+            <p className="scope-note">Counts known database sidecars, caches, logs, thumbnails, OCR scratch, and temporary exports without following symlinks.</p>
+          </section>
           <section className="capture-controls" aria-labelledby="capture-heading">
             <div className="section-label" id="capture-heading">Intentional capture</div>
             <p className="scope-note">Nothing records in the background. Choose one screen, window, or region only when you press a button.</p>
@@ -954,15 +1063,26 @@ function App() {
                         </button>
                       )}
                       {root.enabled && (
-                        <button
-                          type="button"
-                          className="scope-action scope-revoke"
-                          onClick={() => revokeSource(root)}
-                          disabled={busy !== null}
-                          aria-label={`Revoke ${root.locator}`}
-                        >
-                          Revoke
-                        </button>
+                        <>
+                          <button
+                            type="button"
+                            className="scope-action scope-revoke"
+                            onClick={() => revokeSource(root)}
+                            disabled={busy !== null}
+                            aria-label={`Revoke ${root.locator}`}
+                          >
+                            Revoke
+                          </button>
+                          <button
+                            type="button"
+                            className="scope-action scope-revoke"
+                            onClick={() => purgeSourceData(root)}
+                            disabled={busy !== null}
+                            aria-label={`Delete indexed data for ${root.locator}`}
+                          >
+                            Delete data
+                          </button>
+                        </>
                       )}
                     </div>
                   </li>

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-purge-artifact"
+description = "Enables the purge_artifact command without any pre-configured scope."
+commands.allow = ["purge_artifact"]
+
+[[permission]]
+identifier = "deny-purge-artifact"
+description = "Denies the purge_artifact command without any pre-configured scope."
+commands.deny = ["purge_artifact"]
