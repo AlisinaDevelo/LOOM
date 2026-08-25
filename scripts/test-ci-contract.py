@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 import unittest
 from pathlib import Path
@@ -10,6 +11,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 CI = (ROOT / ".github" / "workflows" / "ci.yml").read_text()
+PACKAGE = json.loads((ROOT / "package.json").read_text())
 DEPENDENCY_REVIEW = (ROOT / ".github" / "workflows" / "dependency-review.yml").read_text()
 DEPENDABOT = (ROOT / ".github" / "dependabot.yml").read_text()
 MAKEFILE = (ROOT / "Makefile").read_text()
@@ -18,6 +20,9 @@ DEVICE = (ROOT / "scripts" / "verify-device.sh").read_text()
 
 
 class CiContractTests(unittest.TestCase):
+    def test_frontend_check_runs_the_browser_connector_contract(self) -> None:
+        self.assertIn("npm run test:browser-extension", PACKAGE["scripts"]["test"])
+
     def test_ci_jobs_cover_the_supported_release_paths(self) -> None:
         for job in ("roadmap:", "rust-core:", "rust-msrv:", "rust-advisories:", "frontend:", "tauri-macos:"):
             self.assertIn(job, CI)
