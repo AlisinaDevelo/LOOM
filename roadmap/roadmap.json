@@ -556,7 +556,7 @@
     {
       "id": "0112",
       "title": "Persist user-selected roots with revocable access",
-      "status": "review",
+      "status": "done",
       "quarter": "Q02",
       "phase": "v0.1 Thread",
       "workstream": "privacy",
