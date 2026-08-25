@@ -668,7 +668,7 @@
     {
       "id": "0200",
       "title": "Add reproducible PDF text extraction and rendering",
-      "status": "review",
+      "status": "done",
       "quarter": "Q03",
       "phase": "v0.2 Needle",
       "workstream": "foundation",
@@ -696,7 +696,7 @@
     {
       "id": "0201",
       "title": "Add private screenshot and image OCR",
-      "status": "review",
+      "status": "done",
       "quarter": "Q03",
       "phase": "v0.2 Needle",
       "workstream": "foundation",
@@ -724,7 +724,7 @@
     {
       "id": "0202",
       "title": "Highlight exact PDF pages and image regions",
-      "status": "review",
+      "status": "done",
       "quarter": "Q03",
       "phase": "v0.2 Needle",
       "workstream": "foundation",
@@ -754,7 +754,7 @@
     {
       "id": "0203",
       "title": "Define and implement the rebuildable semantic index contract",
-      "status": "review",
+      "status": "done",
       "quarter": "Q03",
       "phase": "v0.2 Needle",
       "workstream": "foundation",
