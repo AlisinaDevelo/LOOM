@@ -5,9 +5,10 @@ This artifact records the persisted, revocable source-scope contract for issue
 bounded status reporting for missing/denied/moved/unsafe roots, read-only reconciliation, and
 explicit revocation/re-selection. The current direct-distribution build uses explicit
 re-selection; it does not claim a sandbox security-scoped bookmark implementation. The
-implementation was merged through PR [#177](https://github.com/AlisinaDevelo/LOOM/pull/177); the
-merged-main reproduction is recorded below. Issue #65 remains in `review` until independent
-approval and protected-main enforcement are available.
+implementation was merged through PR [#177](https://github.com/AlisinaDevelo/LOOM/pull/177). The
+current-main focused reproduction is recorded below; the roadmap status is advanced after that
+evidence is merged and reconciled. This direct-distribution build uses explicit re-selection
+rather than a sandbox security-scoped bookmark.
 
 ## Device and toolchain
 
@@ -85,25 +86,35 @@ tauri-build.log         sha256:c42bf746b6523fbc1e85e412d51f91982b89f9262f1ea76b4
 This run proves the persisted-scope contract on the specified Mac; it does not claim another
 OS/architecture, a sandbox security-scoped bookmark, notarization, a third-party security audit,
 a `cargo-audit` result, or a large-library resource benchmark. The current implementation keeps
-historical rows when a scope is revoked; retention/purge policy remains separate work. Issue 65
-remains in `review`; the post-merge reproduction below satisfies the code and target-device
-evidence portion, while independent review and protected-main enforcement remain required.
+historical rows when a scope is revoked; retention/purge policy remains separate work. A default
+profile clean rebuild attempted on current `main` exhausted the device filesystem before the
+test binary was produced (`/tmp/loom-0112-focused-current.mjj5wg/source-roots.log`, SHA-256
+`8232052f286f7da873fb5420033ab6b0ec238364b9d0f3f54b5150dcc89b2d03`). The successful focused
+rerun below used `CARGO_PROFILE_DEV_DEBUG=0`, `CARGO_INCREMENTAL=0`, and one build job; it is
+the current code/device authority for the source-scope criterion. No hosted Actions result or
+protected-branch enforcement was used.
 
-## Merged-main reproduction
+## Current merged-main focused reproduction
 
-The same target-device harness was run against runtime-tested merged `main` commit
-`eee1236710b98375e86b12187d545ed451ee2b7c` on the Mac specified above. The current main tip
-`d4b219b0bb634054bee6ce8ad9a71a17dd8bf003` adds only documentation and roadmap metadata after
-that runtime-tested commit; no source-root implementation changed.
+The focused core suites were run against merged `main` commit
+`87d1e03ffe2a43fed33826df58360e456ca4c753` on the Mac specified above. The source-scope suite
+passed all five tests: persisted relaunch, revocation, moved-root re-selection, denied scope,
+and symlink replacement. The same low-footprint run also passed the two cancellation tests and
+the two FTS5 repair tests used by adjacent v0.1 gates.
 
-- Verification directory: `/tmp/loom-0110-main-device.QLkKl1`
-- Harness summary SHA-256: `45bc997dcb26b8bc6cbd63a09fa17aed6c5d4ae968ef349be473b0b034e94e70`
-- Commands SHA-256: `d840925fb008af9101dc3121870b79960c1b6924451df17a7851f2f6132bb209`
-- Log manifest: `/tmp/loom-0110-main-device.QLkKl1/log-sha256.txt`
-- Log manifest SHA-256: `ed539c48e8c9b648f0ae341ddf37f02107d5aacff5d5e2a19ae0d28612c57d64`
+- Verification directory: `/tmp/loom-0112-14-focused-current.WFJUFQ`
+- Focused log SHA-256: `99827fb413c87051a3a2085c134e05cff0ab44d858b5cf30bdfc1789819d32e2`
+- Toolchain: `rustc 1.96.0` / Cargo `1.96.0`, arm64 Apple Silicon
+- Result: source roots `5 passed`, cancellation `2 passed`, FTS repair `2 passed`
 
-The full local pipe passed. Its MSRV workspace run included all five source-root tests for
-persisted relaunch, denied and unsafe scopes, moved-root re-selection, revocation, and explicit
-re-selection; frontend status/revoke checks also passed. No hosted Actions or unavailable
-hardware substituted for this target-device evidence. The direct-distribution re-selection limit
-and future crop rule remain explicit.
+This focused rerun does not substitute for the unavailable full workspace pipe; the historical
+full-pipe artifact above remains labeled with its original source commit. The direct-distribution
+re-selection limit and the requirement to crop future desktop captures to the evidence panel
+remain explicit.
+
+## Historical merged-main full-pipe reproduction
+
+The earlier target-device harness passed against runtime-tested merged `main` commit
+`eee1236710b98375e86b12187d545ed451ee2b7c`; its retained logs and limitations remain useful for
+the broader integration claim, but it predates the current documentation-only commits and is not
+used to represent the focused current-main rerun above.
