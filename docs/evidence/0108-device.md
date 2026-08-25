@@ -58,6 +58,23 @@ The first full harness attempt at that implementation family (`1d945c5`) failed 
 column-alignment diagnostics in the new table. The table was corrected in `4ffbc63`, markdown lint
 was rerun clean, and the complete harness above was rerun from that corrected commit.
 
+The implementation/evidence merge is PR [#240](https://github.com/AlisinaDevelo/LOOM/pull/240),
+merge commit `c4365878809541026e50222e902a899ce83b8994`. The roadmap write closed issue [#17](https://github.com/AlisinaDevelo/LOOM/issues/17)
+at `2026-08-25T03:56:26Z`.
+
+The v2 reconciler preflight planned one `update_issue` for `0108` and no label, milestone, parent,
+or dependency changes. Its retained fingerprints are:
+
+```text
+/tmp/loom-0108-roadmap-plan-before.json  sha256:4b3853c1745d1e47855b8c65f93d023041317e45b92159bb94fd608216e40b48
+/tmp/loom-0108-roadmap-apply.log         sha256:a6bc8ee1d54a07e0a62c30555001e68a9761701775b8e0d6eef105b1fe6a80ec
+/tmp/loom-0108-roadmap-plan-after.json   sha256:de11779046e5cbcf4ea4e7bbe88d19c641676058a6cb88254f80357b752941f1
+/tmp/loom-0108-roadmap-plan-second.json  sha256:de11779046e5cbcf4ea4e7bbe88d19c641676058a6cb88254f80357b752941f1
+```
+
+Post-apply verification reports 154 active issues, 4 retired issues, 20 milestones, 13 phases,
+141 parent edges, 314 dependency edges, 22 closed issues, and `mutation_count: 0`.
+
 ## Log and digest record
 
 The retained run directory is `/tmp/loom-0108-device-final.aHrVpm`. Its `summary.txt`, command
