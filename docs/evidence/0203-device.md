@@ -139,3 +139,26 @@ The focused semantic-index suite was run against source-equivalent current `main
 `dc8a8d5d21c063ef17bb39bc927c1dc98f40a1ce5f89411fd23682fb68352f83`) records all 6 semantic-index
 tests passed, including deterministic rebuild, source-version drift, incompatible manifests, and
 tampered passage fail-closed behavior. No hosted Actions result was used.
+
+## Q03 roadmap reconciliation
+
+Roadmap ID `0203` was marked done only after the focused rerun and was reconciled with the other
+Q03 gates through merged PR [#249](https://github.com/AlisinaDevelo/LOOM/pull/249), commit
+`c653ac45006cbd22201b1a16ec45e61e5fbb33e6`. The single-writer reconciler changed issues
+`0200`–`0203` and then verified 154 active managed issues, 4 retired issues, 20 milestones, 13
+phases, 141 parent edges, 314 dependency edges, and 31 closed issues. It reported no warnings and
+the second plan was zero-delta.
+
+```text
+preflight plan: /tmp/loom-0200-03-roadmap-plan-before.json
+  sha256: d60a99e4a37ec87d3031fe9ef4266459f3442d1d044a2e845f2f19850ab96da0
+apply log: /tmp/loom-0200-03-roadmap-apply.log
+  sha256: bd4d6ceb8e19293745ff0214044694cec35c67023cc507ebad459d790ad45c6a
+after plan: /tmp/loom-0200-03-roadmap-plan-after.json
+  sha256: de11779046e5cbcf4ea4e7bbe88d19c641676058a6cb88254f80357b752941f1
+second plan: /tmp/loom-0200-03-roadmap-plan-second.json
+  sha256: de11779046e5cbcf4ea4e7bbe88d19c641676058a6cb88254f80357b752941f1
+```
+
+The live issue for `0203` (#22) is closed and its title, milestone, labels, body marker, and
+dependencies match the canonical manifest. No hosted Actions result was used.
