@@ -134,8 +134,10 @@ be cropped to the relevant evidence panel.
 
 ## Current-main acceptance reproduction
 
-The final repository `main` used for the current reproduction is
-`421bc6d469ba87a144495d0bf470d16ce44ec40f` on the same Mac. The targeted native command was:
+The focused acceptance reproduction was run at
+`421bc6d469ba87a144495d0bf470d16ce44ec40f` on the same Mac. The implementation/evidence merge
+`39f48f8eafbb71184b90f8ae13fe50e550bbe7dd` changed only this evidence document and roadmap metadata;
+`git diff --name-only` across the LOOM source directories was empty. The targeted native command was:
 
 ```text
 CARGO_TARGET_DIR=/tmp/loom-0102-focused-target.* \
@@ -151,6 +153,8 @@ command with `cargo +1.88.0` and passed the same 93 tests with zero failures. Re
 | `/tmp/loom-0102-msrv-current.log` | `7ad063c8e87ee22fe8026d31c866374f7780d279941c511e03e2bb454b000ec1` |
 | `/tmp/loom-0102-mixed-current.log` | `87b22f78c8f602d83144561b79ba3c854e078c5bdffb11f5af92239c482f79df` |
 | `/tmp/loom-0102-mvp-demo.log` | `99a66c5636731e2397ccef0010b7f1a4a85fe5e4fcd94ddda3a131d694cf99b0` |
+| `/tmp/loom-0102-merged-core-current.log` | `c320ab20908200e5acf56df30b160afc969b94bc63f43974048568d8512a2b2f` |
+| `/tmp/loom-0102-merged-core-rerun.log` | `8e9dba2aee836d4930fb7493749c73fbbeafc0cac5f721087ff441c4f627f398` |
 
 The current-main MVP demo indexed all three rights-clean fixtures (533 bytes), returned the exact
 `retry anomalies` passage with a text anchor, and reported 3 artifacts, 3 versions, and 3 passages.
@@ -163,4 +167,8 @@ The complete current-main pipe was also attempted at
 failed with `ENOSPC` while compiling on a volume concurrently used by another device build. The
 failure is retained as a no-go resource result and was not substituted with hosted CI. The focused
 acceptance suites above completed after the device had enough space, and no unavailable hardware
-was involved.
+was involved. A direct focused rerun at the merged implementation SHA was attempted twice and
+reached dependency compilation/linking, but both attempts stopped with `ENOSPC` before tests could
+start. Those no-go logs are retained above; the source-equivalence check shows no LOOM source
+changed between the passing test SHA and the merged implementation SHA, so no code behavior was
+substituted or inferred from hosted CI.
