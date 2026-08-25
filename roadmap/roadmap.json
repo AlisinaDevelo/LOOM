@@ -360,7 +360,7 @@
     {
       "id": "0105",
       "title": "Establish retrieval benchmark v0",
-      "status": "review",
+      "status": "done",
       "quarter": "Q01",
       "phase": "v0.1 Thread",
       "workstream": "foundation",
