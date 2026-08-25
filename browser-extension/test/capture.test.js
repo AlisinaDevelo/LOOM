@@ -88,6 +88,22 @@ test("marks cross-origin redirects partial and preserves both URLs", async () =>
   assert.equal(result.request.snapshot.failure_code, "cross_origin_redirect");
 });
 
+test("captures a same-origin single-page-app view after a visible save", async () => {
+  const result = await messages({
+    page: page({
+      liveUrl: "https://example.test/app",
+      finalUrl: "https://example.test/app#settings",
+      html: "<main><h1>Settings</h1><p>Account preferences</p></main>",
+      redirects: [],
+    }),
+  });
+
+  assert.equal(result.request.snapshot.state, "complete");
+  assert.equal(result.request.source.live_url, "https://example.test/app");
+  assert.equal(result.request.source.final_url, "https://example.test/app#settings");
+  assert.match(result.payloads[0].body, /^[A-Za-z0-9+/]+=*$/);
+});
+
 test("caps oversized snapshots as partial instead of sending unbounded bytes", async () => {
   const result = await messages({
     page: page({html: `<article>${"x".repeat(MAX_SNAPSHOT_BYTES + 4096)}</article>`}),

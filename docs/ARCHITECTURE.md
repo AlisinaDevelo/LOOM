@@ -220,8 +220,9 @@ The current SQLite records are the authority for source identity, text, versions
 semantic index adds only a disposable, versioned vector projection and must be rebuildable from
 canonical records; it must not replace the source-backed result contract. The explicit-save browser
 connector prototype in [`browser-extension/`](../browser-extension/README.md) is a bounded transport
-client only: it requires a paired native host, and the current SQLite path does not treat a browser
-payload as canonical until the host-side connector work is implemented and verified. External model
+client plus a checked Rust stdio receiver: it requires a paired native host, authenticates and
+spools complete sanitized payloads, and the current SQLite path does not treat a browser payload as
+canonical until the host-to-library storage adapter is implemented and verified. External model
 providers, cloud sync, and managed copies remain out of scope.
 
 ## References

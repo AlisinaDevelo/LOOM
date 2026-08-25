@@ -63,7 +63,7 @@ service attack. There is no supported remote service in this slice.
 |Tauri command overreach|Narrow command set; backend-owned selection; no arbitrary path command; hash-bound open|Capabilities and host permissions need release hardening|
 |Dependency compromise|Locked dependency resolution and ordinary build review|No reproducible-build or signed-release guarantee yet|
 |Relationship spoofing or graph disclosure|Typed known kinds, preserved unknown strings, explicit origin/method/confidence, endpoint existence checks, endpoint-bound passage evidence, bounded reads, and no relationship write command in the webview|A compromised local process can still write SQLite directly; independent audit and encrypted storage are not implemented|
-|Browser connector over-collection|`activeTab` plus explicit command only; no host permissions, history listeners, or network path; sanitized attributes are discarded|A consented Chrome/Firefox permission session and paired native host remain unverified|
+|Browser connector over-collection|`activeTab` plus explicit command only; no host permissions, history listeners, or network path; extension and host reject executable/attribute-bearing HTML|A consented Chrome/Firefox permission session, Keychain pairing, and signed host packaging remain unverified|
 |Bookmark export HTML or URL abuse|Bounded local parser, regular-file/symlink checks, UTF-8 and size limits, executable-scheme rejection, no network client|Malformed HTML and unusual schemes remain user-visible import failures; live-page archiving is separate and unimplemented|
 
 ## Security requirements for extensions

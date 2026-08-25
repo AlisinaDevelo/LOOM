@@ -31,9 +31,10 @@ extension. The first implementation will:
 - reject malformed, replayed, downgraded, unapproved, redirected, or oversized requests before
   persistence.
 
-The protocol specification and fixture validator are the review gate. The extension, sanitizer,
-native host, and browser-specific permission tests are deliberately deferred to roadmap `0301` and
-later issues.
+The protocol specification and fixture validator remain the review gate. The extension, sanitizer,
+Rust native host, and browser-specific contract tests now have deterministic repository coverage;
+Keychain pairing, signed host packaging, and a consented browser permission session remain
+deliberately deferred to roadmap `0301` release gates.
 
 ## Consequences
 

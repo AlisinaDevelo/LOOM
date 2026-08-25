@@ -94,8 +94,9 @@ expand the collection or become the only way to recover source evidence.
 The current [explicit-save browser connector prototype](../browser-extension/README.md) is not an
 always-on capture service: it requests no host permissions, history, tabs, cookies, or network
 access, refuses to inspect a page until a local pairing exists, and sends only sanitized,
-user-requested data to the named native host. A consented browser permission session and host-side
-storage integration remain separate release gates.
+user-requested data to the named native host. The checked host refuses unpaired configuration and
+spools only hash-verified sanitized bytes; Keychain pairing, a consented browser permission
+session, signed packaging, and host-to-library storage integration remain separate release gates.
 
 The current direct-distribution build uses explicit re-selection rather than claiming a
 security-scoped bookmark. A future sandboxed/notarized build must replace or supplement that path
