@@ -4,8 +4,8 @@ This artifact records the source-backed search-result and exact-open verificatio
 [#13](https://github.com/AlisinaDevelo/LOOM/issues/13). The change is stacked on the canonical
 store and bounded-ingestion work in PRs [#163](https://github.com/AlisinaDevelo/LOOM/pull/163) and
 [#164](https://github.com/AlisinaDevelo/LOOM/pull/164). The original implementation run remains
-retained for history; the current merged-main reproduction is recorded below. Issue #13 remains
-open until independent review and a protected-main policy are available.
+retained for history; the current-main reproduction is recorded below. Issue #13 is closed after
+the evidence and roadmap-status changes were merged to `main`.
 
 ## Device and toolchain
 
@@ -75,9 +75,11 @@ tauri-build.log          sha256:485c0cdd5f98d578c85ca61a6eaacfbb9a00b3437f3e9d75
 ## Limitations and closure gate
 
 This evidence covers the current local UTF-8 text/Markdown result contract. PDF/OCR, browser
-capture, passive capture, and unavailable hardware were not substituted or claimed. The post-merge
-reproduction below satisfies the code and target-device evidence portion; independent review and a
-protected-main policy remain required before #13 can close.
+capture, passive capture, and unavailable hardware were not substituted or claimed. A current-main
+full workspace pipe was attempted and hit an honest `ENOSPC` resource boundary while another target
+device build was compiling; it is retained as a no-go rather than a pass. The focused native and
+Rust 1.88 core suites, exact anchored MVP search, and mixed-corpus recovery are the authoritative
+0104 evidence.
 
 ## Merged-main reproduction
 
@@ -105,3 +107,27 @@ on the next index with `indexed=1`, `unchanged=2`, `skipped=1`, no failures, and
 artifacts, 3 versions, 3 passages, and 250 indexed bytes. No hosted CI or unavailable hardware
 substituted for this target-device evidence. Any future desktop capture must be cropped to the
 relevant evidence panel.
+
+## Current-main acceptance reproduction
+
+The passing focused core reproduction was run at
+`421bc6d469ba87a144495d0bf470d16ce44ec40f`. The implementation/evidence merge
+`39f48f8eafbb71184b90f8ae13fe50e550bbe7dd` and subsequent evidence-only commits changed no LOOM
+source files under `crates/loom-core`, `crates/loom-cli`, `src-tauri`, or
+`browser-extension`; the source-equivalence check was empty.
+
+The native and Rust 1.88 commands each passed 93 loom-core tests with zero failures, including the
+result-contract integration suite. The current-main MVP returned `retry anomalies` from the exact
+source URI with a structured highlighted excerpt and character/line anchor; the mixed corpus
+covered unsupported input, the oversized boundary, outside-root symlink, and recovery.
+
+| Artifact | SHA-256 |
+| --- | --- |
+| `/tmp/loom-0102-focused-current.log` | `067ba921fbbceb562010d8bc1b6d05b75f445484579fbb11bf428259d2651435` |
+| `/tmp/loom-0102-msrv-current.log` | `7ad063c8e87ee22fe8026d31c866374f7780d279941c511e03e2bb454b000ec1` |
+| `/tmp/loom-0102-mixed-current.log` | `87b22f78c8f602d83144561b79ba3c854e078c5bdffb11f5af92239c482f79df` |
+| `/tmp/loom-0102-mvp-demo.log` | `99a66c5636731e2397ccef0010b7f1a4a85fe5e4fcd94ddda3a131d694cf99b0` |
+
+The complete current-main pipe is retained at `/tmp/loom-0102-current-main.B40RI8`; formatting and
+Clippy passed, while workspace/MSRV compilation stopped at `ENOSPC`. Hosted CI was not used as a
+substitute, and no unavailable hardware was involved.
