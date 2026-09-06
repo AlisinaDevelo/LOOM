@@ -31,8 +31,8 @@ tempfile = "3"
 thiserror = "2.0.20"
 uuid = { version = "1.25.0", features = ["serde", "v4"] }
 walkdir = "2.5.0"
-hmac = "0.12.1"
-sha2 = "0.10.9"
+hmac = "0.13.0"
+sha2 = "0.11.0"
 url = "2.5.7"
 
 [workspace.lints.rust]
