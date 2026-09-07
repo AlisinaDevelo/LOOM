@@ -1016,7 +1016,7 @@ fn decode_base64(value: &str) -> Option<Vec<u8>> {
     }
     let bytes = value.as_bytes();
     let mut output = Vec::with_capacity(value.len() / 4 * 3);
-    for chunk in bytes.chunks_exact(4) {
+    for chunk in bytes.as_chunks::<4>().0 {
         let first = base64_value(chunk[0])?;
         let second = base64_value(chunk[1])?;
         let third = if chunk[2] == b'=' {
