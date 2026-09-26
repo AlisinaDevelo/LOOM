@@ -165,7 +165,7 @@ describe("desktop truth path", () => {
       if (command === "reconcile_approved_roots") return {};
       if (command === "list_source_roots") return [];
       if (command === "library_stats") return emptyStats;
-      if (command === "capture_status") return { paused: false, excluded_apps: [], capture_root: "/tmp/loom-captures" };
+      if (command === "capture_status") return { paused: false, excluded_apps: [], capture_root: "/tmp/loom-captures", policy_error: null };
       if (command === "import_bookmarks") {
         return {
           import_id: "bookmark-import-1",
@@ -659,7 +659,7 @@ describe("desktop truth path", () => {
   });
 
   it("keeps intentional capture explicit, pausable, excluded, and purgeable", async () => {
-    const captureStatus = { paused: false, excluded_apps: [], capture_root: "/Users/test/Library/Application Support/LOOM/captures" };
+    const captureStatus = { paused: false, excluded_apps: [], capture_root: "/Users/test/Library/Application Support/LOOM/captures", policy_error: null };
     invokeMock.mockImplementation(async (command, args) => {
       if (command === "reconcile_approved_roots") return {};
       if (command === "list_source_roots") return [];
@@ -703,5 +703,27 @@ describe("desktop truth path", () => {
     expect(screen.getByRole("button", { name: "Capture region" })).toBeDisabled();
     fireEvent.click(screen.getByRole("button", { name: "Purge captures" }));
     expect(await screen.findByRole("status")).toHaveTextContent("Purged 1 capture");
+  });
+  it("keeps capture paused and explains why when the saved policy was rejected", async () => {
+    invokeMock.mockImplementation(async (command) => {
+      if (command === "reconcile_approved_roots") return {};
+      if (command === "list_source_roots") return [];
+      if (command === "library_stats") return emptyStats;
+      if (command === "capture_status") return {
+        paused: true,
+        excluded_apps: [],
+        capture_root: "/tmp/loom-captures",
+        policy_error: "policy is malformed",
+      };
+      if (command === "set_capture_paused") throw new Error("capture stays paused because the saved policy was rejected");
+      throw new Error(`unexpected command: ${command}`);
+    });
+
+    render(<App />);
+    expect(await screen.findByRole("alert")).toHaveTextContent("policy is malformed");
+    expect(screen.getByRole("button", { name: "Capture region" })).toBeDisabled();
+    fireEvent.click(screen.getByRole("button", { name: "Resume capture" }));
+    expect(await screen.findByRole("status")).toHaveTextContent("Capture policy did not change.");
+    expect(screen.getByRole("button", { name: "Capture region" })).toBeDisabled();
   });
 });

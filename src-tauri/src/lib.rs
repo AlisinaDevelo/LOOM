@@ -20,26 +20,25 @@ use serde::{Deserialize, Serialize};
 use tauri::{Manager, State};
 use tauri_plugin_dialog::DialogExt;
 
+mod capture_policy;
+
+use capture_policy::LoadedPolicy;
+
 struct AppState {
     library: Arc<Library>,
     active_index: Mutex<Option<IndexCancellationToken>>,
     capture_root: PathBuf,
-    capture_policy: Mutex<CapturePolicy>,
+    capture_policy: Mutex<LoadedPolicy>,
 }
 
 type CommandResult<T> = std::result::Result<T, String>;
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-struct CapturePolicy {
-    paused: bool,
-    excluded_apps: Vec<String>,
-}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct CapturePolicyStatus {
     paused: bool,
     excluded_apps: Vec<String>,
     capture_root: String,
+    policy_error: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -165,8 +164,7 @@ fn set_capture_paused(
         .capture_policy
         .lock()
         .map_err(|_| "capture policy lock is unavailable".to_string())?;
-    policy.paused = paused;
-    save_capture_policy(&state.capture_root, &policy)?;
+    policy.set_paused(&capture_policy::policy_path(&state.capture_root), paused)?;
     Ok(capture_policy_status(&policy, &state.capture_root))
 }
 
@@ -179,8 +177,10 @@ fn set_capture_exclusions(
         .capture_policy
         .lock()
         .map_err(|_| "capture policy lock is unavailable".to_string())?;
-    policy.excluded_apps = normalize_exclusions(excluded_apps);
-    save_capture_policy(&state.capture_root, &policy)?;
+    policy.set_exclusions(
+        &capture_policy::policy_path(&state.capture_root),
+        excluded_apps,
+    )?;
     Ok(capture_policy_status(&policy, &state.capture_root))
 }
 
@@ -191,11 +191,12 @@ async fn capture_intentional(
 ) -> CommandResult<CaptureReport> {
     let context = capture_context(&request);
     {
-        let policy = state
+        let loaded = state
             .capture_policy
             .lock()
             .map_err(|_| "capture policy lock is unavailable".to_string())?;
-        if policy.paused {
+        let policy = &loaded.policy;
+        if loaded.error.is_some() || policy.paused {
             return Ok(skipped_capture_report("paused", context));
         }
         let app_name = request
@@ -421,47 +422,13 @@ async fn resolve_evidence(
         .map_err(|error| error.to_string())
 }
 
-fn capture_policy_status(policy: &CapturePolicy, capture_root: &Path) -> CapturePolicyStatus {
+fn capture_policy_status(loaded: &LoadedPolicy, capture_root: &Path) -> CapturePolicyStatus {
     CapturePolicyStatus {
-        paused: policy.paused,
-        excluded_apps: policy.excluded_apps.clone(),
+        paused: loaded.policy.paused,
+        excluded_apps: loaded.policy.excluded_apps.clone(),
         capture_root: capture_root.to_string_lossy().into_owned(),
+        policy_error: loaded.error.clone(),
     }
-}
-
-fn normalize_exclusions(excluded_apps: Vec<String>) -> Vec<String> {
-    let mut values = excluded_apps
-        .into_iter()
-        .map(|app| app.trim().to_ascii_lowercase())
-        .filter(|app| !app.is_empty())
-        .collect::<Vec<_>>();
-    values.sort();
-    values.dedup();
-    values
-}
-
-fn capture_policy_path(capture_root: &Path) -> PathBuf {
-    capture_root
-        .parent()
-        .unwrap_or(capture_root)
-        .join("capture-policy.json")
-}
-
-fn load_capture_policy(capture_root: &Path) -> CapturePolicy {
-    fs::read(capture_policy_path(capture_root))
-        .ok()
-        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
-        .unwrap_or_default()
-}
-
-fn save_capture_policy(capture_root: &Path, policy: &CapturePolicy) -> CommandResult<()> {
-    let path = capture_policy_path(capture_root);
-    let bytes = serde_json::to_vec_pretty(policy).map_err(|error| error.to_string())?;
-    let temporary = path.with_extension("json.tmp");
-    fs::write(&temporary, bytes)
-        .map_err(|error| format!("could not save capture policy: {error}"))?;
-    fs::rename(&temporary, &path)
-        .map_err(|error| format!("could not commit capture policy: {error}"))
 }
 
 fn capture_context(request: &CaptureRequest) -> CaptureContext {
@@ -595,7 +562,9 @@ pub fn run() {
             app.manage(AppState {
                 library: Arc::new(library),
                 active_index: Mutex::new(None),
-                capture_policy: Mutex::new(load_capture_policy(&capture_root)),
+                capture_policy: Mutex::new(capture_policy::load(&capture_policy::policy_path(
+                    &capture_root,
+                ))),
                 capture_root,
             });
             Ok(())
@@ -694,7 +663,11 @@ mod tests {
     #[test]
     fn capture_policy_and_modes_are_explicit_and_bounded() {
         assert_eq!(
-            super::normalize_exclusions(vec![" Safari ".into(), "safari".into(), "".into()]),
+            super::capture_policy::normalize_exclusions(vec![
+                " Safari ".into(),
+                "safari".into(),
+                "".into()
+            ]),
             vec!["safari"]
         );
         assert_eq!(
