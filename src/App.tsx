@@ -182,6 +182,7 @@ type CapturePolicyStatus = {
   paused: boolean;
   excluded_apps: string[];
   capture_root: string;
+  policy_error: string | null;
 };
 
 type CaptureReport = {
@@ -488,6 +489,7 @@ function App() {
   const [error, setError] = useState<string | null>(null);
   const [capturePaused, setCapturePaused] = useState(false);
   const [captureExcludedApps, setCaptureExcludedApps] = useState<string[]>([]);
+  const [capturePolicyError, setCapturePolicyError] = useState<string | null>(null);
   const [captureAppName, setCaptureAppName] = useState("");
   const [captureWindowTitle, setCaptureWindowTitle] = useState("");
   const [captureExclusionInput, setCaptureExclusionInput] = useState("");
@@ -519,6 +521,7 @@ function App() {
       const status = await invoke<CapturePolicyStatus>("capture_status");
       setCapturePaused(status.paused);
       setCaptureExcludedApps(status.excluded_apps);
+      setCapturePolicyError(status.policy_error ?? null);
     } catch {
       // Keep the controls at their safe defaults if the desktop bridge is still starting.
     }
@@ -635,6 +638,7 @@ function App() {
     try {
       const status = await invoke<CapturePolicyStatus>("set_capture_paused", { paused: !capturePaused });
       setCapturePaused(status.paused);
+      setCapturePolicyError(status.policy_error ?? null);
       setNotice(status.paused ? "Intentional capture is paused." : "Intentional capture is enabled.");
     } catch (caught) {
       setError(errorMessage(caught));
@@ -651,6 +655,7 @@ function App() {
         excludedApps: [...captureExcludedApps, app],
       });
       setCaptureExcludedApps(status.excluded_apps);
+      setCapturePolicyError(status.policy_error ?? null);
       setCaptureExclusionInput("");
       setNotice(`Excluding ${app} from future intentional captures.`);
     } catch (caught) {
@@ -987,6 +992,12 @@ function App() {
           <section className="capture-controls" aria-labelledby="capture-heading">
             <div className="section-label" id="capture-heading">Intentional capture</div>
             <p className="scope-note">Nothing records in the background. Choose one screen, window, or region only when you press a button.</p>
+            {capturePolicyError && (
+              <p className="scope-note capture-policy-error" role="alert">
+                Capture is paused because the saved capture policy could not be trusted: {capturePolicyError}. Its excluded
+                apps could not be read; add the apps to exclude before resuming.
+              </p>
+            )}
             <div className="capture-button-grid">
               {(["region", "window", "screen"] as CaptureMode[]).map((mode) => (
                 <button
@@ -994,7 +1005,7 @@ function App() {
                   type="button"
                   className="scope-action capture-action"
                   onClick={() => captureIntentional(mode)}
-                  disabled={captureBusy !== null || capturePaused}
+                  disabled={captureBusy !== null || capturePaused || capturePolicyError !== null}
                 >
                   {captureBusy === mode ? "Selecting…" : `Capture ${mode}`}
                 </button>

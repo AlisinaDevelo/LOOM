@@ -79,6 +79,12 @@ or content to the selected external application.
   applying retention deletes artifacts older than the computed RFC3339 cutoff. `purge-disposable`
   removes only known disposable files, never user-owned source files or captures. It checkpoints
   SQLite while leaving live WAL/SHM/journal lifecycle to SQLite itself.
+- The intentional-capture policy (`capture-policy.json`: paused flag and excluded apps) fails
+  closed. Only a missing file uses the first-run default. An unreadable, non-regular, oversized
+  (over 64 KiB), malformed, or unknown-version file loads as paused, the desktop shows why, and
+  capture cannot resume until the user re-saves exclusions; the rejected file is first copied to
+  `capture-policy.rejected.json`. Updates are written to a temporary file, synced, and renamed into
+  place before the running policy changes, so a failed save leaves both copies unchanged.
 
 Do not select confidential or regulated material unless you understand the local storage,
 operating-system, backup, and deletion implications. Treat the database and its WAL files as
