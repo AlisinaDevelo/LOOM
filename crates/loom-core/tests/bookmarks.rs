@@ -135,21 +135,80 @@ fn parser_rejects_malformed_exports_and_oversized_urls() {
     assert!(parse_bookmark_export(&oversized_url).is_err());
 }
 
+fn limited_library(directory: &std::path::Path, max_file_bytes: u64) -> Library {
+    Library::open_with_limits(
+        directory.join("limited.sqlite"),
+        loom_core::LibraryLimits {
+            max_file_bytes,
+            ..loom_core::LibraryLimits::default()
+        },
+    )
+    .unwrap()
+}
+
 #[test]
 fn import_rejects_size_limits_before_parsing() {
     let directory = tempdir().unwrap();
     let export = directory.path().join("Bookmarks.html");
     fs::write(&export, CHROME_EXPORT).unwrap();
 
-    let limited = Library::open_with_limits(
-        directory.path().join("limited.sqlite"),
-        loom_core::LibraryLimits {
-            max_file_bytes: 8,
-            ..loom_core::LibraryLimits::default()
-        },
-    )
-    .unwrap();
-    assert!(limited.import_bookmarks(&export).is_err());
+    let limited = limited_library(directory.path(), 8);
+    let error = limited.import_bookmarks(&export).unwrap_err().to_string();
+    assert!(error.contains("8-byte limit"), "{error}");
+}
+
+#[test]
+fn import_rejects_huge_sparse_file_without_reading_it() {
+    // A 64 GiB sparse file cannot be read or allocated within the test's time and memory budget,
+    // so a prompt, explicit limit error proves the bound is enforced before the read.
+    let directory = tempdir().unwrap();
+    let export = directory.path().join("Bookmarks.html");
+    let file = fs::File::create(&export).unwrap();
+    file.set_len(64 * 1024 * 1024 * 1024).unwrap();
+    drop(file);
+
+    let limited = limited_library(directory.path(), 1024);
+    let started = std::time::Instant::now();
+    let error = limited.import_bookmarks(&export).unwrap_err().to_string();
+    assert!(error.contains("1024-byte limit"), "{error}");
+    assert!(started.elapsed() < std::time::Duration::from_secs(5));
+}
+
+#[test]
+fn import_accepts_exact_limit_and_rejects_one_byte_over() {
+    let directory = tempdir().unwrap();
+    let export = directory.path().join("Bookmarks.html");
+    fs::write(&export, CHROME_EXPORT).unwrap();
+    let exact = CHROME_EXPORT.len() as u64;
+
+    let at_limit = limited_library(directory.path(), exact);
+    let report = at_limit.import_bookmarks(&export).unwrap();
+    assert_eq!(report.discovered, 1);
+
+    let mut over = CHROME_EXPORT.as_bytes().to_vec();
+    over.push(b'\n');
+    fs::write(&export, over).unwrap();
+    let error = at_limit.import_bookmarks(&export).unwrap_err().to_string();
+    assert!(error.contains("-byte limit"), "{error}");
+}
+
+#[test]
+fn import_rejects_invalid_utf8_empty_and_directory_inputs() {
+    let directory = tempdir().unwrap();
+    let library = Library::open_in_memory().unwrap();
+
+    let invalid = directory.path().join("invalid.html");
+    fs::write(&invalid, [0xff, 0xfe, 0x00, 0xc3]).unwrap();
+    let error = library.import_bookmarks(&invalid).unwrap_err().to_string();
+    assert!(error.contains("not UTF-8"), "{error}");
+
+    let empty = directory.path().join("empty.html");
+    fs::write(&empty, b"").unwrap();
+    assert!(library.import_bookmarks(&empty).is_err());
+
+    let folder = directory.path().join("folder.html");
+    fs::create_dir(&folder).unwrap();
+    assert!(library.import_bookmarks(&folder).is_err());
 }
 
 #[cfg(unix)]
