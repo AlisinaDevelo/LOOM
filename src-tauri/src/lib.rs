@@ -454,6 +454,73 @@ fn skipped_capture_report(status: &str, context: CaptureContext) -> CaptureRepor
     }
 }
 
+struct CommittedCapture {
+    destination: PathBuf,
+    content_hash: String,
+    byte_size: u64,
+    width: u32,
+    height: u32,
+    duplicate: bool,
+}
+
+/// Validates screencapture output and moves it into content-addressed capture storage.
+///
+/// Nothing is committed until the bytes are read, non-empty, and decode as an image; every failure
+/// before commit removes the temporary file, so capture storage never holds unvalidated pixels.
+fn commit_capture(capture_root: &Path, temporary: &Path) -> CommandResult<CommittedCapture> {
+    let validated = fs::read(temporary)
+        .map_err(|error| format!("capture output could not be read: {error}"))
+        .and_then(|bytes| {
+            if bytes.is_empty() {
+                return Err("capture_cancelled_or_denied: no pixels were returned".to_string());
+            }
+            let (width, height) = image::ImageReader::new(Cursor::new(&bytes))
+                .with_guessed_format()
+                .map_err(|error| format!("capture image format is invalid: {error}"))?
+                .into_dimensions()
+                .map_err(|error| format!("capture image dimensions are invalid: {error}"))?;
+            Ok((bytes, width, height))
+        });
+    let (bytes, width, height) = match validated {
+        Ok(validated) => validated,
+        Err(error) => {
+            let _ = fs::remove_file(temporary);
+            return Err(error);
+        }
+    };
+    let digest: Hash = blake3::hash(&bytes);
+    let destination = capture_root.join(format!("{digest}.png"));
+    let duplicate = destination.exists();
+    if duplicate {
+        fs::remove_file(temporary)
+            .map_err(|error| format!("could not discard duplicate capture: {error}"))?;
+    } else if let Err(error) = fs::rename(temporary, &destination) {
+        let _ = fs::remove_file(temporary);
+        return Err(format!("could not commit capture bytes: {error}"));
+    }
+    Ok(CommittedCapture {
+        destination,
+        content_hash: format!("blake3:{digest}"),
+        byte_size: bytes.len() as u64,
+        width,
+        height,
+        duplicate,
+    })
+}
+
+/// Removes a capture this command just committed when it could not be indexed, together with any
+/// rows the failed attempt left, so no unindexed pixels remain. A pre-existing duplicate belongs to
+/// an earlier capture and is kept.
+fn discard_new_capture(library: &Library, destination: &Path, duplicate: bool) {
+    if duplicate {
+        return;
+    }
+    if let Ok(locator) = destination.canonicalize() {
+        let _ = library.purge_source_root(&locator.to_string_lossy());
+    }
+    let _ = fs::remove_file(destination);
+}
+
 fn capture_native_image(
     capture_root: &Path,
     library: &Library,
@@ -470,39 +537,27 @@ fn capture_native_image(
             status.code().map_or_else(|| "unknown".into(), |code| code.to_string())
         ));
     }
-    let bytes = fs::read(&temporary)
-        .map_err(|error| format!("capture output could not be read: {error}"))?;
-    if bytes.is_empty() {
-        let _ = fs::remove_file(&temporary);
-        return Err("capture_cancelled_or_denied: no pixels were returned".into());
-    }
-    let digest: Hash = blake3::hash(&bytes);
-    let content_hash = format!("blake3:{digest}");
-    let destination = capture_root.join(format!("{digest}.png"));
-    let duplicate = destination.exists();
-    if duplicate {
-        fs::remove_file(&temporary)
-            .map_err(|error| format!("could not discard duplicate capture: {error}"))?;
-    } else {
-        fs::rename(&temporary, &destination)
-            .map_err(|error| format!("could not commit capture bytes: {error}"))?;
-    }
-    let (width, height) = image::ImageReader::new(Cursor::new(&bytes))
-        .with_guessed_format()
-        .map_err(|error| format!("capture image format is invalid: {error}"))?
-        .into_dimensions()
-        .map_err(|error| format!("capture image dimensions are invalid: {error}"))?;
+    let CommittedCapture {
+        destination,
+        content_hash,
+        byte_size,
+        width,
+        height,
+        duplicate,
+    } = commit_capture(capture_root, &temporary)?;
     let mut context = capture_context(request);
     context.bounds.width = width;
     context.bounds.height = height;
-    let index = library
-        .index_captured_image(&destination, &context)
-        .map_err(|error| error.to_string())?;
+    let index = match library.index_captured_image(&destination, &context) {
+        Ok(index) => index,
+        Err(error) => {
+            discard_new_capture(library, &destination, duplicate);
+            return Err(error.to_string());
+        }
+    };
     if let Some(failure) = index.failures.first() {
-        return Err(format!(
-            "capture was stored but indexing failed: {}",
-            failure.reason
-        ));
+        discard_new_capture(library, &destination, duplicate);
+        return Err(format!("capture could not be indexed: {}", failure.reason));
     }
     Ok(CaptureReport {
         status: if duplicate || index.unchanged > 0 {
@@ -512,7 +567,7 @@ fn capture_native_image(
         },
         source_uri: destination.to_string_lossy().into_owned(),
         content_hash,
-        byte_size: bytes.len() as u64,
+        byte_size,
         duplicate: duplicate || index.unchanged > 0,
         context,
     })
@@ -603,7 +658,9 @@ pub fn run() {
 
 #[cfg(test)]
 mod tests {
-    use std::path::Path;
+    use std::{fs, path::Path};
+
+    use loom_core::Library;
 
     use super::CaptureMode;
 
@@ -658,6 +715,67 @@ mod tests {
         assert!(TAURI_CONFIG.contains("\"connect-src\": \"ipc: http://ipc.localhost\""));
         assert!(!TAURI_CONFIG.contains("\"connect-src\": \"ipc: http://ipc.localhost https:"));
         assert!(TAURI_CONFIG.contains("\"frontendDist\": \"../dist\""));
+    }
+
+    fn png_files(root: &Path) -> Vec<String> {
+        let mut names = fs::read_dir(root)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|name| name.ends_with(".png"))
+            .collect::<Vec<_>>();
+        names.sort();
+        names
+    }
+
+    fn write_png(path: &Path) {
+        image::RgbImage::from_pixel(3, 2, image::Rgb([10, 20, 30]))
+            .save_with_format(path, image::ImageFormat::Png)
+            .unwrap();
+    }
+
+    #[test]
+    fn invalid_or_empty_capture_output_is_never_committed() {
+        let root = tempfile::tempdir().unwrap();
+        for bytes in [&b"not an image"[..], &b""[..]] {
+            let temporary = root.path().join(".loom-capture-test.png");
+            fs::write(&temporary, bytes).unwrap();
+            assert!(super::commit_capture(root.path(), &temporary).is_err());
+            assert!(png_files(root.path()).is_empty());
+        }
+        let missing = root.path().join(".loom-capture-missing.png");
+        assert!(super::commit_capture(root.path(), &missing).is_err());
+    }
+
+    #[test]
+    fn valid_capture_commits_once_and_duplicates_keep_the_original() {
+        let root = tempfile::tempdir().unwrap();
+        let first = root.path().join(".loom-capture-first.png");
+        write_png(&first);
+        let committed = super::commit_capture(root.path(), &first).unwrap();
+        assert!(!committed.duplicate);
+        assert_eq!((committed.width, committed.height), (3, 2));
+        assert!(committed.destination.is_file());
+        assert!(!first.exists());
+        let expected = committed
+            .content_hash
+            .strip_prefix("blake3:")
+            .unwrap()
+            .to_string()
+            + ".png";
+        assert_eq!(png_files(root.path()), vec![expected.clone()]);
+
+        let second = root.path().join(".loom-capture-second.png");
+        write_png(&second);
+        let duplicate = super::commit_capture(root.path(), &second).unwrap();
+        assert!(duplicate.duplicate);
+        assert_eq!(duplicate.destination, committed.destination);
+        assert_eq!(png_files(root.path()), vec![expected]);
+
+        let library = Library::open_in_memory().unwrap();
+        super::discard_new_capture(&library, &duplicate.destination, true);
+        assert!(committed.destination.is_file());
+        super::discard_new_capture(&library, &committed.destination, false);
+        assert!(png_files(root.path()).is_empty());
     }
 
     #[test]
