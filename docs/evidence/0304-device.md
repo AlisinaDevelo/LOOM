@@ -38,7 +38,7 @@ are retained below rather than conflated.
 | --- | --- | --- |
 | `LOOM-0304-INSPECT` | Inspect canonical, derived, cache, log, sidecar, and source bytes by source/approximate size | `Library::inspect_storage`, `storage-inspection` Tauri command, CLI `storage-inspect`, and `storage_inspection_accounts_for_sources_and_known_disposable_files` report source/version bytes, canonical/derived estimates, database/WAL/SHM/journal, all six fixed disposable categories, file counts, and existence without following symlinks. |
 | `LOOM-0304-PURGE` | Delete by artifact/root/time and verify after restart | `purge_artifact`, `purge_root`, and `purge_before` use one transaction, cascade versions/passages/relationships/bookmarks, rebuild FTS5, checkpoint/vacuum SQLite, and `purge_artifact_removes_evidence_and_survives_restart` plus `root_and_time_deletion_are_explicit_and_retention_is_deterministic` verify zero results and healthy FTS after reopening. |
-| `LOOM-0304-DERIVATIVES` | Inspect deletion residue beyond the main database | `disposable_cleanup_removes_only_known_local_derivatives` creates and removes WAL/journal, cache, model-cache, thumbnails, OCR scratch, temporary exports, and logs; it verifies every file is gone while source bytes remain. The merged-main CLI smoke removed eight files (two SQLite sidecars plus six disposable files) and retained the source root. |
+| `LOOM-0304-DERIVATIVES` | Inspect deletion residue beyond the main database | `disposable_cleanup_removes_only_known_local_derivatives` exercises a live SQLite sidecar, removes and reports exactly the six allowlisted disposable files, preserves a similarly named unowned sibling, and verifies same-connection writes/search plus restart/FTS integrity. SQLite retains ownership of live WAL/SHM/journal lifecycle, and `Library::inspect_storage` accounts for sidecars that remain. |
 | `LOOM-0304-EXCLUSIONS` | Preserve exclusions and private capture boundaries | Existing source-root/capture tests cover denied, revoked, moved, and symlink-replaced roots; the new cleanup test refuses to follow a disposable symlink. The desktop panel exposes inspection and deletion explicitly, while original user-owned files and managed captures are never removed by disposable cleanup. |
 
 ## Merged-main device verification
@@ -98,11 +98,13 @@ cropped OCR image region, and reported 5 artifacts, 5 versions, and 7 passages. 
 `benchmarks/retrieval/v1/corpus/screenshot/ocr-cropped.png`, an explicitly cropped 878×191 image;
 the OCR result retained a 876×68 region anchor. No full desktop screenshot was captured.
 
-The merged-main privacy CLI smoke inspected all fixed disposable categories, deleted one artifact,
-removed eight disposable/sidecar files, reopened with zero artifacts/passages, and verified the
-user-owned source file still existed. SQLite WAL/SHM files reappeared after the follow-up CLI opened
-the database, which is normal SQLite operation and is why the UI describes cleanup as application-level
-deletion rather than secure erasure.
+The prior merged-main privacy CLI smoke inspected all fixed disposable categories, deleted one
+artifact, reported removing eight disposable/sidecar files, reopened with zero
+artifacts/passages, and verified the user-owned source file still existed. That sidecar-removal
+claim is superseded: manually unlinking a live WAL fails on Windows and violates SQLite's documented
+lifecycle contract even where an unlink appears to succeed. Issue #262 records the regression and
+the replacement cross-platform evidence gate. The supported contract is checkpoint/vacuum plus
+inspection of residual sidecars, not application-owned removal of SQLite's live state.
 
 ## Negative, privacy, recovery, and resource coverage
 

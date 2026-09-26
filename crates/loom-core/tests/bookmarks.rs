@@ -136,14 +136,10 @@ fn parser_rejects_malformed_exports_and_oversized_urls() {
 }
 
 #[test]
-fn import_rejects_symlinks_and_size_limits_before_parsing() {
+fn import_rejects_size_limits_before_parsing() {
     let directory = tempdir().unwrap();
     let export = directory.path().join("Bookmarks.html");
     fs::write(&export, CHROME_EXPORT).unwrap();
-    let link = directory.path().join("Bookmarks-link.html");
-    std::os::unix::fs::symlink(&export, &link).unwrap();
-    let library = Library::open_in_memory().unwrap();
-    assert!(library.import_bookmarks(&link).is_err());
 
     let limited = Library::open_with_limits(
         directory.path().join("limited.sqlite"),
@@ -154,4 +150,18 @@ fn import_rejects_symlinks_and_size_limits_before_parsing() {
     )
     .unwrap();
     assert!(limited.import_bookmarks(&export).is_err());
+}
+
+#[cfg(unix)]
+#[test]
+fn import_rejects_symlinks_before_parsing() {
+    use std::os::unix::fs::symlink;
+
+    let directory = tempdir().unwrap();
+    let export = directory.path().join("Bookmarks.html");
+    fs::write(&export, CHROME_EXPORT).unwrap();
+    let link = directory.path().join("Bookmarks-link.html");
+    symlink(&export, &link).unwrap();
+    let library = Library::open_in_memory().unwrap();
+    assert!(library.import_bookmarks(&link).is_err());
 }

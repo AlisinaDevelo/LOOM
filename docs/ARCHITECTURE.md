@@ -172,8 +172,10 @@ Artifact, exact-root, and RFC3339-cutoff deletion run in one transaction with fo
 then rebuild FTS5 and run a checkpoint/vacuum cycle before returning. A retention policy is stored
 in `schema_meta` but is inert until an explicit apply command. Disposable cleanup removes only
 regular files in the allowlisted cache/model-cache/thumbnail/OCR-scratch/temp-export/log
-directories and SQLite sidecars, leaving user-owned sources and captures untouched. These are
-local deletion controls, not a secure-erasure guarantee against filesystem snapshots or backups.
+directories, leaving user-owned sources and captures untouched. SQLite is checkpointed and
+vacuumed, but retains ownership of live WAL/SHM/journal lifecycle; LOOM continues to account for
+any sidecars that remain. These are local deletion controls, not a secure-erasure guarantee against
+filesystem snapshots or backups.
 
 PDF ingestion uses the pure-Rust `pdf-extract` provider over source bytes already admitted by the
 stable-read boundary. Each page becomes a local `pdf_page` anchor with page number, character and

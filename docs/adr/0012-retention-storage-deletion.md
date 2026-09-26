@@ -16,6 +16,9 @@ data.
   returns counts and paths removed from disposable storage.
 - Store retention as an inert `schema_meta.retention_days` policy. Applying it is a separate,
   visible operation and uses a deterministic cutoff for testability.
+- Checkpoint and vacuum SQLite during cleanup, but leave live WAL/SHM/journal lifecycle to SQLite;
+  sidecars remain part of storage inspection and are never manually unlinked while the database is
+  open.
 - Never follow symlinks, scan unknown sibling directories, or delete user-owned source files as a
   side effect of disposable cleanup.
 
