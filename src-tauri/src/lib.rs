@@ -1,8 +1,9 @@
+#[cfg(target_os = "macos")]
+use std::process::Command;
 use std::{
     fs,
     io::Cursor,
     path::{Path, PathBuf},
-    process::Command,
     sync::{Arc, Mutex},
 };
 
@@ -568,6 +569,7 @@ fn run_native_capture(
     }
 }
 
+#[cfg(any(target_os = "macos", test))]
 fn native_capture_arguments(mode: &CaptureMode, output: &Path) -> Vec<String> {
     let mut arguments = vec!["-x".into(), "-t".into(), "png".into()];
     match mode {

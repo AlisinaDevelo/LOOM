@@ -171,7 +171,8 @@ and derived SQLite estimates, database sidecars, and the fixed disposable direct
 paths, approximate bytes, file counts, and whether the path exists; symlinks and unknown sibling
 directories are not followed. `purge_disposable_storage` removes regular files only from those
 known disposable directories and checkpoints the SQLite sidecars. It does not delete selected
-source files or managed captures.
+source files or managed captures, and it never manually unlinks a live SQLite WAL, SHM, or
+rollback-journal file.
 
 `purge_artifact`, `purge_root`, and `purge_before` are explicit destructive operations. Each uses a
 single SQLite transaction, records counts for every cascade class, rebuilds FTS5, checkpoints and

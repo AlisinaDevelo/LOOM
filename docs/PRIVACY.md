@@ -77,12 +77,14 @@ or content to the selected external application.
   clean state after restart in the device test suite.
 - Retention is disabled by default. A user may configure 1–36,500 days and explicitly apply it;
   applying retention deletes artifacts older than the computed RFC3339 cutoff. `purge-disposable`
-  removes only known disposable files and sidecars, never user-owned source files or captures.
+  removes only known disposable files, never user-owned source files or captures. It checkpoints
+  SQLite while leaving live WAL/SHM/journal lifecycle to SQLite itself.
 
 Do not select confidential or regulated material unless you understand the local storage,
 operating-system, backup, and deletion implications. Treat the database and its WAL files as
-Sensitive material also includes local logs and caches. These controls are application-level
-deletion, not a claim of cryptographic secure erasure from filesystem snapshots or backups.
+sensitive material. Sensitive material also includes local logs and caches. These controls are
+application-level deletion, not a claim of cryptographic secure erasure from filesystem snapshots
+or backups.
 
 ## Future changes
 

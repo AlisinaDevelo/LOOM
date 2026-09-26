@@ -11,9 +11,13 @@ ROOT = Path(__file__).resolve().parents[1]
 class ActivationGateTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
-        cls.gate = json.loads((ROOT / "benchmarks/retrieval/v0/gate.json").read_text())
-        cls.gate_doc = (ROOT / "docs/ACTIVATION_GATE.md").read_text()
-        cls.worksheet = (ROOT / "docs/studies/v0.1-participant-worksheet.md").read_text()
+        cls.gate = json.loads(
+            (ROOT / "benchmarks/retrieval/v0/gate.json").read_text(encoding="utf-8")
+        )
+        cls.gate_doc = (ROOT / "docs/ACTIVATION_GATE.md").read_text(encoding="utf-8")
+        cls.worksheet = (ROOT / "docs/studies/v0.1-participant-worksheet.md").read_text(
+            encoding="utf-8"
+        )
 
     def test_gate_is_explicit_and_not_claimed_as_measured(self) -> None:
         self.assertEqual("hypothesis", self.gate["status"])

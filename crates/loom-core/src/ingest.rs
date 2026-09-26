@@ -414,12 +414,12 @@ struct FileIdentity {
     inode: u64,
 }
 
-fn file_identity(metadata: &Metadata) -> FileIdentity {
+fn file_identity(_metadata: &Metadata) -> FileIdentity {
     #[cfg(unix)]
     {
         FileIdentity {
-            device: metadata.dev(),
-            inode: metadata.ino(),
+            device: _metadata.dev(),
+            inode: _metadata.ino(),
         }
     }
     #[cfg(not(unix))]
@@ -574,7 +574,7 @@ mod tests {
 
     use tempfile::tempdir;
 
-    use super::{discover, read_stable_hash, split_passages, split_pdf_passages};
+    use super::{discover, split_passages, split_pdf_passages};
     use crate::{EvidenceAnchor, LoomError};
 
     #[test]
@@ -648,6 +648,8 @@ mod tests {
     #[test]
     fn stable_reads_reject_symlinks_and_paths_outside_root() {
         use std::os::unix::fs::symlink;
+
+        use super::read_stable_hash;
 
         let directory = tempdir().unwrap();
         let outside = tempdir().unwrap();

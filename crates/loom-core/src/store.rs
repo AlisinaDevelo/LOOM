@@ -847,10 +847,8 @@ impl Library {
                 return Ok(report);
             }
             if interrupt_after_units.is_some_and(|limit| units_processed_this_run >= limit) {
-                let message = format!(
-                    "fault injection after {} completed unit(s)",
-                    units_processed_this_run
-                );
+                let message =
+                    format!("fault injection after {units_processed_this_run} completed unit(s)");
                 self.interrupt_index_job(&job.job_id, &message)?;
                 return Err(LoomError::IndexInterrupted(job.job_id));
             }
@@ -2145,7 +2143,8 @@ impl Library {
     }
 
     /// Deletes files in LOOM's known disposable directories and checkpoints SQLite sidecars.
-    /// User-selected source files and managed captures are not touched by this operation.
+    /// SQLite retains ownership of live WAL/SHM/journal lifecycle; user-selected source files and
+    /// managed captures are not touched by this operation.
     pub fn purge_disposable_storage(&self) -> Result<DeletionReport> {
         let mut report = DeletionReport {
             selector: "disposable-storage".into(),
@@ -2155,10 +2154,6 @@ impl Library {
             {
                 let connection = self.lock()?;
                 checkpoint_and_vacuum(&connection)?;
-            }
-            for suffix in ["-wal", "-shm", "-journal"] {
-                let sidecar = PathBuf::from(format!("{}{}", database_path.display(), suffix));
-                remove_regular_file(&sidecar, &mut report)?;
             }
             if let Some(root) = database_path.parent() {
                 for (directory, _) in DISPOSABLE_DIRECTORIES {

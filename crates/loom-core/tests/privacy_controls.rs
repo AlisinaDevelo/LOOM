@@ -166,33 +166,79 @@ fn disposable_cleanup_removes_only_known_local_derivatives() {
     .collect::<Vec<_>>();
     let outside = directory.path().join("outside.txt");
     fs::write(&outside, "outside source remains").unwrap();
+    let unowned_sidecar_like = directory.path().join("library.sqlite3-wal.backup");
+    fs::write(&unowned_sidecar_like, "unowned sibling remains").unwrap();
     #[cfg(unix)]
     std::os::unix::fs::symlink(
         &outside,
         directory.path().join("cache").join("outside-link"),
     )
     .unwrap();
-    let journal = directory.path().join("library.sqlite3-journal");
-    fs::write(&journal, "stale journal").unwrap();
+
+    let sqlite_sidecars = library
+        .inspect_storage()
+        .unwrap()
+        .entries
+        .into_iter()
+        .filter(|entry| entry.category == "sqlite_sidecar")
+        .map(|entry| entry.path)
+        .collect::<Vec<_>>();
+    assert!(
+        !sqlite_sidecars.is_empty(),
+        "the regression fixture must exercise a live SQLite sidecar"
+    );
 
     let report = library.purge_disposable_storage().unwrap();
-    assert!(report.files_deleted > disposable_files.len() as u64);
-    for path in disposable_files {
+    assert_eq!(report.files_deleted, disposable_files.len() as u64);
+    assert!(
+        sqlite_sidecars
+            .iter()
+            .all(|sidecar| !report.paths.contains(sidecar)),
+        "SQLite-owned sidecars must not be reported as application-deleted"
+    );
+    for path in &disposable_files {
         assert!(
             !path.exists(),
             "disposable file remained: {}",
             path.display()
         );
     }
-    assert!(!journal.exists());
     #[cfg(unix)]
     assert!(
         outside.exists(),
         "cleanup must not follow disposable symlinks"
     );
     assert!(
+        unowned_sidecar_like.exists(),
+        "cleanup must not broaden to similarly named sibling files"
+    );
+    assert!(
         source.exists(),
         "cleanup must not delete user-owned source bytes"
     );
     assert!(library.inspect_storage().unwrap().source_bytes > 0);
+    assert_eq!(search(&library, "user-owned source remains").len(), 1);
+    assert!(library.fts_health().unwrap().healthy);
+
+    let source_after_cleanup = directory.path().join("after-cleanup.md");
+    fs::write(
+        &source_after_cleanup,
+        "post-cleanup writes remain searchable",
+    )
+    .unwrap();
+    library.index_path(&source_after_cleanup).unwrap();
+    assert_eq!(
+        search(&library, "post-cleanup writes remain searchable").len(),
+        1
+    );
+    drop(library);
+
+    let reopened = Library::open(&database).unwrap();
+    assert_eq!(reopened.stats().unwrap().artifacts, 2);
+    assert_eq!(search(&reopened, "user-owned source remains").len(), 1);
+    assert_eq!(
+        search(&reopened, "post-cleanup writes remain searchable").len(),
+        1
+    );
+    assert!(reopened.fts_health().unwrap().healthy);
 }
