@@ -311,6 +311,18 @@ pub(crate) fn read_stable_hash(path: &Path, root: &Path, max_bytes: u64) -> Resu
     Ok(format!("blake3:{}", blake3::hash(&stable.bytes).to_hex()))
 }
 
+/// Reads one explicitly selected file through the same no-follow, identity-checked, bounded
+/// descriptor read used for indexed sources. The file's own parent is the containment root.
+///
+/// The declared size is rejected before any buffer is allocated, and the read itself is capped at
+/// `max_bytes + 1`, so a file that grows or misreports its length cannot bypass the bound.
+pub(crate) fn read_stable_selected_file(path: &Path, max_bytes: u64) -> Result<Vec<u8>> {
+    let root = path.parent().ok_or_else(|| {
+        LoomError::InvalidPath(format!("selected file has no parent: {}", path.display()))
+    })?;
+    Ok(read_stable_bytes(path, root, max_bytes)?.bytes)
+}
+
 struct StableBytes {
     bytes: Vec<u8>,
     modified_ns: Option<i64>,

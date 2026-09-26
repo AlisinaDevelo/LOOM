@@ -210,19 +210,12 @@ impl Library {
             .canonicalize()
             .map_err(|source| io_error(requested_path, source))?;
         let source_uri = utf8_path(&path)?;
-        let bytes = fs::read(&path).map_err(|source| io_error(&path, source))?;
-        if bytes.len() as u64 > self.limits.max_file_bytes {
-            return Err(LoomError::InvalidPath(format!(
-                "bookmark export exceeds the {}-byte limit: {}",
-                self.limits.max_file_bytes,
-                path.display()
-            )));
-        }
-        let text = String::from_utf8(bytes.clone()).map_err(|_| {
+        let bytes = ingest::read_stable_selected_file(&path, self.limits.max_file_bytes)?;
+        let content_hash = format!("blake3:{}", blake3::hash(&bytes).to_hex());
+        let text = String::from_utf8(bytes).map_err(|_| {
             LoomError::InvalidPath(format!("bookmark export is not UTF-8: {}", path.display()))
         })?;
         let export = bookmarks::parse_bookmark_export(&text)?;
-        let content_hash = format!("blake3:{}", blake3::hash(&bytes).to_hex());
         let root_id = {
             let mut connection = self.lock()?;
             ensure_source_root(&mut connection, &source_uri, false)?
