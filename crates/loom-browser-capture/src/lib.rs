@@ -21,6 +21,8 @@ use uuid::{Uuid, Version};
 
 type HmacSha256 = Hmac<Sha256>;
 
+pub mod lifecycle;
+
 pub const PROTOCOL_MAJOR: u64 = 1;
 pub const PROTOCOL_MINOR: u64 = 0;
 pub const MAX_FRAME_BYTES: usize = 256 * 1024;
@@ -747,9 +749,20 @@ fn persist_capture(
             "capture_id".into(),
             Value::String(accepted.capture_id.clone()),
         );
+        let accepted_at = Utc::now();
         object.insert(
             "accepted_at".into(),
-            Value::String(Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)),
+            Value::String(accepted_at.to_rfc3339_opts(chrono::SecondsFormat::Millis, true)),
+        );
+        let requested_at = request
+            .get("intent")
+            .and_then(|intent| intent.get("issued_at"))
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        object.insert(
+            "lifecycle".into(),
+            serde_json::to_value(lifecycle::Lifecycle::accepted(requested_at, accepted_at))
+                .map_err(io::Error::other)?,
         );
     }
     let metadata_bytes = serde_json::to_vec(&metadata).map_err(io::Error::other)?;
@@ -1404,6 +1417,182 @@ mod tests {
         .unwrap();
         assert!(stored.get("auth").is_none());
         assert_eq!(stored["capture_id"], format!("browser-{REQUEST_ID}"));
+    }
+
+    fn accept_one(root: &Path, body: &[u8]) {
+        let request = request("complete", body, 1);
+        let input = framed(&[request.clone(), payload(&request, body, 0, true)]);
+        let mut output = Vec::new();
+        NativeHost::new(config(root))
+            .run_at(&mut Cursor::new(input), &mut output, now())
+            .unwrap();
+        assert_eq!(read_responses(&output)[0]["type"], "capture.accepted");
+    }
+
+    fn stored_record(root: &Path) -> Map<String, Value> {
+        let bytes = fs::read(root.join(format!("{REQUEST_ID}.json"))).unwrap();
+        serde_json::from_slice::<Value>(&bytes)
+            .unwrap()
+            .as_object()
+            .unwrap()
+            .clone()
+    }
+
+    fn spool_contains(root: &Path, needle: &[u8]) -> bool {
+        fs::read_dir(root).unwrap().any(|entry| {
+            let bytes = fs::read(entry.unwrap().path()).unwrap_or_default();
+            bytes.windows(needle.len()).any(|window| window == needle)
+        })
+    }
+
+    #[test]
+    fn accepted_capture_records_requested_and_accepted_transitions() {
+        let directory = tempdir().unwrap();
+        accept_one(directory.path(), b"<p>lifecycle body</p>");
+        let lifecycle = lifecycle::record_lifecycle(&stored_record(directory.path())).unwrap();
+        assert_eq!(lifecycle.state, lifecycle::CaptureState::Accepted);
+        let states = lifecycle
+            .transitions
+            .iter()
+            .map(|transition| transition.state)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            states,
+            vec![
+                lifecycle::CaptureState::Requested,
+                lifecycle::CaptureState::Accepted
+            ]
+        );
+        assert_eq!(lifecycle.transitions[0].at, NOW);
+    }
+
+    #[test]
+    fn lifecycle_fixture_revoke_repair_delete_leaves_no_managed_copy() {
+        use lifecycle::CaptureState;
+
+        let directory = tempdir().unwrap();
+        let root = directory.path();
+        let body = b"<p>private snapshot body</p>";
+        accept_one(root, body);
+        let sensitive: [&[u8]; 5] = [
+            b"https://example.test/start",
+            b"https://example.test/article",
+            b"Synthetic",
+            b"A passage",
+            body,
+        ];
+        for needle in sensitive {
+            assert!(spool_contains(root, needle));
+        }
+
+        let revoked = lifecycle::revoke_spool(root, now()).unwrap();
+        assert_eq!(revoked.changed, vec![REQUEST_ID.to_string()]);
+        assert_eq!(
+            lifecycle::record_lifecycle(&stored_record(root))
+                .unwrap()
+                .state,
+            CaptureState::Revoked
+        );
+        assert!(root.join(format!("{REQUEST_ID}.html")).is_file());
+        let repaired = lifecycle::repair_spool(root, now()).unwrap();
+        assert_eq!(repaired.changed.len(), 1);
+        lifecycle::revoke_spool(root, now()).unwrap();
+
+        // An interrupted earlier attempt left temporary files behind.
+        fs::write(root.join(format!(".{REQUEST_ID}.html.tmp")), body).unwrap();
+        let report = lifecycle::delete_capture(root, REQUEST_ID, now()).unwrap();
+        assert!(!report.already_deleted);
+        assert!(report.snapshot_removed);
+        assert_eq!(report.temporary_files_removed, 1);
+
+        for needle in sensitive {
+            assert!(
+                !spool_contains(root, needle),
+                "managed copy kept: {needle:?}"
+            );
+        }
+        assert_eq!(spool_entries(root), vec![format!("{REQUEST_ID}.json")]);
+        let tombstone = stored_record(root);
+        let mut keys = tombstone.keys().cloned().collect::<Vec<_>>();
+        keys.sort();
+        assert_eq!(
+            keys,
+            vec![
+                "capture_id",
+                "lifecycle",
+                "protocol",
+                "request_id",
+                "snapshot_content_hash"
+            ]
+        );
+        assert_eq!(
+            tombstone["snapshot_content_hash"],
+            format!("sha256:{}", hex_encode(&Sha256::digest(body)))
+        );
+        let history = lifecycle::record_lifecycle(&tombstone)
+            .unwrap()
+            .transitions
+            .into_iter()
+            .map(|transition| transition.state)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            history,
+            vec![
+                CaptureState::Requested,
+                CaptureState::Accepted,
+                CaptureState::Revoked,
+                CaptureState::Accepted,
+                CaptureState::Revoked,
+                CaptureState::Deleted
+            ]
+        );
+
+        // Deleted is terminal: revocation and re-pairing leave it alone, and a repeated delete only
+        // finishes cleanup.
+        assert_eq!(lifecycle::revoke_spool(root, now()).unwrap().unchanged, 1);
+        assert_eq!(lifecycle::repair_spool(root, now()).unwrap().unchanged, 1);
+        fs::write(root.join(format!("{REQUEST_ID}.html")), body).unwrap();
+        let again = lifecycle::delete_capture(root, REQUEST_ID, now()).unwrap();
+        assert!(again.already_deleted);
+        assert!(again.snapshot_removed);
+        assert!(!spool_contains(root, body));
+    }
+
+    #[test]
+    fn deletion_rejects_unknown_and_malformed_request_ids() {
+        let directory = tempdir().unwrap();
+        assert!(lifecycle::delete_capture(directory.path(), REQUEST_ID, now()).is_err());
+        assert!(lifecycle::delete_capture(directory.path(), "../escape", now()).is_err());
+        assert!(lifecycle::delete_capture(
+            directory.path(),
+            "11111111-1111-4111-8111-111111111111.json",
+            now()
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn rejected_and_expired_requests_persist_nothing() {
+        let directory = tempdir().unwrap();
+        let mut expired = request("not_requested", &[], 1);
+        expired["session"]["expires_at"] = Value::String("2027-08-23T12:00:00Z".into());
+        let canonical = canonical_without_mac(&expired).unwrap();
+        let mut mac = HmacSha256::new_from_slice(&(0u8..32).collect::<Vec<_>>()).unwrap();
+        mac.update(&canonical);
+        expired["auth"]["mac"] = Value::String(hex_encode(&mac.finalize().into_bytes()));
+        let mut output = Vec::new();
+        NativeHost::new(config(directory.path()))
+            .run_at(&mut Cursor::new(framed(&[expired])), &mut output, now())
+            .unwrap();
+        let code = read_responses(&output)[0]["error"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        assert_eq!(
+            lifecycle::rejection_state(&code),
+            lifecycle::CaptureState::Expired
+        );
+        assert!(fs::read_dir(directory.path()).unwrap().next().is_none());
     }
 
     #[test]

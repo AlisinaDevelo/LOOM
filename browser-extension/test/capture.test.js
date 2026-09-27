@@ -3,9 +3,11 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 
 import {
+  LIFECYCLE_MESSAGES,
   MAX_SNAPSHOT_BYTES,
   buildCaptureMessages,
   captureActiveTab,
+  describeCaptureResponse,
   sanitizeHtml,
 } from "../src/capture.js";
 
@@ -196,4 +198,27 @@ test("manifest permissions stay explicit and identical across browser targets", 
   assert.deepEqual(firefox.host_permissions, []);
   assert.equal(chrome.commands["save-page"].suggested_key.default, "Ctrl+Shift+L");
   assert.equal(firefox.commands["save-page"].suggested_key.default, "Ctrl+Shift+L");
+});
+
+test("lifecycle copy matches the protocol and maps host responses", async () => {
+  const protocol = await readFile(new URL("../../docs/protocol/browser-capture-v1.md", import.meta.url), "utf8");
+  const lifecycle = await readFile(
+    new URL("../../crates/loom-browser-capture/src/lifecycle.rs", import.meta.url),
+    "utf8",
+  );
+  for (const [state, message] of Object.entries(LIFECYCLE_MESSAGES)) {
+    assert.ok(protocol.includes(message), `protocol is missing the ${state} message`);
+    assert.ok(lifecycle.includes(JSON.stringify(message)), `Rust copy differs for ${state}`);
+  }
+
+  assert.deepEqual(describeCaptureResponse({type: "capture.accepted", request_id: "r1"}), {
+    state: "accepted",
+    code: null,
+    requestId: "r1",
+    message: LIFECYCLE_MESSAGES.accepted,
+  });
+  assert.equal(describeCaptureResponse({type: "capture.rejected", error: "session_expired"}).state, "expired");
+  assert.equal(describeCaptureResponse({type: "capture.rejected", error: "capture_time_invalid"}).state, "expired");
+  assert.equal(describeCaptureResponse({type: "capture.rejected", error: "replay_rejected"}).state, "rejected");
+  assert.equal(describeCaptureResponse(null).code, "malformed_response");
 });

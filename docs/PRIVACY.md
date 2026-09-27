@@ -85,6 +85,12 @@ or content to the selected external application.
   capture cannot resume until the user re-saves exclusions; the rejected file is first copied to
   `capture-policy.rejected.json`. Updates are written to a temporary file, synced, and renamed into
   place before the running policy changes, so a failed save leaves both copies unchanged.
+- Browser captures follow the lifecycle in the
+  [browser capture protocol](protocol/browser-capture-v1.md#capture-lifecycle-consent-and-retention).
+  Nothing is written until the native host accepts a request; rejected and expired requests store
+  nothing. Revoking the browser pairing keeps accepted captures on disk but unavailable. Deleting a
+  capture removes its URLs, title, selection, redirects, and snapshot, leaving only a tombstone with
+  the capture ID, state history, and snapshot hash. Credentials and referrers are never accepted.
 
 Do not select confidential or regulated material unless you understand the local storage,
 operating-system, backup, and deletion implications. Treat the database and its WAL files as

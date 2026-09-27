@@ -11,6 +11,33 @@ export const MAX_REDIRECTS = 8;
 export const PARSER_ID = "loom.web.sanitize";
 export const PARSER_VERSION = "0.1.0";
 export const NATIVE_HOST = "com.alisinadevelo.loom";
+
+// User-facing copy for each capture lifecycle state. Must match `CaptureState::handling` in
+// crates/loom-browser-capture/src/lifecycle.rs and the lifecycle table in the protocol.
+export const LIFECYCLE_MESSAGES = Object.freeze({
+  requested: "Waiting for LOOM to accept this save.",
+  accepted: "Saved to LOOM.",
+  rejected: "LOOM rejected this save; nothing was stored.",
+  expired: "This save expired before LOOM accepted it; nothing was stored.",
+  revoked: "Browser pairing was revoked; this capture is unavailable until you delete it or pair again.",
+  deleted: "Deleted; only the capture ID, state history, and snapshot hash remain.",
+});
+
+const EXPIRED_CODES = new Set(["session_expired", "capture_time_invalid"]);
+
+/** Maps a native-host response to its lifecycle state and user-facing message. */
+export function describeCaptureResponse(response) {
+  let state = "rejected";
+  let code = typeof response?.error === "string" ? response.error : "malformed_response";
+  if (response?.type === "capture.accepted") {
+    state = "accepted";
+    code = null;
+  } else if (response?.type === "capture.rejected" && EXPIRED_CODES.has(code)) {
+    state = "expired";
+  }
+  const requestId = typeof response?.request_id === "string" ? response.request_id : null;
+  return {state, code, requestId, message: LIFECYCLE_MESSAGES[state]};
+}
 const REQUEST_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 const ALLOWED_TAGS = new Set([
@@ -334,6 +361,10 @@ export async function captureActiveTab(api) {
   let port;
   try {
     port = api.runtime.connectNative(NATIVE_HOST);
+    // Record only the lifecycle outcome; the response never carries source content.
+    port.onMessage?.addListener((response) => {
+      void api.storage.local.set({loomLastCaptureResult: describeCaptureResponse(response)});
+    });
     for (const message of [built.request, ...built.payloads]) {
       port.postMessage(message);
     }
@@ -341,5 +372,11 @@ export async function captureActiveTab(api) {
     return {status: "failed", code: "native_host_unavailable"};
   }
   await api.storage.local.set({loomSession: {...session, counter: built.nextCounter}});
-  return {status: "sent", requestId, snapshotState: built.request.snapshot.state};
+  return {
+    status: "sent",
+    state: "requested",
+    message: LIFECYCLE_MESSAGES.requested,
+    requestId,
+    snapshotState: built.request.snapshot.state,
+  };
 }
