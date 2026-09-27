@@ -725,6 +725,11 @@ pub fn canonical_without_mac(value: &Value) -> Result<Vec<u8>, String> {
     serde_json::to_vec(&unsigned).map_err(|_| "capture_envelope_invalid".into())
 }
 
+/// Commits an accepted capture to the spool.
+///
+/// The snapshot is written first and the metadata record last, so the metadata file is the commit
+/// marker: a crash or failure can never leave metadata that claims a snapshot which is absent.
+/// Every failure removes the temporary files and any snapshot this call already committed.
 fn persist_capture(
     root: &Path,
     request: &Value,
@@ -735,8 +740,6 @@ fn persist_capture(
     let stem = &accepted.request_id;
     let metadata_path = root.join(format!("{stem}.json"));
     let snapshot_path = root.join(format!("{stem}.html"));
-    let metadata_tmp = root.join(format!(".{stem}.json.tmp"));
-    let snapshot_tmp = root.join(format!(".{stem}.html.tmp"));
     let mut metadata = request.clone();
     if let Some(object) = metadata.as_object_mut() {
         object.remove("auth");
@@ -750,32 +753,44 @@ fn persist_capture(
         );
     }
     let metadata_bytes = serde_json::to_vec(&metadata).map_err(io::Error::other)?;
-    let mut metadata_file = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&metadata_tmp)?;
-    metadata_file.write_all(&metadata_bytes)?;
-    metadata_file.sync_all()?;
-    drop(metadata_file);
-    if let Err(error) = fs::rename(&metadata_tmp, &metadata_path) {
-        let _ = fs::remove_file(&metadata_tmp);
+    if !snapshot_bytes.is_empty() {
+        write_new_atomically(
+            &root.join(format!(".{stem}.html.tmp")),
+            &snapshot_path,
+            snapshot_bytes,
+        )?;
+    }
+    if let Err(error) = write_new_atomically(
+        &root.join(format!(".{stem}.json.tmp")),
+        &metadata_path,
+        &metadata_bytes,
+    ) {
+        if !snapshot_bytes.is_empty() {
+            let _ = fs::remove_file(&snapshot_path);
+        }
         return Err(error);
     }
-    if !snapshot_bytes.is_empty() {
-        let mut snapshot_file = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&snapshot_tmp)?;
-        snapshot_file.write_all(snapshot_bytes)?;
-        snapshot_file.sync_all()?;
-        drop(snapshot_file);
-        if let Err(error) = fs::rename(&snapshot_tmp, &snapshot_path) {
-            let _ = fs::remove_file(&snapshot_tmp);
-            let _ = fs::remove_file(&metadata_path);
-            return Err(error);
-        }
-    }
     Ok(())
+}
+
+/// Writes `bytes` to a new temporary file, syncs it, and renames it to `destination`. The
+/// temporary file is removed on any failure.
+fn write_new_atomically(temporary: &Path, destination: &Path, bytes: &[u8]) -> io::Result<()> {
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(temporary)?;
+    let result = file
+        .write_all(bytes)
+        .and_then(|()| file.sync_all())
+        .and_then(|()| {
+            drop(file);
+            fs::rename(temporary, destination)
+        });
+    if result.is_err() {
+        let _ = fs::remove_file(temporary);
+    }
+    result
 }
 
 fn reject_untrusted_html(bytes: &[u8]) -> Result<(), String> {
@@ -1316,6 +1331,79 @@ mod tests {
             .path()
             .join(format!(".{REQUEST_ID}.html.tmp"))
             .exists());
+    }
+
+    fn accepted_capture() -> AcceptedCapture {
+        AcceptedCapture {
+            capture_id: format!("browser-{REQUEST_ID}"),
+            request_id: REQUEST_ID.into(),
+            snapshot_state: "complete".into(),
+            source_hash: None,
+            bytes: 11,
+        }
+    }
+
+    fn spool_entries(root: &Path) -> Vec<String> {
+        let mut names = fs::read_dir(root)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        names.sort();
+        names
+    }
+
+    #[test]
+    fn failed_metadata_commit_removes_the_committed_snapshot() {
+        let directory = tempdir().unwrap();
+        // A non-empty directory at the metadata path makes the final metadata rename fail.
+        fs::create_dir_all(directory.path().join(format!("{REQUEST_ID}.json/occupied"))).unwrap();
+        let request = request("complete", b"<p>safe</p>", 1);
+        assert!(persist_capture(
+            directory.path(),
+            &request,
+            &accepted_capture(),
+            b"<p>safe</p>"
+        )
+        .is_err());
+        assert_eq!(
+            spool_entries(directory.path()),
+            vec![format!("{REQUEST_ID}.json")]
+        );
+    }
+
+    #[test]
+    fn failed_snapshot_write_leaves_no_metadata_record() {
+        let directory = tempdir().unwrap();
+        // A stale temporary file makes the exclusive snapshot create fail.
+        let stale = directory.path().join(format!(".{REQUEST_ID}.html.tmp"));
+        fs::write(&stale, b"stale").unwrap();
+        let request = request("complete", b"<p>safe</p>", 1);
+        assert!(persist_capture(
+            directory.path(),
+            &request,
+            &accepted_capture(),
+            b"<p>safe</p>"
+        )
+        .is_err());
+        assert!(!directory.path().join(format!("{REQUEST_ID}.json")).exists());
+        assert!(!directory.path().join(format!("{REQUEST_ID}.html")).exists());
+    }
+
+    #[test]
+    fn metadata_only_capture_commits_without_a_snapshot() {
+        let directory = tempdir().unwrap();
+        let request = request("not_requested", &[], 1);
+        persist_capture(directory.path(), &request, &accepted_capture(), &[]).unwrap();
+        assert_eq!(
+            spool_entries(directory.path()),
+            vec![format!("{REQUEST_ID}.json")]
+        );
+        let stored: Value = serde_json::from_slice(
+            &fs::read(directory.path().join(format!("{REQUEST_ID}.json"))).unwrap(),
+        )
+        .unwrap();
+        assert!(stored.get("auth").is_none());
+        assert_eq!(stored["capture_id"], format!("browser-{REQUEST_ID}"));
     }
 
     #[test]
