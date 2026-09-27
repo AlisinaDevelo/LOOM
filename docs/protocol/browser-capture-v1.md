@@ -190,6 +190,49 @@ pages, and parser failures can produce `partial` or `failed`. LOOM must display 
 time, hash when available, parser version, and reason. It must never describe a best-effort local
 snapshot as a complete archive or as evidence that the current live page still matches.
 
+## Capture lifecycle, consent, and retention
+
+Roadmap `0310` gives every capture an explicit lifecycle. The Rust state machine is
+`loom_browser_capture::lifecycle`, and the complete transition table (every state and event, allowed
+or not) is the fixture `crates/loom-browser-capture/fixtures/lifecycle-v1.json`.
+
+| From | Event | To |
+| --- | --- | --- |
+| `requested` | host validates the request and commits it | `accepted` |
+| `requested` | any validation, integrity, replay, rate, or storage failure | `rejected` |
+| `requested` | `session_expired` or `capture_time_invalid` | `expired` |
+| `accepted` | the browser pairing is revoked | `revoked` |
+| `revoked` | the user explicitly pairs the browser again | `accepted` |
+| `accepted` or `revoked` | the user deletes the capture | `deleted` |
+
+`rejected`, `expired`, and `deleted` are terminal; every other transition is refused. Each spool
+record carries a `lifecycle` object with the current state and a timestamped transition list that
+starts at the user-gesture time (`requested`). Records written before lifecycles existed read as
+`accepted`.
+
+What LOOM holds in each state:
+
+| State | On disk | Live/final URL, title, selection, redirects | Sanitized snapshot | User-facing message |
+| --- | --- | --- | --- | --- |
+| `requested` | Nothing | In host memory only while validating | Uncommitted chunks in memory only | “Waiting for LOOM to accept this save.” |
+| `accepted` | Metadata record and snapshot | Stored in the local spool | Stored in the local spool | “Saved to LOOM.” |
+| `rejected` | Nothing | Discarded | Discarded | “LOOM rejected this save; nothing was stored.” |
+| `expired` | Nothing | Discarded | Discarded | “This save expired before LOOM accepted it; nothing was stored.” |
+| `revoked` | Metadata record and snapshot | Kept but unavailable: not shown, searched, or exported | Kept but unavailable | “Browser pairing was revoked; this capture is unavailable until you delete it or pair again.” |
+| `deleted` | Tombstone only | Removed | Removed; only its SHA-256 hash remains | “Deleted; only the capture ID, state history, and snapshot hash remain.” |
+
+Credentials (cookies, authorization headers, passwords, hidden form values, storage) and the HTTP
+referrer are never accepted in any state: they are not protocol fields, and the host rejects a
+request that carries a forbidden field before authentication. Redirect hops are the only record
+of navigation, and they follow the URL rules above.
+
+Deletion rewrites the metadata record as a tombstone before removing the snapshot and any
+temporary files for that capture, so an interrupted delete never leaves a record that still holds
+the URL. Deleting again completes any leftover cleanup. The tombstone keeps only `capture_id`,
+`request_id`, `protocol`, `lifecycle`, and `snapshot_content_hash`. Spooled captures are not
+indexed into the searchable library yet; when indexing lands, deletion and revocation must also
+purge or hide the derived rows for the capture locator.
+
 ## Resource, failure, and recovery rules
 
 - Reject a frame larger than 256 KiB, selected text larger than 64 KiB, or sanitized snapshot bytes

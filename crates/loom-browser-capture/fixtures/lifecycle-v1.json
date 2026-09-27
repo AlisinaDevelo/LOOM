@@ -1,0 +1,186 @@
+{
+  "version": 1,
+  "description": "Complete capture lifecycle transition table for browser-capture protocol v1 (roadmap 0310). to=null means the transition is rejected.",
+  "transitions": [
+    {
+      "from": "requested",
+      "event": "accept",
+      "to": "accepted"
+    },
+    {
+      "from": "requested",
+      "event": "reject",
+      "to": "rejected"
+    },
+    {
+      "from": "requested",
+      "event": "expire",
+      "to": "expired"
+    },
+    {
+      "from": "requested",
+      "event": "revoke",
+      "to": null
+    },
+    {
+      "from": "requested",
+      "event": "repair",
+      "to": null
+    },
+    {
+      "from": "requested",
+      "event": "delete",
+      "to": null
+    },
+    {
+      "from": "accepted",
+      "event": "accept",
+      "to": null
+    },
+    {
+      "from": "accepted",
+      "event": "reject",
+      "to": null
+    },
+    {
+      "from": "accepted",
+      "event": "expire",
+      "to": null
+    },
+    {
+      "from": "accepted",
+      "event": "revoke",
+      "to": "revoked"
+    },
+    {
+      "from": "accepted",
+      "event": "repair",
+      "to": null
+    },
+    {
+      "from": "accepted",
+      "event": "delete",
+      "to": "deleted"
+    },
+    {
+      "from": "rejected",
+      "event": "accept",
+      "to": null
+    },
+    {
+      "from": "rejected",
+      "event": "reject",
+      "to": null
+    },
+    {
+      "from": "rejected",
+      "event": "expire",
+      "to": null
+    },
+    {
+      "from": "rejected",
+      "event": "revoke",
+      "to": null
+    },
+    {
+      "from": "rejected",
+      "event": "repair",
+      "to": null
+    },
+    {
+      "from": "rejected",
+      "event": "delete",
+      "to": null
+    },
+    {
+      "from": "expired",
+      "event": "accept",
+      "to": null
+    },
+    {
+      "from": "expired",
+      "event": "reject",
+      "to": null
+    },
+    {
+      "from": "expired",
+      "event": "expire",
+      "to": null
+    },
+    {
+      "from": "expired",
+      "event": "revoke",
+      "to": null
+    },
+    {
+      "from": "expired",
+      "event": "repair",
+      "to": null
+    },
+    {
+      "from": "expired",
+      "event": "delete",
+      "to": null
+    },
+    {
+      "from": "revoked",
+      "event": "accept",
+      "to": null
+    },
+    {
+      "from": "revoked",
+      "event": "reject",
+      "to": null
+    },
+    {
+      "from": "revoked",
+      "event": "expire",
+      "to": null
+    },
+    {
+      "from": "revoked",
+      "event": "revoke",
+      "to": null
+    },
+    {
+      "from": "revoked",
+      "event": "repair",
+      "to": "accepted"
+    },
+    {
+      "from": "revoked",
+      "event": "delete",
+      "to": "deleted"
+    },
+    {
+      "from": "deleted",
+      "event": "accept",
+      "to": null
+    },
+    {
+      "from": "deleted",
+      "event": "reject",
+      "to": null
+    },
+    {
+      "from": "deleted",
+      "event": "expire",
+      "to": null
+    },
+    {
+      "from": "deleted",
+      "event": "revoke",
+      "to": null
+    },
+    {
+      "from": "deleted",
+      "event": "repair",
+      "to": null
+    },
+    {
+      "from": "deleted",
+      "event": "delete",
+      "to": null
+    }
+  ]
+}
