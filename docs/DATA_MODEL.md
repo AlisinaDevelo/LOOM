@@ -14,6 +14,7 @@ version matrix and migration policy are maintained in [SCHEMA_COMPATIBILITY.md](
 |artifact_versions|Immutable content observations|content_hash, byte_size, mtime, extractor/version, page_count, parse_warnings_json, extraction_metadata_json, status|
 |passages|Normalized text and exact anchors|artifact version, ordinal, text, text hash, JSON locator, character/line/pixel offsets|
 |relationships|Typed source-to-source relationships|source/target artifacts, kind, origin, optional evidence passage, method, confidence, metadata, relationship schema version|
+|relationship_compactions|Digest-linked record of removed redundant edges|compaction time, removed count, BLAKE3 digest, every removed edge with the edge kept in its place|
 |bookmark_imports|One source-faithful local browser export|selected export locator, Netscape format, BLAKE3 export hash, import timestamp, source application, export version, permissions, skipped fields, complete/partial/revoked status|
 |bookmark_import_failures|Per-record failures of one import|import, ordinal, byte offset, code, detail without URL or title, pending/resolved state, resolving import|
 |bookmark_records|Current bookmark metadata and artifact identity|folder path, title, URL, browser timestamps, entry hash, first import|
@@ -82,6 +83,26 @@ The core exposes a bounded relationship listing that joins both endpoint artifac
 source URI, version ID, content hash, title, media type, and lifecycle state. The desktop viewer
 uses that projection to traverse a verified result to its related source and current version without
 introducing a graph database or treating inferred edges as confirmed facts.
+
+### Graph bounds and compaction
+
+Relationships are indexed by source and by target, so listing an artifact's edges reads only
+those edges, in deterministic `(created_at, id)` order, capped at 100 per call. An artifact may
+touch at most 10,000 relationships; `add_relationship` refuses more and asks for compaction. The
+tested scale is 1,000 artifacts and 50,000 relationships with one 5,000-edge hub
+(`crates/loom-core/tests/provenance_graph.rs`).
+
+The database enforces the envelope as well as the API: triggers refuse a new or updated row with an
+empty kind or method, or an inferred row without confidence. The origin and confidence range are
+column checks. Evidence remains an insert-time API rule because purging an evidence passage clears
+it afterwards.
+
+`compact-relationships` removes inferred edges that another edge with the same source, target, and
+kind outranks: a user-confirmed or observed edge, or an inferred edge with higher confidence (then
+the earlier edge, then the smaller ID). Observed and user-confirmed edges are never removed, so
+every visible source-to-target link keeps an edge. Each run stores every removed row and the edge
+kept in its place in `relationship_compactions`, with a BLAKE3 digest over that list, and at most
+`--max-removals` edges are removed per run.
 
 ## Bookmark records
 

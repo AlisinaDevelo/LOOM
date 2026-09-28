@@ -545,6 +545,32 @@ pub struct RelationshipRecord {
     pub created_at: String,
 }
 
+/// One inferred relationship removed by compaction and the edge that still carries its lineage.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CompactedRelationship {
+    pub removed: RelationshipRecord,
+    pub kept_relationship_id: String,
+}
+
+/// A recorded compaction. `removed_digest` is BLAKE3 over the JSON of `removed`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RelationshipCompaction {
+    pub id: String,
+    pub compacted_at: String,
+    pub removed_digest: String,
+    pub removed: Vec<CompactedRelationship>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RelationshipCompactionReport {
+    /// `None` when nothing was redundant and no compaction was recorded.
+    pub compaction_id: Option<String>,
+    pub removed: u64,
+    /// Redundant edges left for a later call because of the per-call limit.
+    pub remaining: u64,
+    pub removed_digest: Option<String>,
+}
+
 /// Endpoint projection used by the UI to traverse a relationship without a graph database.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RelationshipEndpoint {

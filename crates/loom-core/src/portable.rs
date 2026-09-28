@@ -20,7 +20,7 @@ use crate::{
 pub const EXPORT_FORMAT: &str = "loom.portable-export";
 pub const EXPORT_FORMAT_VERSION: u32 = 1;
 /// Library schema versions whose exports this build can import.
-pub const IMPORTABLE_SCHEMA_VERSIONS: &[i64] = &[6, 7, 8];
+pub const IMPORTABLE_SCHEMA_VERSIONS: &[i64] = &[6, 7, 8, 9];
 
 /// Canonical tables in foreign-key order, with the column order used for deterministic output.
 const TABLES: &[(&str, &str)] = &[
@@ -34,6 +34,7 @@ const TABLES: &[(&str, &str)] = &[
     ("bookmark_records", "id"),
     ("bookmark_import_items", "import_id, bookmark_id, ordinal"),
     ("bookmark_import_failures", "import_id, ordinal"),
+    ("relationship_compactions", "id"),
 ];
 
 /// User settings carried by an export. Everything else in `schema_meta` is library bookkeeping.

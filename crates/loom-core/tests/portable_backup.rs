@@ -69,7 +69,7 @@ fn comparable(mut export: PortableExport) -> PortableExport {
 fn export_import_round_trip_preserves_every_canonical_row_and_setting() {
     let (_directory, library) = populated();
     let export = library.export_portable().unwrap();
-    assert_eq!(export.library_schema_version, 8);
+    assert_eq!(export.library_schema_version, 9);
     assert_eq!(export.settings["retention_days"], "90");
     assert_eq!(export.settings["ocr_enabled"], "0");
     for table in [
@@ -239,11 +239,22 @@ fn imports_exports_from_both_supported_schema_revisions() {
         .iter()
         .all(|row| row[status] == "complete"));
 
-    let v8 = library.export_portable().unwrap();
+    // Schema 8 exports predate the relationship compaction table.
+    let mut v8 = library.export_portable().unwrap();
+    v8.library_schema_version = 8;
+    v8.tables.remove("relationship_compactions");
+    v8.seal().unwrap();
+    let from_v8 = Library::open_in_memory().unwrap();
+    assert_eq!(
+        from_v8.import_portable(&v8).unwrap().source_schema_version,
+        8
+    );
+
+    let v9 = library.export_portable().unwrap();
     let current = Library::open_in_memory().unwrap();
     assert_eq!(
-        current.import_portable(&v8).unwrap().source_schema_version,
-        8
+        current.import_portable(&v9).unwrap().source_schema_version,
+        9
     );
 
     let mut unsupported = library.export_portable().unwrap();

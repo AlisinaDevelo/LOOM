@@ -41,6 +41,16 @@ enum Command {
     },
     /// Re-read the original export of a recorded bookmark import.
     RetryBookmarkImport { import_id: String },
+    /// Remove redundant inferred relationships and record a digest-linked summary.
+    CompactRelationships {
+        #[arg(long, default_value_t = 1000)]
+        max_removals: u32,
+    },
+    /// List recorded relationship compactions with every removed edge.
+    RelationshipCompactions {
+        #[arg(long, default_value_t = 20)]
+        limit: u32,
+    },
     /// Search active passages and print evidence-backed hits.
     Search {
         query: String,
@@ -448,6 +458,20 @@ fn main() -> Result<(), Box<dyn Error>> {
             println!(
                 "{}",
                 serde_json::to_string_pretty(&library.retry_bookmark_import(&import_id)?)?
+            );
+        }
+        Command::CompactRelationships { max_removals } => {
+            let library = Library::open(arguments.database)?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&library.compact_relationships(max_removals)?)?
+            );
+        }
+        Command::RelationshipCompactions { limit } => {
+            let library = Library::open(arguments.database)?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&library.list_relationship_compactions(limit)?)?
             );
         }
         Command::Stats => {

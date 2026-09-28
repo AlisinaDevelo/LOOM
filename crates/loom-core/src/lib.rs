@@ -18,16 +18,17 @@ pub use bookmarks::parse_bookmark_export;
 pub use domain::{
     ArtifactObservation, BookmarkEntry, BookmarkExport, BookmarkImportFailure,
     BookmarkImportReport, BookmarkImportSummary, BookmarkRecord, CaptureBounds, CaptureContext,
-    CaptureMode, CapturePurgeReport, CaptureReport, DeletionReport, EvidenceAnchor,
-    EvidenceExcerpt, EvidenceSegment, EvidenceView, FtsHealthReport, FtsRepairReport,
-    IndexCancellationToken, IndexCheckpoint, IndexFailure, IndexReport, LibraryStats,
-    ObservationReport, OcrConfidenceState, OcrPurgeReport, OcrStatus, OpenArtifactRequest,
-    PassageObservation, RankContributions, RelationshipEndpoint, RelationshipInput,
-    RelationshipKind, RelationshipOrigin, RelationshipRecord, RelationshipView,
-    ResolveEvidenceRequest, RetentionPolicy, RetentionReport, SearchHit, SearchRequest,
-    SemanticCandidate, SemanticDropReport, SemanticIndexConfig, SemanticIndexManifest,
-    SemanticIndexStatus, SemanticProviderMeasurement, SemanticRebuildReport, SourceRootInfo,
-    SourceRootStatus, StorageEntry, StorageInspection,
+    CaptureMode, CapturePurgeReport, CaptureReport, CompactedRelationship, DeletionReport,
+    EvidenceAnchor, EvidenceExcerpt, EvidenceSegment, EvidenceView, FtsHealthReport,
+    FtsRepairReport, IndexCancellationToken, IndexCheckpoint, IndexFailure, IndexReport,
+    LibraryStats, ObservationReport, OcrConfidenceState, OcrPurgeReport, OcrStatus,
+    OpenArtifactRequest, PassageObservation, RankContributions, RelationshipCompaction,
+    RelationshipCompactionReport, RelationshipEndpoint, RelationshipInput, RelationshipKind,
+    RelationshipOrigin, RelationshipRecord, RelationshipView, ResolveEvidenceRequest,
+    RetentionPolicy, RetentionReport, SearchHit, SearchRequest, SemanticCandidate,
+    SemanticDropReport, SemanticIndexConfig, SemanticIndexManifest, SemanticIndexStatus,
+    SemanticProviderMeasurement, SemanticRebuildReport, SourceRootInfo, SourceRootStatus,
+    StorageEntry, StorageInspection,
 };
 pub use error::{LoomError, Result};
 pub use observe::{coalesce_events, ObservationEvent, ObservationEventKind, ObservationPlan};
