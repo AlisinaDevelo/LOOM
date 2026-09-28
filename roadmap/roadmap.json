@@ -1335,7 +1335,7 @@
     {
       "id": "0312",
       "title": "Bound provenance graph growth and compaction",
-      "status": "backlog",
+      "status": "review",
       "quarter": "Q06",
       "phase": "v0.3 Pattern",
       "workstream": "provenance",
@@ -1356,7 +1356,7 @@
         "phase:v0-3-pattern",
         "area:provenance"
       ],
-      "closure_evidence": "Record the exact tests, fixtures, measurements, review artifacts, or consented study evidence that satisfy every criterion; report only work actually performed.",
+      "closure_evidence": "Schema v9 adds relationship source/target/edge indexes, envelope check triggers (non-empty kind and method, confidence required for inferred edges, on top of the existing origin and confidence-range column checks), a 10,000-relationship per-artifact budget, and compact_relationships / list_relationship_compactions (CLI compact-relationships, relationship-compactions) with a relationship_compactions table holding every removed row, the kept edge, and a BLAKE3 digest. Tests in crates/loom-core/tests/provenance_graph.rs: synthetic_graph_traversal_is_indexed_bounded_and_deterministic (1,000 artifacts, 50,000 edges, 5,000-edge hub; EXPLAIN QUERY PLAN is a multi-index OR search with no table scan; order matches (created_at, id) and survives reopen; traversal capped at 100), schema_checks_reject_malformed_envelopes_written_directly, per_artifact_budget_stops_unbounded_growth, compaction_removes_only_dominated_inferred_edges_and_preserves_lineage (observed and confirmed edges kept, digests recomputed, summaries survive portable export); schema_compatibility::v8_migration_adds_relationship_indexes_checks_and_compaction_table. No device evidence recorded yet.",
       "product_boundary": "LOOM remains local-first and evidence-first. Canonical source identity and evidence stay authoritative; derived indexes, model output, snapshots, and transport state remain inspectable, rebuildable, and explicitly uncertain."
     },
     {

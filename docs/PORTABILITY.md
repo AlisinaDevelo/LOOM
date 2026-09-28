@@ -13,7 +13,7 @@ A portable export is one JSON document:
 {
   "format": "loom.portable-export",
   "format_version": 1,
-  "library_schema_version": 8,
+  "library_schema_version": 9,
   "exported_at": "2026-09-28T12:00:00.000Z",
   "settings": {"ocr_enabled": "1", "retention_days": "90"},
   "tables": {"passages": {"columns": ["id", "..."], "rows": [["...", "..."]]}},
@@ -28,7 +28,7 @@ A portable export is one JSON document:
 | `source_roots` | Selected files and folders, and whether they are enabled |
 | `artifacts`, `artifact_locators`, `artifact_versions` | Source identity, locators, content hashes, extractor identity, warnings, and extraction metadata |
 | `passages` | Passage text, text hashes, and exact character, line, page, or pixel anchors |
-| `relationships` | Typed provenance links with origin, method, evidence passage, confidence, and metadata |
+| `relationships`, `relationship_compactions` | Typed provenance links with origin, method, evidence passage, confidence, and metadata, plus digest-linked records of compacted edges |
 | `bookmark_imports`, `bookmark_records`, `bookmark_import_items`, `bookmark_import_failures` | Bookmark exports with their connector metadata, records, per-import outcomes, and per-record failures |
 
 `settings` carries the user settings `ocr_enabled` and `retention_days`. Derived state is never
@@ -45,9 +45,10 @@ your passage text and paths.** Use an encrypted backup for anything that leaves 
 - An import checks the format, format version, schema version, and digest, and it only goes into
   a library with no canonical rows.
 - `format_version` 1 is the only format. A future format bump will keep reading version 1.
-- This build imports exports made at library schema 6, 7, and 8 (`IMPORTABLE_SCHEMA_VERSIONS`).
+- This build imports exports made at library schema 6 through 9 (`IMPORTABLE_SCHEMA_VERSIONS`).
   Schema 6 exports have no bookmark tables; schema 7 exports have no connector metadata columns or
-  per-record import failures, which take their documented defaults. Each new schema release keeps
+  per-record import failures, which take their documented defaults; schema 8 exports have no
+  relationship compaction summaries. Each new schema release keeps
   at least the previous schema's exports importable.
 - Every exported table and column must exist in the live schema, and every required column must
   be present. Unknown tables or columns, such as those from a newer LOOM, are refused rather than

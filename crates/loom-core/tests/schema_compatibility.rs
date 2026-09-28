@@ -62,7 +62,7 @@ fn populated_v3_migration_adds_pdf_metadata_without_rewriting_canonical_rows() {
             |row| row.get(0),
         )
         .unwrap();
-    assert_eq!(schema_version, "8");
+    assert_eq!(schema_version, "9");
     let (hash, warnings, page_count): (String, String, Option<i64>) = connection
         .query_row(
             "SELECT content_hash, parse_warnings_json, page_count
@@ -134,7 +134,7 @@ fn populated_v4_migration_adds_extraction_metadata_without_rewriting_rows() {
             |row| row.get(0),
         )
         .unwrap();
-    assert_eq!(schema_version, "8");
+    assert_eq!(schema_version, "9");
     let metadata: String = connection
         .query_row(
             "SELECT extraction_metadata_json FROM artifact_versions",
@@ -199,7 +199,7 @@ fn populated_v5_migration_adds_relationship_envelope_without_rewriting_rows() {
             |row| row.get(0),
         )
         .unwrap();
-    assert_eq!(schema_version, "8");
+    assert_eq!(schema_version, "9");
     let columns: (i64, String, String) = connection
         .query_row(
             "SELECT relationship_schema_version, origin, metadata_json
@@ -251,7 +251,7 @@ fn populated_v6_migration_adds_bookmark_tables_without_rewriting_canonical_rows(
             |row| row.get(0),
         )
         .unwrap();
-    assert_eq!(schema_version, "8");
+    assert_eq!(schema_version, "9");
     for table in [
         "bookmark_imports",
         "bookmark_records",
@@ -333,7 +333,7 @@ fn assert_preserved_v2_rows(library: &Library, database: &std::path::Path) {
             |row| row.get(0),
         )
         .unwrap();
-    assert_eq!(schema_version, "8");
+    assert_eq!(schema_version, "9");
 
     let (hash, extractor_id, extractor_version): (String, String, String) = connection
         .query_row(
@@ -502,5 +502,57 @@ fn populated_v7_migration_adds_connector_metadata_without_rewriting_imports() {
             |row| row.get(0),
         )
         .unwrap();
-    assert_eq!(schema_version, "8");
+    assert_eq!(schema_version, "9");
+}
+
+#[test]
+fn v8_migration_adds_relationship_indexes_checks_and_compaction_table() {
+    let directory = tempdir().unwrap();
+    let database = directory.path().join("v8.sqlite3");
+    drop(Library::open(&database).unwrap());
+    let connection = Connection::open(&database).unwrap();
+    connection
+        .execute_batch(
+            "DROP INDEX relationships_source_idx;
+             DROP INDEX relationships_target_idx;
+             DROP INDEX relationships_edge_idx;
+             DROP TRIGGER relationships_envelope_insert;
+             DROP TRIGGER relationships_envelope_update;
+             DROP TABLE relationship_compactions;
+             UPDATE schema_meta SET value = '8' WHERE key = 'schema_version';",
+        )
+        .unwrap();
+    drop(connection);
+
+    let library = Library::open(&database).unwrap();
+    assert!(library
+        .list_relationship_compactions(10)
+        .unwrap()
+        .is_empty());
+    let connection = Connection::open(&database).unwrap();
+    for (kind, name) in [
+        ("index", "relationships_source_idx"),
+        ("index", "relationships_target_idx"),
+        ("index", "relationships_edge_idx"),
+        ("trigger", "relationships_envelope_insert"),
+        ("trigger", "relationships_envelope_update"),
+        ("table", "relationship_compactions"),
+    ] {
+        let exists: bool = connection
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = ?1 AND name = ?2)",
+                [kind, name],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(exists, "migration did not create {kind} {name}");
+    }
+    let version: String = connection
+        .query_row(
+            "SELECT value FROM schema_meta WHERE key = 'schema_version'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(version, "9");
 }

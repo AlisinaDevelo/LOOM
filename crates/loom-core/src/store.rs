@@ -16,15 +16,17 @@ use crate::{
     bookmarks::{self, BOOKMARK_EXTRACTOR_ID, BOOKMARK_EXTRACTOR_VERSION},
     domain::{
         ArtifactObservation, BookmarkEntry, BookmarkImportFailure, BookmarkImportReport,
-        BookmarkImportSummary, BookmarkRecord, DeletionReport, EvidenceAnchor, EvidenceExcerpt,
-        EvidenceSegment, EvidenceView, FtsHealthReport, FtsRepairReport, IndexCancellationToken,
-        IndexCheckpoint, IndexFailure, IndexReport, LibraryStats, ObservationReport,
-        OcrPurgeReport, OcrStatus, PassageObservation, RankContributions, RelationshipEndpoint,
-        RelationshipInput, RelationshipKind, RelationshipOrigin, RelationshipRecord,
-        RelationshipView, ResolveEvidenceRequest, RetentionPolicy, RetentionReport, SearchHit,
-        SearchRequest, SemanticCandidate, SemanticDropReport, SemanticIndexConfig,
-        SemanticIndexManifest, SemanticIndexStatus, SemanticProviderMeasurement,
-        SemanticRebuildReport, SourceRootInfo, SourceRootStatus, StorageEntry, StorageInspection,
+        BookmarkImportSummary, BookmarkRecord, CompactedRelationship, DeletionReport,
+        EvidenceAnchor, EvidenceExcerpt, EvidenceSegment, EvidenceView, FtsHealthReport,
+        FtsRepairReport, IndexCancellationToken, IndexCheckpoint, IndexFailure, IndexReport,
+        LibraryStats, ObservationReport, OcrPurgeReport, OcrStatus, PassageObservation,
+        RankContributions, RelationshipCompaction, RelationshipCompactionReport,
+        RelationshipEndpoint, RelationshipInput, RelationshipKind, RelationshipOrigin,
+        RelationshipRecord, RelationshipView, ResolveEvidenceRequest, RetentionPolicy,
+        RetentionReport, SearchHit, SearchRequest, SemanticCandidate, SemanticDropReport,
+        SemanticIndexConfig, SemanticIndexManifest, SemanticIndexStatus,
+        SemanticProviderMeasurement, SemanticRebuildReport, SourceRootInfo, SourceRootStatus,
+        StorageEntry, StorageInspection,
     },
     error::{io_error, LoomError, Result},
     ingest::{
@@ -49,8 +51,12 @@ type BookmarkRecordProjection = (
     String,
 );
 
-const SCHEMA_VERSION: i64 = 8;
+const SCHEMA_VERSION: i64 = 9;
+const CONNECTOR_SCHEMA_VERSION: i64 = 8;
 const BOOKMARK_SCHEMA_VERSION: i64 = 7;
+/// Upper bound on relationships touching one artifact. With the source/target indexes this bounds
+/// the rows any single traversal reads. Documented in docs/DATA_MODEL.md.
+pub(crate) const MAX_RELATIONSHIPS_PER_ARTIFACT: i64 = 10_000;
 const RELATIONSHIP_SCHEMA_VERSION: i64 = 6;
 const PREVIOUS_SCHEMA_VERSION: i64 = 5;
 const PREVIOUS_PREVIOUS_SCHEMA_VERSION: i64 = 4;
@@ -817,6 +823,20 @@ impl Library {
             return relationship_by_id(&connection, &id)?
                 .ok_or_else(|| LoomError::ArtifactStale(id));
         }
+        for artifact_id in [&input.source_artifact_id, &input.target_artifact_id] {
+            let degree: i64 = transaction.query_row(
+                "SELECT (SELECT COUNT(*) FROM relationships WHERE source_artifact_id = ?1)
+                      + (SELECT COUNT(*) FROM relationships WHERE target_artifact_id = ?1)",
+                [artifact_id],
+                |row| row.get(0),
+            )?;
+            if degree >= MAX_RELATIONSHIPS_PER_ARTIFACT {
+                return Err(LoomError::InvalidPath(format!(
+                    "artifact {artifact_id} already has {degree} relationships; \
+                     compact redundant edges before adding more"
+                )));
+            }
+        }
         let id = Uuid::new_v4().to_string();
         let created_at = Utc::now().to_rfc3339();
         transaction.execute(
@@ -872,6 +892,132 @@ impl Library {
                     relationship,
                     source,
                     target,
+                })
+            })
+            .collect()
+    }
+
+    /// Removes redundant inferred relationships and records a digest-linked summary of them.
+    ///
+    /// An inferred edge is redundant when another edge links the same source, target, and kind with
+    /// more authority: a user-confirmed or observed edge, or an inferred edge with higher
+    /// confidence (ties go to the earlier edge, then the smaller ID). Observed and user-confirmed
+    /// edges are never removed, so every source-to-target lineage a user can see is preserved by
+    /// the kept edge. At most `max_removals` edges are removed per call.
+    pub fn compact_relationships(&self, max_removals: u32) -> Result<RelationshipCompactionReport> {
+        let max_removals = max_removals.clamp(1, 10_000);
+        let mut connection = self.lock()?;
+        let transaction = connection.transaction()?;
+        let rank = "CASE {0}.origin WHEN 'user_confirmed' THEN 3 WHEN 'observed' THEN 2 ELSE 1 END";
+        let dominated = format!(
+            "SELECT e.id, (
+                SELECT f.id FROM relationships f
+                WHERE f.source_artifact_id = e.source_artifact_id
+                  AND f.target_artifact_id = e.target_artifact_id
+                  AND f.kind = e.kind AND f.id <> e.id
+                  AND ({rank_f} > {rank_e}
+                    OR ({rank_f} = {rank_e} AND (
+                        COALESCE(f.confidence, 0) > COALESCE(e.confidence, 0)
+                        OR (COALESCE(f.confidence, 0) = COALESCE(e.confidence, 0)
+                            AND (f.created_at < e.created_at
+                                 OR (f.created_at = e.created_at AND f.id < e.id))))))
+                ORDER BY {rank_f} DESC, COALESCE(f.confidence, 0) DESC, f.created_at, f.id
+                LIMIT 1
+             ) AS kept_id
+             FROM relationships e
+             WHERE e.origin = 'inferred'",
+            rank_f = rank.replace("{0}", "f"),
+            rank_e = rank.replace("{0}", "e"),
+        );
+        let candidates: Vec<(String, String)> = {
+            let mut statement = transaction.prepare(&format!(
+                "SELECT id, kept_id FROM ({dominated}) WHERE kept_id IS NOT NULL ORDER BY id"
+            ))?;
+            let rows = statement
+                .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            rows
+        };
+        // A kept edge may itself be redundant; each summary names the edge at the top of the chain.
+        let removed_ids = candidates
+            .iter()
+            .take(max_removals as usize)
+            .map(|(id, _)| id.clone())
+            .collect::<std::collections::BTreeSet<_>>();
+        let remaining = candidates.len().saturating_sub(removed_ids.len()) as u64;
+        if removed_ids.is_empty() {
+            transaction.commit()?;
+            return Ok(RelationshipCompactionReport::default());
+        }
+        let kept_by = candidates.iter().cloned().collect::<BTreeMap<_, _>>();
+        let mut removed = Vec::with_capacity(removed_ids.len());
+        for id in &removed_ids {
+            // Dominance is a strict order within an edge group, so the chain always ends.
+            let mut kept = kept_by[id].clone();
+            while let Some(next) = kept_by.get(&kept) {
+                kept = next.clone();
+            }
+            let record = relationship_by_id(&transaction, id)?
+                .ok_or_else(|| LoomError::ArtifactStale(id.clone()))?;
+            removed.push(CompactedRelationship {
+                removed: record,
+                kept_relationship_id: kept,
+            });
+        }
+        let summary_json = serde_json::to_string(&removed)?;
+        let removed_digest = format!("blake3:{}", blake3::hash(summary_json.as_bytes()).to_hex());
+        let compaction_id = Uuid::new_v4().to_string();
+        let compacted_at = Utc::now().to_rfc3339();
+        transaction.execute(
+            "INSERT INTO relationship_compactions(
+                id, compacted_at, removed_count, removed_digest, summary_json
+             ) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                compaction_id,
+                compacted_at,
+                removed.len() as i64,
+                removed_digest,
+                summary_json
+            ],
+        )?;
+        for id in &removed_ids {
+            transaction.execute("DELETE FROM relationships WHERE id = ?1", [id])?;
+        }
+        transaction.commit()?;
+        Ok(RelationshipCompactionReport {
+            compaction_id: Some(compaction_id),
+            removed: removed.len() as u64,
+            remaining,
+            removed_digest: Some(removed_digest),
+        })
+    }
+
+    /// Lists relationship compactions newest first, with every removed edge and the edge kept in
+    /// its place. Each summary's digest can be recomputed from its removed list.
+    pub fn list_relationship_compactions(&self, limit: u32) -> Result<Vec<RelationshipCompaction>> {
+        let limit = limit.clamp(1, 100);
+        let connection = self.lock()?;
+        let mut statement = connection.prepare(
+            "SELECT id, compacted_at, removed_digest, summary_json
+             FROM relationship_compactions ORDER BY compacted_at DESC, id LIMIT ?1",
+        )?;
+        let rows = statement
+            .query_map([limit], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                ))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        rows.into_iter()
+            .map(|(id, compacted_at, removed_digest, summary_json)| {
+                Ok(RelationshipCompaction {
+                    id,
+                    compacted_at,
+                    removed_digest,
+                    removed: serde_json::from_str(&summary_json)?,
                 })
             })
             .collect()
@@ -3258,6 +3404,7 @@ fn migrate(connection: &mut Connection) -> Result<()> {
         if !matches!(
             version,
             SCHEMA_VERSION
+                | CONNECTOR_SCHEMA_VERSION
                 | BOOKMARK_SCHEMA_VERSION
                 | RELATIONSHIP_SCHEMA_VERSION
                 | PREVIOUS_SCHEMA_VERSION
@@ -3507,6 +3654,38 @@ fn migrate(connection: &mut Connection) -> Result<()> {
             "TEXT NOT NULL DEFAULT '{}' CHECK(json_valid(metadata_json))",
         )?;
     }
+    // Provenance graph bounds (schema 9). Created after the relationship columns exist on every
+    // migrated database. Evidence stays an insert-time rule in `add_relationship` because purging
+    // an evidence passage legitimately clears it afterwards.
+    transaction.execute_batch(
+        "CREATE INDEX IF NOT EXISTS relationships_source_idx
+           ON relationships(source_artifact_id, created_at, id);
+         CREATE INDEX IF NOT EXISTS relationships_target_idx
+           ON relationships(target_artifact_id, created_at, id);
+         CREATE INDEX IF NOT EXISTS relationships_edge_idx
+           ON relationships(source_artifact_id, target_artifact_id, kind);
+         CREATE TRIGGER IF NOT EXISTS relationships_envelope_insert
+         BEFORE INSERT ON relationships
+         WHEN length(trim(new.kind)) = 0 OR length(trim(new.method)) = 0
+           OR (new.origin = 'inferred' AND new.confidence IS NULL)
+         BEGIN
+            SELECT RAISE(ABORT, 'relationship envelope violates schema checks');
+         END;
+         CREATE TRIGGER IF NOT EXISTS relationships_envelope_update
+         BEFORE UPDATE OF kind, method, origin, confidence ON relationships
+         WHEN length(trim(new.kind)) = 0 OR length(trim(new.method)) = 0
+           OR (new.origin = 'inferred' AND new.confidence IS NULL)
+         BEGIN
+            SELECT RAISE(ABORT, 'relationship envelope violates schema checks');
+         END;
+         CREATE TABLE IF NOT EXISTS relationship_compactions(
+            id TEXT PRIMARY KEY,
+            compacted_at TEXT NOT NULL,
+            removed_count INTEGER NOT NULL CHECK(removed_count > 0),
+            removed_digest TEXT NOT NULL,
+            summary_json TEXT NOT NULL CHECK(json_valid(summary_json))
+         ) STRICT;",
+    )?;
     transaction.execute(
         "INSERT INTO schema_meta(key, value) VALUES ('schema_version', ?1)
          ON CONFLICT(key) DO UPDATE SET value = excluded.value",
@@ -4445,7 +4624,7 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(schema_version, "8");
+        assert_eq!(schema_version, "9");
 
         let foreign_keys: i64 = connection
             .query_row("PRAGMA foreign_keys", [], |row| row.get(0))
@@ -4549,7 +4728,7 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(schema_version, "8");
+        assert_eq!(schema_version, "9");
         let checkpoint_table: bool = connection
             .query_row(
                 "SELECT EXISTS(
