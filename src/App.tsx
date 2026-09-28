@@ -345,7 +345,7 @@ function EvidenceViewer({
       <section className="evidence-viewer" aria-labelledby="evidence-viewer-title" role="region">
         <div className="evidence-viewer-heading">
           <div><p className="eyebrow">Verified evidence</p><h2 id="evidence-viewer-title" ref={headingRef} tabIndex={-1}>Checking the source…</h2></div>
-          <button type="button" className="viewer-close" onClick={onClose}>Close</button>
+          <button type="button" className="viewer-close" onClick={onClose} aria-keyshortcuts="Escape">Close</button>
         </div>
         <p className="evidence-loading" id="evidence-viewer-description">Re-checking the active version, content hash, and passage anchor.</p>
       </section>
@@ -356,7 +356,7 @@ function EvidenceViewer({
       <section className="evidence-viewer evidence-viewer-error" aria-labelledby="evidence-viewer-title" role="region">
         <div className="evidence-viewer-heading">
           <div><p className="eyebrow">Evidence unavailable</p><h2 id="evidence-viewer-title" ref={headingRef} tabIndex={-1}>Source needs attention.</h2></div>
-          <button type="button" className="viewer-close" onClick={onClose}>Close</button>
+          <button type="button" className="viewer-close" onClick={onClose} aria-keyshortcuts="Escape">Close</button>
         </div>
         <p role="alert">{state.error ?? "The source could not be verified."}</p>
         <p className="evidence-loading" id="evidence-viewer-description">Re-index the selected folder, then retry this evidence result.</p>
@@ -402,7 +402,7 @@ function EvidenceViewer({
             <button type="button" className="viewer-control" onClick={() => onZoomChange(zoom + 0.25)} aria-label="Zoom in" aria-controls="image-evidence-stage">＋</button>
             <button type="button" className="viewer-control" onClick={() => onRotationChange(rotation + 90)} aria-label="Rotate evidence" aria-controls="image-evidence-stage">↻</button>
           </>}
-          <button type="button" className="viewer-close" onClick={onClose}>Close</button>
+          <button type="button" className="viewer-close" onClick={onClose} aria-keyshortcuts="Escape">Close</button>
         </div>
       </div>
 
@@ -499,6 +499,8 @@ function App() {
   const resultsHeadingRef = useRef<HTMLHeadingElement>(null);
   const noResultsHeadingRef = useRef<HTMLHeadingElement>(null);
   const focusResultsAfterSearchRef = useRef(false);
+  // The control that opened the evidence viewer gets focus back when the viewer closes (WCAG 2.4.3).
+  const evidenceTriggerRef = useRef<HTMLElement | null>(null);
 
   const refreshStats = useCallback(async () => {
     try {
@@ -858,7 +860,37 @@ function App() {
     }
   };
 
+  const closeEvidence = useCallback(() => {
+    setEvidenceState(null);
+    setRelationshipState(null);
+    const trigger = evidenceTriggerRef.current;
+    evidenceTriggerRef.current = null;
+    // Wait for the viewer to unmount, then return focus if the trigger is still in the document.
+    window.setTimeout(() => {
+      if (trigger?.isConnected) {
+        trigger.focus();
+      } else {
+        resultsHeadingRef.current?.focus();
+      }
+    }, 0);
+  }, []);
+
+  useEffect(() => {
+    if (!evidenceState) return undefined;
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape" && !event.defaultPrevented) {
+        event.preventDefault();
+        closeEvidence();
+      }
+    };
+    window.addEventListener("keydown", closeOnEscape);
+    return () => window.removeEventListener("keydown", closeOnEscape);
+  }, [evidenceState, closeEvidence]);
+
   const resolveEvidence = async (hit: SearchHit) => {
+    if (document.activeElement instanceof HTMLElement && document.activeElement !== document.body) {
+      evidenceTriggerRef.current = document.activeElement;
+    }
     setError(null);
     setBusy("evidence");
     setEvidenceState({ hit, status: "loading" });
@@ -1189,10 +1221,7 @@ function App() {
                 rotation={evidenceRotation}
                 onZoomChange={(next) => setEvidenceZoom(Math.max(0.5, Math.min(2, next)))}
                 onRotationChange={(next) => setEvidenceRotation(((next % 360) + 360) % 360)}
-                onClose={() => {
-                  setEvidenceState(null);
-                  setRelationshipState(null);
-                }}
+                onClose={closeEvidence}
                 onOpenOriginal={openArtifact}
                 relationshipState={relationshipState}
                 onLoadRelationships={loadRelationships}
