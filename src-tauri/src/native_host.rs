@@ -16,6 +16,8 @@ fn main() {
 
 fn run() -> Result<(), Box<dyn std::error::Error>> {
     let config = HostConfig::from_env()?;
+    let arguments = std::env::args().skip(1).collect::<Vec<_>>();
+    config.verify_caller(&arguments)?;
     let mut host = NativeHost::new(config);
     let stdin = io::stdin();
     let stdout = io::stdout();

@@ -113,7 +113,12 @@ match the request hash. `failed` and `not_requested` requests have no payload fr
 ## Pairing, authentication, and version negotiation
 
 1. The native host manifest allowlists the signed extension identifier and the exact LOOM host
-   executable. The host does not listen on a TCP, Unix, or HTTP socket.
+   executable. The host does not listen on a TCP, Unix, or HTTP socket. The host also checks the
+   caller the browser reports at launch (`chrome-extension://<id>/` from Chromium, or the host
+   manifest path and extension ID from Firefox) against its own paired-caller allowlist
+   (`LOOM_NATIVE_HOST_ALLOWED_CALLERS` in development). An unidentifiable or unpaired caller stops
+   the host before it reads a frame or creates the spool, so a copied or re-registered host
+   manifest cannot admit a different extension.
 2. A user starts pairing from a visible LOOM settings action. LOOM generates a random 32-byte
    pairing secret, displays a short one-time code, stores the secret in the macOS Keychain, and
    the extension stores its peer copy in non-synchronised local extension storage. Re-pairing
@@ -258,6 +263,7 @@ purge or hide the derived rows for the capture locator.
 | Malicious page | Allowlisted fields, sanitizer, no script/resource execution, byte limits | `source_invalid`, `payload_too_large`, or `snapshot` partial/failed |
 | Compromised extension | Pairing secret, user gesture token, revocation, explicit scope, no history APIs | `capture_not_approved` or a user-visible capture record |
 | Native messaging spoof | Browser allowlist, signed executable path, no listening socket | Session challenge/proof failure |
+| Origin spoofing | Host-side paired-caller allowlist over the browser-reported origin or extension ID | Host exits before reading input; nothing is spooled |
 | Replay | Session expiry, monotonic counter, single-use request and intent IDs | `replay_rejected` |
 | Downgrade | Major-version match and negotiated minor feature set | `protocol_version_unsupported` |
 | Sensitive fields | Explicit exclusion list and selection preview | Field is absent; user can cancel |

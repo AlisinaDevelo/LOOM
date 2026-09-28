@@ -134,15 +134,26 @@ def read_frames(raw: bytes) -> list[dict]:
     return output
 
 
-def run_host(host: Path, input_bytes: bytes, spool: Path) -> list[dict]:
-    environment = {
+PAIRED_CALLER = "chrome-extension://abcdefghijklmnopabcdefghijklmnop/"
+
+
+def host_environment(spool: Path) -> dict[str, str]:
+    return {
         **os.environ,
         "LOOM_NATIVE_HOST_KEY_ID": KEY_ID,
         "LOOM_NATIVE_HOST_SECRET_HEX": SECRET.hex(),
         "LOOM_NATIVE_HOST_SPOOL": str(spool),
+        "LOOM_NATIVE_HOST_ALLOWED_CALLERS": PAIRED_CALLER,
     }
+
+
+def run_host(host: Path, input_bytes: bytes, spool: Path) -> list[dict]:
     result = subprocess.run(
-        [str(host)], input=input_bytes, capture_output=True, env=environment, check=True
+        [str(host), PAIRED_CALLER],
+        input=input_bytes,
+        capture_output=True,
+        env=host_environment(spool),
+        check=True,
     )
     if result.stderr:
         raise AssertionError(f"native host wrote unexpected stderr: {result.stderr.decode()}")
@@ -186,6 +197,26 @@ process.stdout.write(JSON.stringify(result));
     return payload["request"], payload["payloads"]
 
 
+def assert_unpaired_callers_are_refused(host: Path, input_bytes: bytes) -> None:
+    """An unpaired or unidentifiable caller must stop the host before it reads or writes anything."""
+    for launch in (
+        [],
+        ["chrome-extension://pppppppppppppppppppppppppppppppp/"],
+        ["manifest.json", "someone-else@example.test"],
+    ):
+        with tempfile.TemporaryDirectory(prefix="loom-native-host-caller-") as temporary:
+            spool = Path(temporary) / "spool"
+            result = subprocess.run(
+                [str(host), *launch],
+                input=input_bytes,
+                capture_output=True,
+                env=host_environment(spool),
+                check=False,
+            )
+            if result.returncode == 0 or result.stdout or spool.exists():
+                raise AssertionError(f"unpaired caller {launch!r} was not refused before I/O")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--host", required=True, type=Path)
@@ -196,6 +227,10 @@ def main() -> int:
     # First prove that the actual extension builder, rather than a second Python encoder, can
     # authenticate and deliver a capture to the Rust host.
     extension_request, extension_payloads = extension_messages()
+    assert_unpaired_callers_are_refused(
+        args.host,
+        b"".join([framed_json(extension_request), *(framed_json(payload) for payload in extension_payloads)]),
+    )
     with tempfile.TemporaryDirectory(prefix="loom-native-host-extension-") as temporary:
         extension_spool = Path(temporary)
         responses = run_host(
@@ -245,7 +280,10 @@ def main() -> int:
             raise AssertionError("rejected/replayed snapshots left files behind")
         if list(spool.glob("*.json")) != [spool / f"{first['request_id']}.json"]:
             raise AssertionError("metadata spool is not one accepted capture")
-    print("native host device contract: PASS (1 accepted, 4 deterministic rejections, recovery safe)")
+    print(
+        "native host device contract: PASS (1 accepted, 4 deterministic rejections, "
+        "3 unpaired callers refused, recovery safe)"
+    )
     return 0
 
 

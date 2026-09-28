@@ -18,7 +18,8 @@ kept separate because their service-worker/background declarations differ. The r
 also contains the checked Rust stdio receiver (`loom-native-host`), which validates every frame
 and atomically spools only a complete, sanitized snapshot. Pairing UI/Keychain storage and the
 signed host manifest are still packaging work; the receiver refuses to start without an explicit
-secret and spool root, and the extension still refuses to inspect the active page without a
+secret, spool root, and paired-caller allowlist, refuses any launching extension that is not on
+that allowlist, and the extension still refuses to inspect the active page without a
 locally paired session (`pairing_required`).
 
 ## Contract tests
