@@ -1362,7 +1362,7 @@
     {
       "id": "0313",
       "title": "Verify connector import fidelity and replayability",
-      "status": "backlog",
+      "status": "review",
       "quarter": "Q06",
       "phase": "v0.3 Pattern",
       "workstream": "connectors",
@@ -1384,7 +1384,7 @@
         "phase:v0-3-pattern",
         "area:connector"
       ],
-      "closure_evidence": "Record the exact tests, fixtures, measurements, review artifacts, or consented study evidence that satisfy every criterion; report only work actually performed.",
+      "closure_evidence": "Schema v8 adds connector metadata to bookmark_imports (source_application, export_version, permissions_json, skipped_fields_json, status) and the bookmark_import_failures table; the importer records per-record failures instead of aborting, and list_bookmark_imports / retry_bookmark_import (CLI bookmark-imports, retry-bookmark-import) expose them. Tests in crates/loom-core/tests/bookmarks.rs: imports_record_source_application_version_permissions_and_skipped_fields, replaying_the_same_export_keeps_artifact_identity_and_adds_no_relationships, malformed_records_become_inspectable_failures_without_blocking_good_records (failures never store the URL; a fixed export resolves them and keeps identity), revoked_exports_stay_inspectable_and_retry_requires_reselection, structurally_broken_or_empty_exports_still_fail_closed; schema_compatibility::populated_v7_migration_adds_connector_metadata_without_rewriting_imports; portable_backup covers v6, v7, and v8 exports. Bookmark import is the only connector today, so the evidence covers that importer only. No device evidence has been recorded yet.",
       "product_boundary": "LOOM remains local-first and evidence-first. Canonical source identity and evidence stay authoritative; derived indexes, model output, snapshots, and transport state remain inspectable, rebuildable, and explicitly uncertain."
     },
     {

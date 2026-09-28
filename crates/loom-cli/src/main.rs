@@ -34,6 +34,13 @@ enum Command {
         #[arg(long, default_value_t = 20)]
         limit: u32,
     },
+    /// List bookmark imports with their connector metadata and per-record failures.
+    BookmarkImports {
+        #[arg(long, default_value_t = 20)]
+        limit: u32,
+    },
+    /// Re-read the original export of a recorded bookmark import.
+    RetryBookmarkImport { import_id: String },
     /// Search active passages and print evidence-backed hits.
     Search {
         query: String,
@@ -428,6 +435,20 @@ fn main() -> Result<(), Box<dyn Error>> {
                 &arguments.database,
             )?;
             println!("{}", serde_json::to_string_pretty(&report)?);
+        }
+        Command::BookmarkImports { limit } => {
+            let library = Library::open(arguments.database)?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&library.list_bookmark_imports(limit)?)?
+            );
+        }
+        Command::RetryBookmarkImport { import_id } => {
+            let library = Library::open(arguments.database)?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&library.retry_bookmark_import(&import_id)?)?
+            );
         }
         Command::Stats => {
             let library = Library::open(arguments.database)?;

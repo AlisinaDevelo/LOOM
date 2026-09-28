@@ -15,16 +15,16 @@ use uuid::Uuid;
 use crate::{
     bookmarks::{self, BOOKMARK_EXTRACTOR_ID, BOOKMARK_EXTRACTOR_VERSION},
     domain::{
-        ArtifactObservation, BookmarkEntry, BookmarkImportReport, BookmarkRecord, DeletionReport,
-        EvidenceAnchor, EvidenceExcerpt, EvidenceSegment, EvidenceView, FtsHealthReport,
-        FtsRepairReport, IndexCancellationToken, IndexCheckpoint, IndexFailure, IndexReport,
-        LibraryStats, ObservationReport, OcrPurgeReport, OcrStatus, PassageObservation,
-        RankContributions, RelationshipEndpoint, RelationshipInput, RelationshipKind,
-        RelationshipOrigin, RelationshipRecord, RelationshipView, ResolveEvidenceRequest,
-        RetentionPolicy, RetentionReport, SearchHit, SearchRequest, SemanticCandidate,
-        SemanticDropReport, SemanticIndexConfig, SemanticIndexManifest, SemanticIndexStatus,
-        SemanticProviderMeasurement, SemanticRebuildReport, SourceRootInfo, SourceRootStatus,
-        StorageEntry, StorageInspection,
+        ArtifactObservation, BookmarkEntry, BookmarkImportFailure, BookmarkImportReport,
+        BookmarkImportSummary, BookmarkRecord, DeletionReport, EvidenceAnchor, EvidenceExcerpt,
+        EvidenceSegment, EvidenceView, FtsHealthReport, FtsRepairReport, IndexCancellationToken,
+        IndexCheckpoint, IndexFailure, IndexReport, LibraryStats, ObservationReport,
+        OcrPurgeReport, OcrStatus, PassageObservation, RankContributions, RelationshipEndpoint,
+        RelationshipInput, RelationshipKind, RelationshipOrigin, RelationshipRecord,
+        RelationshipView, ResolveEvidenceRequest, RetentionPolicy, RetentionReport, SearchHit,
+        SearchRequest, SemanticCandidate, SemanticDropReport, SemanticIndexConfig,
+        SemanticIndexManifest, SemanticIndexStatus, SemanticProviderMeasurement,
+        SemanticRebuildReport, SourceRootInfo, SourceRootStatus, StorageEntry, StorageInspection,
     },
     error::{io_error, LoomError, Result},
     ingest::{
@@ -49,7 +49,8 @@ type BookmarkRecordProjection = (
     String,
 );
 
-const SCHEMA_VERSION: i64 = 7;
+const SCHEMA_VERSION: i64 = 8;
+const BOOKMARK_SCHEMA_VERSION: i64 = 7;
 const RELATIONSHIP_SCHEMA_VERSION: i64 = 6;
 const PREVIOUS_SCHEMA_VERSION: i64 = 5;
 const PREVIOUS_PREVIOUS_SCHEMA_VERSION: i64 = 4;
@@ -219,7 +220,13 @@ impl Library {
         let text = String::from_utf8(bytes).map_err(|_| {
             LoomError::InvalidPath(format!("bookmark export is not UTF-8: {}", path.display()))
         })?;
-        let export = bookmarks::parse_bookmark_export(&text)?;
+        let detailed = bookmarks::parse_bookmark_export_detailed(&text)?;
+        if detailed.export.bookmarks.is_empty() && detailed.failures.is_empty() {
+            return Err(LoomError::InvalidPath(
+                "bookmark export contains no usable bookmarks".into(),
+            ));
+        }
+        let export = detailed.export.clone();
         let root_id = {
             let mut connection = self.lock()?;
             ensure_source_root(&mut connection, &source_uri, false)?
@@ -237,6 +244,27 @@ impl Library {
             )
             .optional()?;
         if let Some((import_id, unchanged)) = existing {
+            // Replaying identical bytes keeps the original import and artifact identity. An
+            // explicit re-selection of a revoked export makes its records available again.
+            transaction.execute(
+                "UPDATE bookmark_imports
+                 SET status = CASE WHEN EXISTS(
+                        SELECT 1 FROM bookmark_import_failures
+                        WHERE import_id = ?1 AND state = 'pending'
+                     ) THEN 'partial' ELSE 'complete' END
+                 WHERE id = ?1 AND status = 'revoked'",
+                [&import_id],
+            )?;
+            transaction.execute(
+                "UPDATE artifacts SET state = 'active', last_seen_at = ?2
+                 WHERE state = 'missing' AND id IN (
+                    SELECT r.artifact_id FROM bookmark_records r
+                    JOIN bookmark_import_items item ON item.bookmark_id = r.id
+                    WHERE item.import_id = ?1
+                 )",
+                params![import_id, now],
+            )?;
+            let failures = pending_import_failures(&transaction, &import_id)?;
             transaction.commit()?;
             return Ok(BookmarkImportReport {
                 import_id,
@@ -245,24 +273,62 @@ impl Library {
                 content_hash,
                 discovered: export.bookmarks.len() as u64,
                 unchanged: unchanged.max(0) as u64,
+                failed: failures.len() as u64,
+                failures,
                 remote_fetches: 0,
                 ..BookmarkImportReport::default()
             });
         }
 
         let import_id = Uuid::new_v4().to_string();
+        let status = if detailed.failures.is_empty() && !detailed.truncated {
+            "complete"
+        } else {
+            "partial"
+        };
         transaction.execute(
             "INSERT INTO bookmark_imports(
-                id, source_root_id, source_locator, format, content_hash, imported_at
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                id, source_root_id, source_locator, format, content_hash, imported_at,
+                source_application, export_version, permissions_json, skipped_fields_json, status
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
             params![
                 import_id,
                 root_id,
                 source_uri,
                 export.format,
                 content_hash,
-                now
+                now,
+                detailed.source_application,
+                detailed.export_version,
+                serde_json::to_string(bookmarks::BOOKMARK_IMPORT_PERMISSIONS)?,
+                serde_json::to_string(&detailed.skipped_fields)?,
+                status
             ],
+        )?;
+        for failure in &detailed.failures {
+            transaction.execute(
+                "INSERT INTO bookmark_import_failures(
+                    import_id, ordinal, byte_offset, code, detail, state, created_at
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, 'pending', ?6)",
+                params![
+                    import_id,
+                    failure.ordinal,
+                    failure.byte_offset as i64,
+                    failure.code,
+                    failure.detail,
+                    now
+                ],
+            )?;
+        }
+        // A newer import of the same export is the retry for every earlier pending failure;
+        // anything still broken is recorded again as a pending failure of this import.
+        transaction.execute(
+            "UPDATE bookmark_import_failures
+             SET state = 'resolved', resolved_by_import_id = ?1
+             WHERE state = 'pending' AND import_id <> ?1 AND import_id IN (
+                SELECT id FROM bookmark_imports WHERE source_locator = ?2
+             )",
+            params![import_id, source_uri],
         )?;
         let mut report = BookmarkImportReport {
             import_id: import_id.clone(),
@@ -385,8 +451,113 @@ impl Library {
             )?;
             let _ = artifact_id;
         }
+        report.failures = pending_import_failures(&transaction, &import_id)?;
+        report.failed = report.failures.len() as u64;
         transaction.commit()?;
         Ok(report)
+    }
+
+    /// Lists bookmark imports newest first, with connector metadata and every per-record failure.
+    pub fn list_bookmark_imports(&self, limit: u32) -> Result<Vec<BookmarkImportSummary>> {
+        let limit = limit.clamp(1, 1_000);
+        let connection = self.lock()?;
+        let mut statement = connection.prepare(
+            "SELECT id, source_locator, format, content_hash, imported_at, source_application,
+                    export_version, permissions_json, skipped_fields_json, status,
+                    (SELECT COUNT(*) FROM bookmark_import_items WHERE import_id = i.id)
+             FROM bookmark_imports i
+             ORDER BY imported_at DESC, id
+             LIMIT ?1",
+        )?;
+        let rows = statement
+            .query_map([limit], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, String>(5)?,
+                    row.get::<_, String>(6)?,
+                    row.get::<_, String>(7)?,
+                    row.get::<_, String>(8)?,
+                    row.get::<_, String>(9)?,
+                    row.get::<_, i64>(10)?,
+                ))
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        let mut failures = connection.prepare(
+            "SELECT ordinal, byte_offset, code, detail, state, resolved_by_import_id, created_at
+             FROM bookmark_import_failures WHERE import_id = ?1 ORDER BY ordinal",
+        )?;
+        let mut summaries = Vec::with_capacity(rows.len());
+        for (
+            id,
+            source_uri,
+            format,
+            content_hash,
+            imported_at,
+            source_application,
+            export_version,
+            permissions,
+            skipped_fields,
+            status,
+            items,
+        ) in rows
+        {
+            let record_failures = failures
+                .query_map([&id], |row| {
+                    Ok(BookmarkImportFailure {
+                        ordinal: row.get::<_, i64>(0)?.max(0) as u32,
+                        byte_offset: row.get::<_, i64>(1)?.max(0) as u64,
+                        code: row.get(2)?,
+                        detail: row.get(3)?,
+                        state: row.get(4)?,
+                        resolved_by_import_id: row.get(5)?,
+                        created_at: row.get(6)?,
+                    })
+                })?
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            summaries.push(BookmarkImportSummary {
+                import_id: id,
+                source_uri,
+                format,
+                content_hash,
+                imported_at,
+                source_application,
+                export_version,
+                permissions: serde_json::from_str(&permissions)?,
+                skipped_fields: serde_json::from_str(&skipped_fields)?,
+                status,
+                items: items.max(0) as u64,
+                failures: record_failures,
+            });
+        }
+        Ok(summaries)
+    }
+
+    /// Re-reads the original export of a recorded import. A revoked export must be re-selected
+    /// explicitly instead; retry never re-grants access that was withdrawn.
+    pub fn retry_bookmark_import(&self, import_id: &str) -> Result<BookmarkImportReport> {
+        let (locator, status): (String, String) = {
+            let connection = self.lock()?;
+            connection
+                .query_row(
+                    "SELECT source_locator, status FROM bookmark_imports WHERE id = ?1",
+                    [import_id],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .optional()?
+                .ok_or_else(|| {
+                    LoomError::InvalidPath(format!("unknown bookmark import: {import_id}"))
+                })?
+        };
+        if status == "revoked" {
+            return Err(LoomError::InvalidPath(
+                "this bookmark export was revoked; select it again to import it".into(),
+            ));
+        }
+        self.import_bookmarks(locator)
     }
 
     /// Lists bounded current bookmark records with their original export provenance.
@@ -568,6 +739,11 @@ impl Library {
              WHERE source_root_id = (SELECT id FROM source_roots WHERE locator = ?2)
                AND state = 'active'",
             params![Utc::now().to_rfc3339(), locator],
+        )?;
+        transaction.execute(
+            "UPDATE bookmark_imports SET status = 'revoked'
+             WHERE source_root_id = (SELECT id FROM source_roots WHERE locator = ?1)",
+            [locator],
         )?;
         transaction.commit()?;
         drop(connection);
@@ -2931,15 +3107,24 @@ fn ensure_relationship_column(
     column: &str,
     definition: &str,
 ) -> Result<()> {
+    ensure_column(transaction, "relationships", column, definition)
+}
+
+fn ensure_column(
+    transaction: &Transaction<'_>,
+    table: &str,
+    column: &str,
+    definition: &str,
+) -> Result<()> {
     let exists: bool = transaction.query_row(
         "SELECT EXISTS(
-            SELECT 1 FROM pragma_table_info('relationships') WHERE name = ?1
+            SELECT 1 FROM pragma_table_info(?1) WHERE name = ?2
          )",
-        [column],
+        [table, column],
         |row| row.get(0),
     )?;
     if !exists {
-        let statement = format!("ALTER TABLE relationships ADD COLUMN {column} {definition}");
+        let statement = format!("ALTER TABLE {table} ADD COLUMN {column} {definition}");
         transaction.execute(&statement, [])?;
     }
     Ok(())
@@ -3073,6 +3258,7 @@ fn migrate(connection: &mut Connection) -> Result<()> {
         if !matches!(
             version,
             SCHEMA_VERSION
+                | BOOKMARK_SCHEMA_VERSION
                 | RELATIONSHIP_SCHEMA_VERSION
                 | PREVIOUS_SCHEMA_VERSION
                 | PREVIOUS_PREVIOUS_SCHEMA_VERSION
@@ -3183,7 +3369,27 @@ fn migrate(connection: &mut Connection) -> Result<()> {
             format TEXT NOT NULL,
             content_hash TEXT NOT NULL,
             imported_at TEXT NOT NULL,
+            source_application TEXT NOT NULL DEFAULT 'unknown',
+            export_version TEXT NOT NULL DEFAULT 'unknown',
+            permissions_json TEXT NOT NULL DEFAULT '[\"read_selected_file\"]'
+              CHECK(json_valid(permissions_json)),
+            skipped_fields_json TEXT NOT NULL DEFAULT '[]'
+              CHECK(json_valid(skipped_fields_json)),
+            status TEXT NOT NULL DEFAULT 'complete'
+              CHECK(status IN ('complete', 'partial', 'revoked')),
             UNIQUE(source_locator, format, content_hash)
+         ) STRICT;
+
+         CREATE TABLE IF NOT EXISTS bookmark_import_failures(
+            import_id TEXT NOT NULL REFERENCES bookmark_imports(id) ON DELETE CASCADE,
+            ordinal INTEGER NOT NULL CHECK(ordinal >= 0),
+            byte_offset INTEGER NOT NULL CHECK(byte_offset >= 0),
+            code TEXT NOT NULL,
+            detail TEXT NOT NULL,
+            state TEXT NOT NULL DEFAULT 'pending' CHECK(state IN ('pending', 'resolved')),
+            resolved_by_import_id TEXT REFERENCES bookmark_imports(id) ON DELETE SET NULL,
+            created_at TEXT NOT NULL,
+            PRIMARY KEY(import_id, ordinal)
          ) STRICT;
 
          CREATE TABLE IF NOT EXISTS bookmark_records(
@@ -3268,6 +3474,26 @@ fn migrate(connection: &mut Connection) -> Result<()> {
                   CHECK(json_valid(extraction_metadata_json));",
         )?;
     }
+    if existing_version.is_some_and(|version| version == BOOKMARK_SCHEMA_VERSION) {
+        for (column, definition) in [
+            ("source_application", "TEXT NOT NULL DEFAULT 'unknown'"),
+            ("export_version", "TEXT NOT NULL DEFAULT 'unknown'"),
+            (
+                "permissions_json",
+                "TEXT NOT NULL DEFAULT '[\"read_selected_file\"]' CHECK(json_valid(permissions_json))",
+            ),
+            (
+                "skipped_fields_json",
+                "TEXT NOT NULL DEFAULT '[]' CHECK(json_valid(skipped_fields_json))",
+            ),
+            (
+                "status",
+                "TEXT NOT NULL DEFAULT 'complete' CHECK(status IN ('complete', 'partial', 'revoked'))",
+            ),
+        ] {
+            ensure_column(&transaction, "bookmark_imports", column, definition)?;
+        }
+    }
     if existing_version.is_some_and(|version| version < RELATIONSHIP_SCHEMA_VERSION) {
         ensure_relationship_column(
             &transaction,
@@ -3298,7 +3524,7 @@ fn migrate(connection: &mut Connection) -> Result<()> {
 }
 
 fn validate_schema_shape(connection: &Connection, version: i64) -> Result<()> {
-    let tables = if version >= SCHEMA_VERSION {
+    let tables = if version >= BOOKMARK_SCHEMA_VERSION {
         CURRENT_SCHEMA_TABLES
     } else if version != LEGACY_SCHEMA_VERSION {
         PRE_BOOKMARK_SCHEMA_TABLES
@@ -3587,6 +3813,25 @@ fn ensure_source_root(
         ],
     )?;
     Ok(id)
+}
+
+fn pending_import_failures(
+    transaction: &Transaction<'_>,
+    import_id: &str,
+) -> Result<Vec<IndexFailure>> {
+    let mut statement = transaction.prepare(
+        "SELECT ordinal, code, detail FROM bookmark_import_failures
+         WHERE import_id = ?1 AND state = 'pending' ORDER BY ordinal",
+    )?;
+    let failures = statement
+        .query_map([import_id], |row| {
+            Ok(IndexFailure {
+                source: format!("bookmark #{}", row.get::<_, i64>(0)?),
+                reason: format!("{}: {}", row.get::<_, String>(1)?, row.get::<_, String>(2)?),
+            })
+        })?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    Ok(failures)
 }
 
 fn bookmark_entry_hash(entry: &BookmarkEntry) -> String {
@@ -4200,7 +4445,7 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(schema_version, "7");
+        assert_eq!(schema_version, "8");
 
         let foreign_keys: i64 = connection
             .query_row("PRAGMA foreign_keys", [], |row| row.get(0))
@@ -4304,7 +4549,7 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(schema_version, "7");
+        assert_eq!(schema_version, "8");
         let checkpoint_table: bool = connection
             .query_row(
                 "SELECT EXISTS(

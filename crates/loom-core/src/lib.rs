@@ -16,13 +16,14 @@ mod store;
 pub use backup::{BackupOptions, BackupReport, RestoreReport};
 pub use bookmarks::parse_bookmark_export;
 pub use domain::{
-    ArtifactObservation, BookmarkEntry, BookmarkExport, BookmarkImportReport, BookmarkRecord,
-    CaptureBounds, CaptureContext, CaptureMode, CapturePurgeReport, CaptureReport, DeletionReport,
-    EvidenceAnchor, EvidenceExcerpt, EvidenceSegment, EvidenceView, FtsHealthReport,
-    FtsRepairReport, IndexCancellationToken, IndexCheckpoint, IndexFailure, IndexReport,
-    LibraryStats, ObservationReport, OcrConfidenceState, OcrPurgeReport, OcrStatus,
-    OpenArtifactRequest, PassageObservation, RankContributions, RelationshipEndpoint,
-    RelationshipInput, RelationshipKind, RelationshipOrigin, RelationshipRecord, RelationshipView,
+    ArtifactObservation, BookmarkEntry, BookmarkExport, BookmarkImportFailure,
+    BookmarkImportReport, BookmarkImportSummary, BookmarkRecord, CaptureBounds, CaptureContext,
+    CaptureMode, CapturePurgeReport, CaptureReport, DeletionReport, EvidenceAnchor,
+    EvidenceExcerpt, EvidenceSegment, EvidenceView, FtsHealthReport, FtsRepairReport,
+    IndexCancellationToken, IndexCheckpoint, IndexFailure, IndexReport, LibraryStats,
+    ObservationReport, OcrConfidenceState, OcrPurgeReport, OcrStatus, OpenArtifactRequest,
+    PassageObservation, RankContributions, RelationshipEndpoint, RelationshipInput,
+    RelationshipKind, RelationshipOrigin, RelationshipRecord, RelationshipView,
     ResolveEvidenceRequest, RetentionPolicy, RetentionReport, SearchHit, SearchRequest,
     SemanticCandidate, SemanticDropReport, SemanticIndexConfig, SemanticIndexManifest,
     SemanticIndexStatus, SemanticProviderMeasurement, SemanticRebuildReport, SourceRootInfo,
