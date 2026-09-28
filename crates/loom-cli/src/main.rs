@@ -8,7 +8,9 @@ use std::{
 };
 
 use clap::{Parser, Subcommand};
-use loom_core::{EvidenceAnchor, Library, LibraryLimits, SearchRequest};
+use loom_core::{
+    BackupOptions, EvidenceAnchor, Library, LibraryLimits, PortableExport, SearchRequest,
+};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Parser)]
@@ -59,6 +61,23 @@ enum Command {
     RetentionApply,
     /// Remove known disposable local files and SQLite sidecars.
     PurgeDisposable,
+    /// Write a plaintext portable export of every canonical row and setting to a new file.
+    Export { path: PathBuf },
+    /// Import a portable export into the (empty) library at --database.
+    ImportExport { path: PathBuf },
+    /// Write a password-encrypted backup to a new file. The password is read from
+    /// --password-file or LOOM_BACKUP_PASSWORD, never from the command line.
+    Backup {
+        path: PathBuf,
+        #[arg(long)]
+        password_file: Option<PathBuf>,
+    },
+    /// Restore an encrypted backup into a new library at --database, which must not exist.
+    Restore {
+        backup: PathBuf,
+        #[arg(long)]
+        password_file: Option<PathBuf>,
+    },
     /// Print the canonical extraction identity, warnings, and anchors for one indexed source.
     Inspect { path: PathBuf },
     /// Compare canonical passages with the derived FTS5 projection.
@@ -357,6 +376,59 @@ fn main() -> Result<(), Box<dyn Error>> {
                 )?
             );
         }
+        Command::Export { path } => {
+            let library = Library::open(arguments.database)?;
+            let export = library.export_portable()?;
+            let mut file = fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&path)?;
+            serde_json::to_writer(&mut file, &export)?;
+            file.sync_all()?;
+            println!(
+                "{}",
+                serde_json::json!({
+                    "path": path,
+                    "rows": export.row_count(),
+                    "digest": export.digest,
+                    "encrypted": false,
+                })
+            );
+        }
+        Command::ImportExport { path } => {
+            let export: PortableExport =
+                serde_json::from_reader(BufReader::new(File::open(path)?))?;
+            let library = Library::open(arguments.database)?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&library.import_portable(&export)?)?
+            );
+        }
+        Command::Backup {
+            path,
+            password_file,
+        } => {
+            let password = read_backup_password(password_file.as_deref())?;
+            let library = Library::open(arguments.database)?;
+            let report = library.write_encrypted_backup(
+                &path,
+                password.as_bytes(),
+                BackupOptions::default(),
+            )?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
+        }
+        Command::Restore {
+            backup,
+            password_file,
+        } => {
+            let password = read_backup_password(password_file.as_deref())?;
+            let report = Library::restore_encrypted_backup(
+                &backup,
+                password.as_bytes(),
+                &arguments.database,
+            )?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
+        }
         Command::Stats => {
             let library = Library::open(arguments.database)?;
             println!("{}", serde_json::to_string_pretty(&library.stats()?)?);
@@ -514,6 +586,24 @@ fn main() -> Result<(), Box<dyn Error>> {
         )?,
     }
     Ok(())
+}
+
+/// Reads the backup password from a file (first line) or LOOM_BACKUP_PASSWORD. Command-line
+/// arguments are visible to other local processes, so a password flag is deliberately absent.
+fn read_backup_password(password_file: Option<&Path>) -> Result<String, Box<dyn Error>> {
+    let password = match password_file {
+        Some(path) => fs::read_to_string(path)?
+            .lines()
+            .next()
+            .unwrap_or_default()
+            .to_owned(),
+        None => std::env::var("LOOM_BACKUP_PASSWORD")
+            .map_err(|_| "set LOOM_BACKUP_PASSWORD or pass --password-file")?,
+    };
+    if password.is_empty() {
+        return Err("backup password is empty".into());
+    }
+    Ok(password)
 }
 
 fn run_performance(

@@ -1275,7 +1275,7 @@
     {
       "id": "0305",
       "title": "Design portable export, import, and encrypted backup",
-      "status": "backlog",
+      "status": "review",
       "quarter": "Q06",
       "phase": "v0.3 Pattern",
       "workstream": "foundation",
@@ -1297,7 +1297,7 @@
         "area:portability",
         "area:security"
       ],
-      "closure_evidence": "Record the exact tests, fixtures, measurements, review artifacts, or consented study evidence that satisfy every criterion; report only work actually performed.",
+      "closure_evidence": "Export/import in crates/loom-core/src/portable.rs and encrypted backup in crates/loom-core/src/backup.rs, documented with the export schema, compatibility policy, and crypto design in docs/PORTABILITY.md; CLI commands export, import-export, backup, restore. Tests: backup::tests (round trips across chunk boundaries, wrong/short password, every single-byte flip rejected, truncation/extension/chunk reordering rejected, hostile KDF/format headers rejected, documented default cost) and tests/portable_backup.rs (full-table round trip with settings, bookmarks and relationships; imports from library schema 6 and 7 with schema 5 refused; digest mismatch, dangling foreign key, unknown column/table, missing required column, invalid setting, future format, and non-empty target all fail with no partial rows; encrypted backup restore reproduces the export with no plaintext in the file; wrong password, truncated, and tampered backups never create a database). A CLI smoke run with the default 64 MiB Argon2id cost indexed the v0 corpus, backed up, restored, matched stats, and found the benchmark query in the restored library. No independent cryptographic review has been performed.",
       "product_boundary": "LOOM remains local-first and evidence-first. Canonical source identity and evidence stay authoritative; derived indexes, model output, snapshots, and transport state remain inspectable, rebuildable, and explicitly uncertain."
     },
     {
