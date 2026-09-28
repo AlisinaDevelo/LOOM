@@ -1246,7 +1246,7 @@
     {
       "id": "0311",
       "title": "Specify the browser extension message boundary",
-      "status": "review",
+      "status": "done",
       "quarter": "Q05",
       "phase": "v0.3 Pattern",
       "workstream": "connectors-security",
@@ -1269,7 +1269,7 @@
         "area:connector",
         "area:security"
       ],
-      "closure_evidence": "Versioned allowlist, forbidden fields, sanitizer, replay, and one-time request/intent references were built in 0300/0301 and are documented in docs/protocol/browser-capture-v1.md. This change adds the missing origin-spoofing control: the native host verifies the browser-reported caller (chrome-extension origin or Firefox extension ID) against a paired-caller allowlist and exits before any I/O otherwise. Tests in crates/loom-browser-capture: caller_identity_is_parsed_for_chrome_and_firefox_launches, spoofed_malformed_or_missing_callers_are_refused, boundary_rejects_downgrade_oversize_and_nested_secrets_without_writing (newer/older major, 64 KiB+ selection, 8 MiB+ snapshot, nested password, oversized frame), plus the existing replay and forbidden-field tests; scripts/test-native-host.py now also proves three unpaired callers are refused by the real host binary before I/O. The threat table gains an origin-spoofing row. No device evidence recorded yet.",
+      "closure_evidence": "Versioned allowlist, forbidden fields, sanitizer, replay, and one-time request/intent references were built in 0300/0301 and are documented in docs/protocol/browser-capture-v1.md. This change adds the missing origin-spoofing control: the native host verifies the browser-reported caller (chrome-extension origin or Firefox extension ID) against a paired-caller allowlist and exits before any I/O otherwise. Tests in crates/loom-browser-capture: caller_identity_is_parsed_for_chrome_and_firefox_launches, spoofed_malformed_or_missing_callers_are_refused, boundary_rejects_downgrade_oversize_and_nested_secrets_without_writing (newer/older major, 64 KiB+ selection, 8 MiB+ snapshot, nested password, oversized frame), plus the existing replay and forbidden-field tests; scripts/test-native-host.py now also proves three unpaired callers are refused by the real host binary before I/O. The threat table gains an origin-spoofing row. Merged-main device evidence is retained in docs/evidence/0311-device.md: scripts/verify-device.sh passed all 28 steps at 74dcb80 on MacBook Pro 17,1 Apple M1 8GB, macOS 26.6.2 (summary SHA-256 fda0b6bbc0c4800f4dac328a98d6aa358151a9d0e302fd0a4a50582b4a2f0041).",
       "product_boundary": "LOOM remains local-first and evidence-first. Canonical source identity and evidence stay authoritative; derived indexes, model output, snapshots, and transport state remain inspectable, rebuildable, and explicitly uncertain."
     },
     {
@@ -1335,7 +1335,7 @@
     {
       "id": "0312",
       "title": "Bound provenance graph growth and compaction",
-      "status": "review",
+      "status": "done",
       "quarter": "Q06",
       "phase": "v0.3 Pattern",
       "workstream": "provenance",
@@ -1356,7 +1356,7 @@
         "phase:v0-3-pattern",
         "area:provenance"
       ],
-      "closure_evidence": "Schema v9 adds relationship source/target/edge indexes, envelope check triggers (non-empty kind and method, confidence required for inferred edges, on top of the existing origin and confidence-range column checks), a 10,000-relationship per-artifact budget, and compact_relationships / list_relationship_compactions (CLI compact-relationships, relationship-compactions) with a relationship_compactions table holding every removed row, the kept edge, and a BLAKE3 digest. Tests in crates/loom-core/tests/provenance_graph.rs: synthetic_graph_traversal_is_indexed_bounded_and_deterministic (1,000 artifacts, 50,000 edges, 5,000-edge hub; EXPLAIN QUERY PLAN is a multi-index OR search with no table scan; order matches (created_at, id) and survives reopen; traversal capped at 100), schema_checks_reject_malformed_envelopes_written_directly, per_artifact_budget_stops_unbounded_growth, compaction_removes_only_dominated_inferred_edges_and_preserves_lineage (observed and confirmed edges kept, digests recomputed, summaries survive portable export); schema_compatibility::v8_migration_adds_relationship_indexes_checks_and_compaction_table. No device evidence recorded yet.",
+      "closure_evidence": "Schema v9 adds relationship source/target/edge indexes, envelope check triggers (non-empty kind and method, confidence required for inferred edges, on top of the existing origin and confidence-range column checks), a 10,000-relationship per-artifact budget, and compact_relationships / list_relationship_compactions (CLI compact-relationships, relationship-compactions) with a relationship_compactions table holding every removed row, the kept edge, and a BLAKE3 digest. Tests in crates/loom-core/tests/provenance_graph.rs: synthetic_graph_traversal_is_indexed_bounded_and_deterministic (1,000 artifacts, 50,000 edges, 5,000-edge hub; EXPLAIN QUERY PLAN is a multi-index OR search with no table scan; order matches (created_at, id) and survives reopen; traversal capped at 100), schema_checks_reject_malformed_envelopes_written_directly, per_artifact_budget_stops_unbounded_growth, compaction_removes_only_dominated_inferred_edges_and_preserves_lineage (observed and confirmed edges kept, digests recomputed, summaries survive portable export); schema_compatibility::v8_migration_adds_relationship_indexes_checks_and_compaction_table. Merged-main device evidence is retained in docs/evidence/0312-device.md: scripts/verify-device.sh passed all 28 steps at 74dcb80 on MacBook Pro 17,1 Apple M1 8GB, macOS 26.6.2 (summary SHA-256 fda0b6bbc0c4800f4dac328a98d6aa358151a9d0e302fd0a4a50582b4a2f0041).",
       "product_boundary": "LOOM remains local-first and evidence-first. Canonical source identity and evidence stay authoritative; derived indexes, model output, snapshots, and transport state remain inspectable, rebuildable, and explicitly uncertain."
     },
     {
