@@ -73,6 +73,57 @@ pub struct HostConfig {
     pub key_id: String,
     pub pairing_secret: Vec<u8>,
     pub spool_root: PathBuf,
+    /// Browser callers allowed to launch this host, as normalized by [`caller_from_args`]:
+    /// `chrome-extension://<id>/` for Chromium browsers and `firefox:<id>` for Firefox.
+    pub allowed_callers: Vec<String>,
+}
+
+/// Identifies the browser extension that launched the host from its command-line arguments.
+///
+/// Chromium passes the caller origin (`chrome-extension://<id>/`) as the first argument, followed
+/// on Windows by `--parent-window=<handle>`. Firefox passes the path of the host manifest and then
+/// the calling extension's ID. Anything else yields `None`, which the host treats as untrusted.
+pub fn caller_from_args(args: &[String]) -> Option<String> {
+    if let Some(origin) = args
+        .first()
+        .and_then(|first| first.strip_prefix("chrome-extension://"))
+    {
+        let id = origin.strip_suffix('/')?;
+        let valid = id.len() == 32 && id.bytes().all(|byte| (b'a'..=b'p').contains(&byte));
+        return valid.then(|| format!("chrome-extension://{id}/"));
+    }
+    if args.len() == 2 && args[0].ends_with(".json") {
+        let id = &args[1];
+        let valid = !id.is_empty()
+            && id.len() <= 256
+            && id
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || b"@._-{}".contains(&byte));
+        return valid.then(|| format!("firefox:{id}"));
+    }
+    None
+}
+
+impl HostConfig {
+    /// Fails closed unless the launching extension is on the configured allowlist. The browser's
+    /// own host-manifest allowlist is the first check; this second check means a copied or
+    /// re-registered host binary still refuses an extension that was never paired.
+    pub fn verify_caller(&self, args: &[String]) -> Result<String, HostError> {
+        let caller = caller_from_args(args).ok_or_else(|| {
+            HostError::Configuration("the calling browser extension could not be identified".into())
+        })?;
+        if self
+            .allowed_callers
+            .iter()
+            .any(|allowed| allowed == &caller)
+        {
+            Ok(caller)
+        } else {
+            Err(HostError::Configuration(format!(
+                "browser extension {caller} is not paired with this host"
+            )))
+        }
+    }
 }
 
 impl HostConfig {
@@ -101,10 +152,25 @@ impl HostConfig {
         if key_id.is_empty() {
             return Err(HostError::Configuration("key id must not be empty".into()));
         }
+        let allowed_callers = std::env::var("LOOM_NATIVE_HOST_ALLOWED_CALLERS")
+            .map_err(|_| {
+                HostError::Configuration("LOOM_NATIVE_HOST_ALLOWED_CALLERS is not set".into())
+            })?
+            .split(',')
+            .map(str::trim)
+            .filter(|caller| !caller.is_empty())
+            .map(ToOwned::to_owned)
+            .collect::<Vec<_>>();
+        if allowed_callers.is_empty() {
+            return Err(HostError::Configuration(
+                "at least one allowed browser caller is required".into(),
+            ));
+        }
         Ok(Self {
             key_id,
             pairing_secret,
             spool_root,
+            allowed_callers,
         })
     }
 }
@@ -1202,6 +1268,8 @@ mod tests {
     use tempfile::tempdir;
 
     const KEY_ID: &str = "pairing-key-test-only";
+    const CHROME_CALLER: &str = "chrome-extension://abcdefghijklmnopabcdefghijklmnop/";
+    const FIREFOX_CALLER: &str = "firefox:loom-explicit-save@alisinadevelo.local";
     const REQUEST_ID: &str = "11111111-1111-4111-8111-111111111111";
     const NOW: &str = "2027-08-23T12:34:56Z";
 
@@ -1210,6 +1278,7 @@ mod tests {
             key_id: KEY_ID.into(),
             pairing_secret: (0u8..32).collect(),
             spool_root: root.to_path_buf(),
+            allowed_callers: vec![CHROME_CALLER.into(), FIREFOX_CALLER.into()],
         }
     }
 
@@ -1297,6 +1366,124 @@ mod tests {
             responses.push(parse_strict_json(&frame).unwrap());
         }
         responses
+    }
+
+    fn args(values: &[&str]) -> Vec<String> {
+        values.iter().map(|value| value.to_string()).collect()
+    }
+
+    #[test]
+    fn caller_identity_is_parsed_for_chrome_and_firefox_launches() {
+        assert_eq!(
+            caller_from_args(&args(&[
+                "chrome-extension://abcdefghijklmnopabcdefghijklmnop/"
+            ])),
+            Some(CHROME_CALLER.into())
+        );
+        assert_eq!(
+            caller_from_args(&args(&[
+                "chrome-extension://abcdefghijklmnopabcdefghijklmnop/",
+                "--parent-window=0"
+            ])),
+            Some(CHROME_CALLER.into())
+        );
+        assert_eq!(
+            caller_from_args(&args(&[
+                "/Library/Application Support/Mozilla/NativeMessagingHosts/com.alisinadevelo.loom.json",
+                "loom-explicit-save@alisinadevelo.local"
+            ])),
+            Some(FIREFOX_CALLER.into())
+        );
+    }
+
+    #[test]
+    fn spoofed_malformed_or_missing_callers_are_refused() {
+        let directory = tempdir().unwrap();
+        let config = config(directory.path());
+        for launch in [
+            args(&[]),
+            args(&["chrome-extension://zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz/"]),
+            args(&["chrome-extension://abcdefghijklmnopabcdefghijklmno/"]),
+            args(&["chrome-extension://abcdefghijklmnopabcdefghijklmnop"]),
+            args(&["chrome-extension://pppppppppppppppppppppppppppppppp/"]),
+            args(&["https://abcdefghijklmnopabcdefghijklmnop/"]),
+            args(&["manifest.json", "other-extension@example.test"]),
+            args(&[
+                "manifest.json",
+                "loom-explicit-save@alisinadevelo.local;rm -rf",
+            ]),
+            args(&["manifest.txt", "loom-explicit-save@alisinadevelo.local"]),
+            args(&[
+                "manifest.json",
+                "loom-explicit-save@alisinadevelo.local",
+                "extra",
+            ]),
+        ] {
+            assert!(config.verify_caller(&launch).is_err(), "{launch:?}");
+        }
+        assert_eq!(
+            config
+                .verify_caller(&args(&[
+                    "chrome-extension://abcdefghijklmnopabcdefghijklmnop/"
+                ]))
+                .unwrap(),
+            CHROME_CALLER
+        );
+    }
+
+    fn resign(mut value: Value) -> Value {
+        let canonical = canonical_without_mac(&value).unwrap();
+        let mut mac = HmacSha256::new_from_slice(&(0u8..32).collect::<Vec<_>>()).unwrap();
+        mac.update(&canonical);
+        value["auth"]["mac"] = Value::String(hex_encode(&mac.finalize().into_bytes()));
+        value
+    }
+
+    fn single_response(root: &Path, request: Value) -> Value {
+        let mut output = Vec::new();
+        NativeHost::new(config(root))
+            .run_at(&mut Cursor::new(framed(&[request])), &mut output, now())
+            .unwrap();
+        read_responses(&output).remove(0)
+    }
+
+    #[test]
+    fn boundary_rejects_downgrade_oversize_and_nested_secrets_without_writing() {
+        let directory = tempdir().unwrap();
+        let root = directory.path();
+        let base = request("not_requested", &[], 1);
+
+        let mut newer_major = base.clone();
+        newer_major["protocol"]["major"] = Value::from(2u64);
+        let mut older_major = base.clone();
+        older_major["protocol"]["major"] = Value::from(0u64);
+        let mut huge_selection = base.clone();
+        huge_selection["source"]["selected_text"] =
+            Value::String("x".repeat(MAX_SELECTED_TEXT_BYTES + 1));
+        let mut huge_snapshot = request("complete", b"<p>safe</p>", 1);
+        huge_snapshot["snapshot"]["bytes"] = Value::from(MAX_SNAPSHOT_BYTES as u64 + 1);
+        let mut nested_password = base.clone();
+        nested_password["source"]["password"] = Value::String("hunter2".into());
+
+        for (name, value, expected) in [
+            ("newer major", newer_major, "protocol_version_unsupported"),
+            ("older major", older_major, "protocol_version_unsupported"),
+            ("huge selection", huge_selection, "selected_text_too_large"),
+            ("huge snapshot", huge_snapshot, "payload_too_large"),
+            ("nested password", nested_password, "forbidden_field"),
+        ] {
+            let response = single_response(root, resign(value));
+            assert_eq!(response["error"], expected, "{name}");
+        }
+        assert!(fs::read_dir(root).unwrap().next().is_none());
+
+        let mut oversized_frame = Vec::new();
+        oversized_frame.extend_from_slice(&((MAX_FRAME_BYTES as u32) + 1).to_le_bytes());
+        oversized_frame.extend_from_slice(&vec![b' '; MAX_FRAME_BYTES + 1]);
+        assert!(NativeHost::new(config(root))
+            .run_at(&mut Cursor::new(oversized_frame), &mut Vec::new(), now())
+            .is_err());
+        assert!(fs::read_dir(root).unwrap().next().is_none());
     }
 
     #[test]
