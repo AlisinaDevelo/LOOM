@@ -116,6 +116,7 @@ without private routing metadata.
 - [Schema compatibility](docs/SCHEMA_COMPATIBILITY.md)
 - [Privacy](docs/PRIVACY.md)
 - [Threat model](docs/THREAT_MODEL.md)
+- [Portable export and encrypted backup](docs/PORTABILITY.md)
 - [Evaluation](docs/EVALUATION.md)
 - [v0.1 activation gate](docs/ACTIVATION_GATE.md)
 - [Participant worksheet](docs/studies/v0.1-participant-worksheet.md)

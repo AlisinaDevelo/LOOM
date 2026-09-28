@@ -1,16 +1,19 @@
 //! Canonical local storage, explicit-source ingestion, and evidence-first retrieval.
 
+mod backup;
 mod bookmarks;
 mod domain;
 mod error;
 mod ingest;
 mod observe;
 mod ocr;
+mod portable;
 mod ranking;
 mod search;
 mod semantic;
 mod store;
 
+pub use backup::{BackupOptions, BackupReport, RestoreReport};
 pub use bookmarks::parse_bookmark_export;
 pub use domain::{
     ArtifactObservation, BookmarkEntry, BookmarkExport, BookmarkImportReport, BookmarkRecord,
@@ -27,6 +30,10 @@ pub use domain::{
 };
 pub use error::{LoomError, Result};
 pub use observe::{coalesce_events, ObservationEvent, ObservationEventKind, ObservationPlan};
+pub use portable::{
+    PortableExport, PortableImportReport, PortableTable, EXPORT_FORMAT, EXPORT_FORMAT_VERSION,
+    IMPORTABLE_SCHEMA_VERSIONS,
+};
 pub use ranking::{
     fuse_hybrid_candidates, HybridRankConfig, HybridRankInput, HybridSearchHit,
     HybridSignalEvidence,

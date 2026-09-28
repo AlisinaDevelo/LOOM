@@ -67,6 +67,12 @@ pub enum LoomError {
     #[error("library lock is unavailable")]
     LockPoisoned,
 
+    #[error("portable export is invalid: {0}")]
+    PortableExport(String),
+
+    #[error("encrypted backup is invalid or the password is wrong: {0}")]
+    Backup(String),
+
     #[error("serialization error: {0}")]
     Serialization(#[from] serde_json::Error),
 }

@@ -166,6 +166,10 @@ impl Library {
         )
     }
 
+    pub(crate) fn set_ocr_enabled_cache(&self, enabled: bool) {
+        self.ocr_enabled.store(enabled, Ordering::SeqCst);
+    }
+
     fn from_connection(
         mut connection: Connection,
         limits: LibraryLimits,
@@ -2654,7 +2658,7 @@ impl Library {
         })
     }
 
-    fn lock(&self) -> Result<MutexGuard<'_, Connection>> {
+    pub(crate) fn lock(&self) -> Result<MutexGuard<'_, Connection>> {
         self.connection.lock().map_err(|_| LoomError::LockPoisoned)
     }
 

@@ -91,6 +91,9 @@ or content to the selected external application.
   nothing. Revoking the browser pairing keeps accepted captures on disk but unavailable. Deleting a
   capture removes its URLs, title, selection, redirects, and snapshot, leaving only a tombstone with
   the capture ID, state history, and snapshot hash. Credentials and referrers are never accepted.
+- `loom export` writes a plaintext portable export that contains passage text and source paths.
+  `loom backup` writes a password-encrypted backup (Argon2id and XChaCha20-Poly1305); the password is
+  read from a file or environment variable and never stored. See [PORTABILITY.md](PORTABILITY.md).
 
 Do not select confidential or regulated material unless you understand the local storage,
 operating-system, backup, and deletion implications. Treat the database and its WAL files as
