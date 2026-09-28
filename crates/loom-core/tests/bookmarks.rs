@@ -224,3 +224,233 @@ fn import_rejects_symlinks_before_parsing() {
     let library = Library::open_in_memory().unwrap();
     assert!(library.import_bookmarks(&link).is_err());
 }
+
+const FIREFOX_REALISTIC: &str = include_str!("fixtures/bookmarks/firefox-realistic.html");
+const MIXED_FAILURES: &str = include_str!("fixtures/bookmarks/mixed-failures.html");
+const MIXED_FIXED: &str = include_str!("fixtures/bookmarks/mixed-fixed.html");
+
+fn relationship_count(library: &Library) -> u64 {
+    library
+        .export_portable()
+        .unwrap()
+        .tables
+        .get("relationships")
+        .map_or(0, |table| table.rows.len() as u64)
+}
+
+#[test]
+fn imports_record_source_application_version_permissions_and_skipped_fields() {
+    let directory = tempdir().unwrap();
+    let firefox = directory.path().join("firefox.html");
+    let chrome = directory.path().join("chrome.html");
+    fs::write(&firefox, FIREFOX_REALISTIC).unwrap();
+    fs::write(&chrome, CHROME_EXPORT).unwrap();
+    let library = Library::open_in_memory().unwrap();
+    library.import_bookmarks(&firefox).unwrap();
+    library.import_bookmarks(&chrome).unwrap();
+
+    let imports = library.list_bookmark_imports(10).unwrap();
+    let firefox_import = imports
+        .iter()
+        .find(|import| import.source_uri.ends_with("firefox.html"))
+        .unwrap();
+    assert_eq!(firefox_import.source_application, "firefox");
+    assert_eq!(firefox_import.export_version, "netscape-bookmark-file-1");
+    assert_eq!(firefox_import.permissions, vec!["read_selected_file"]);
+    assert_eq!(
+        firefox_import.skipped_fields,
+        vec![
+            "icon",
+            "icon_uri",
+            "last_charset",
+            "personal_toolbar_folder",
+            "shortcuturl",
+            "tags"
+        ]
+    );
+    assert_eq!(firefox_import.status, "complete");
+    assert_eq!(firefox_import.items, 2);
+    assert!(firefox_import.failures.is_empty());
+    assert!(firefox_import.source_uri.starts_with('/'));
+
+    let chrome_import = imports
+        .iter()
+        .find(|import| import.source_uri.ends_with("chrome.html"))
+        .unwrap();
+    assert_eq!(chrome_import.source_application, "netscape_compatible");
+    assert_eq!(chrome_import.skipped_fields, Vec::<String>::new());
+}
+
+#[test]
+fn replaying_the_same_export_keeps_artifact_identity_and_adds_no_relationships() {
+    let directory = tempdir().unwrap();
+    let export = directory.path().join("Bookmarks.html");
+    fs::write(&export, FIREFOX_REALISTIC).unwrap();
+    let library = Library::open_in_memory().unwrap();
+
+    let first = library.import_bookmarks(&export).unwrap();
+    let records = library.list_bookmarks(10).unwrap();
+    let stats = library.stats().unwrap();
+    let relationships = relationship_count(&library);
+
+    let replay = library.import_bookmarks(&export).unwrap();
+    assert_eq!(replay.import_id, first.import_id);
+    assert_eq!(replay.unchanged, 2);
+    assert_eq!(library.list_bookmarks(10).unwrap(), records);
+    assert_eq!(library.stats().unwrap(), stats);
+    assert_eq!(relationship_count(&library), relationships);
+    assert_eq!(library.list_bookmark_imports(10).unwrap().len(), 1);
+
+    // Replaying the same export into a second library yields the same records and hashes.
+    let other = Library::open_in_memory().unwrap();
+    other.import_bookmarks(&export).unwrap();
+    let project = |library: &Library| {
+        library
+            .list_bookmarks(10)
+            .unwrap()
+            .into_iter()
+            .map(|record| (record.url, record.folder_path, record.entry_hash))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(project(&other), project(&library));
+}
+
+#[test]
+fn malformed_records_become_inspectable_failures_without_blocking_good_records() {
+    let directory = tempdir().unwrap();
+    let export = directory.path().join("Bookmarks.html");
+    fs::write(&export, MIXED_FAILURES).unwrap();
+    let library = Library::open_in_memory().unwrap();
+
+    let report = library.import_bookmarks(&export).unwrap();
+    assert_eq!(report.imported, 2);
+    assert_eq!(report.failed, 3);
+    assert_eq!(report.remote_fetches, 0);
+
+    let import = &library.list_bookmark_imports(10).unwrap()[0];
+    assert_eq!(import.status, "partial");
+    let codes = import
+        .failures
+        .iter()
+        .map(|failure| {
+            (
+                failure.ordinal,
+                failure.code.as_str(),
+                failure.state.as_str(),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        codes,
+        vec![
+            (1, "invalid_url", "pending"),
+            (2, "missing_href", "pending"),
+            (3, "empty_title", "pending")
+        ]
+    );
+    let serialized = serde_json::to_string(&library.list_bookmark_imports(10).unwrap()).unwrap();
+    assert!(!serialized.contains("secret-token-123"));
+    assert!(!serialized.contains("javascript:"));
+    let titles = library
+        .list_bookmarks(10)
+        .unwrap()
+        .into_iter()
+        .map(|record| record.title)
+        .collect::<Vec<_>>();
+    assert_eq!(titles, vec!["Good record one", "Good record two"]);
+
+    // Retrying the unchanged export replays the same import and keeps the failures pending.
+    let retry = library.retry_bookmark_import(&report.import_id).unwrap();
+    assert_eq!(retry.import_id, report.import_id);
+    assert_eq!(retry.failed, 3);
+
+    // Fixing the export and retrying resolves every earlier failure and keeps existing identity.
+    let before = library.list_bookmarks(10).unwrap();
+    fs::write(&export, MIXED_FIXED).unwrap();
+    let fixed = library.retry_bookmark_import(&report.import_id).unwrap();
+    assert_ne!(fixed.import_id, report.import_id);
+    assert_eq!(fixed.failed, 0);
+    assert_eq!(fixed.unchanged, 2);
+    let imports = library.list_bookmark_imports(10).unwrap();
+    let original = imports
+        .iter()
+        .find(|import| import.import_id == report.import_id)
+        .unwrap();
+    assert!(original
+        .failures
+        .iter()
+        .all(|failure| failure.state == "resolved"
+            && failure.resolved_by_import_id.as_deref() == Some(fixed.import_id.as_str())));
+    let after = library.list_bookmarks(10).unwrap();
+    for record in &before {
+        assert!(after
+            .iter()
+            .any(|kept| kept.id == record.id && kept.artifact_id == record.artifact_id));
+    }
+    assert_eq!(after.len(), 4);
+}
+
+#[test]
+fn revoked_exports_stay_inspectable_and_retry_requires_reselection() {
+    let directory = tempdir().unwrap();
+    let export = directory.path().join("Bookmarks.html");
+    fs::write(&export, MIXED_FAILURES).unwrap();
+    let library = Library::open_in_memory().unwrap();
+    let report = library.import_bookmarks(&export).unwrap();
+
+    library.revoke_source_root(&report.source_uri).unwrap();
+    let import = &library.list_bookmark_imports(10).unwrap()[0];
+    assert_eq!(import.status, "revoked");
+    assert_eq!(import.failures.len(), 3);
+    assert!(library.retry_bookmark_import(&report.import_id).is_err());
+    assert!(library
+        .search(&loom_core::SearchRequest {
+            text: "Good record".into(),
+            limit: 5,
+        })
+        .unwrap()
+        .is_empty());
+
+    // Explicitly selecting the export again restores the same import and records.
+    let reselected = library.import_bookmarks(&export).unwrap();
+    assert_eq!(reselected.import_id, report.import_id);
+    assert_eq!(
+        library.list_bookmark_imports(10).unwrap()[0].status,
+        "partial"
+    );
+    assert_eq!(
+        library
+            .search(&loom_core::SearchRequest {
+                text: "Good record".into(),
+                limit: 5,
+            })
+            .unwrap()
+            .len(),
+        2
+    );
+}
+
+#[test]
+fn structurally_broken_or_empty_exports_still_fail_closed() {
+    let directory = tempdir().unwrap();
+    let library = Library::open_in_memory().unwrap();
+    for (name, body) in [
+        (
+            "not-netscape.html",
+            "<DL><p><DT><A HREF=\"https://example.test\">x</A></DL>",
+        ),
+        (
+            "unterminated.html",
+            "<!DOCTYPE NETSCAPE-Bookmark-file-1><DL><p><DT><A HREF=\"https://example.test",
+        ),
+        (
+            "empty.html",
+            "<!DOCTYPE NETSCAPE-Bookmark-file-1><DL><p></DL>",
+        ),
+    ] {
+        let path = directory.path().join(name);
+        fs::write(&path, body).unwrap();
+        assert!(library.import_bookmarks(&path).is_err(), "{name}");
+    }
+    assert!(library.list_bookmark_imports(10).unwrap().is_empty());
+}

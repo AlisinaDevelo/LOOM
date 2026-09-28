@@ -69,7 +69,7 @@ fn comparable(mut export: PortableExport) -> PortableExport {
 fn export_import_round_trip_preserves_every_canonical_row_and_setting() {
     let (_directory, library) = populated();
     let export = library.export_portable().unwrap();
-    assert_eq!(export.library_schema_version, 7);
+    assert_eq!(export.library_schema_version, 8);
     assert_eq!(export.settings["retention_days"], "90");
     assert_eq!(export.settings["ocr_enabled"], "0");
     for table in [
@@ -118,6 +118,7 @@ fn imports_exports_from_both_supported_schema_revisions() {
     let mut v6 = library.export_portable().unwrap();
     v6.library_schema_version = 6;
     for table in [
+        "bookmark_import_failures",
         "bookmark_import_items",
         "bookmark_records",
         "bookmark_imports",
@@ -187,11 +188,62 @@ fn imports_exports_from_both_supported_schema_revisions() {
         1
     );
 
-    let v7 = library.export_portable().unwrap();
+    // Schema 7 exports predate the connector metadata columns and the failures table.
+    let mut v7 = library.export_portable().unwrap();
+    v7.library_schema_version = 7;
+    v7.tables.remove("bookmark_import_failures");
+    let imports = v7.tables.get_mut("bookmark_imports").unwrap();
+    let keep = imports
+        .columns
+        .iter()
+        .map(|column| {
+            ![
+                "source_application",
+                "export_version",
+                "permissions_json",
+                "skipped_fields_json",
+                "status",
+            ]
+            .contains(&column.as_str())
+        })
+        .collect::<Vec<_>>();
+    imports.columns = imports
+        .columns
+        .iter()
+        .zip(&keep)
+        .filter(|(_, keep)| **keep)
+        .map(|(column, _)| column.clone())
+        .collect();
+    for row in &mut imports.rows {
+        *row = row
+            .iter()
+            .zip(&keep)
+            .filter(|(_, keep)| **keep)
+            .map(|(value, _)| value.clone())
+            .collect();
+    }
+    v7.seal().unwrap();
+    let from_v7 = Library::open_in_memory().unwrap();
+    assert_eq!(
+        from_v7.import_portable(&v7).unwrap().source_schema_version,
+        7
+    );
+    let upgraded = from_v7.export_portable().unwrap();
+    let status = upgraded.tables["bookmark_imports"]
+        .columns
+        .iter()
+        .position(|column| column == "status")
+        .unwrap();
+    assert!(upgraded.tables["bookmark_imports"]
+        .rows
+        .iter()
+        .all(|row| row[status] == "complete"));
+
+    let v8 = library.export_portable().unwrap();
     let current = Library::open_in_memory().unwrap();
     assert_eq!(
-        current.import_portable(&v7).unwrap().source_schema_version,
-        7
+        current.import_portable(&v8).unwrap().source_schema_version,
+        8
     );
 
     let mut unsupported = library.export_portable().unwrap();

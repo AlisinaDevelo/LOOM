@@ -385,6 +385,39 @@ pub struct BookmarkImportReport {
     pub failures: Vec<IndexFailure>,
 }
 
+/// One bookmark record that an import could not accept. `detail` never repeats the record's URL
+/// or title.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BookmarkImportFailure {
+    pub ordinal: u32,
+    pub byte_offset: u64,
+    pub code: String,
+    pub detail: String,
+    /// `pending` until a newer import of the same export supersedes it, then `resolved`.
+    pub state: String,
+    pub resolved_by_import_id: Option<String>,
+    pub created_at: String,
+}
+
+/// A recorded bookmark import with the connector metadata needed to audit or replay it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BookmarkImportSummary {
+    pub import_id: String,
+    pub source_uri: String,
+    pub format: String,
+    pub content_hash: String,
+    pub imported_at: String,
+    /// `firefox` or `netscape_compatible` (Chrome, Edge, Safari, and others are indistinguishable).
+    pub source_application: String,
+    pub export_version: String,
+    pub permissions: Vec<String>,
+    pub skipped_fields: Vec<String>,
+    /// `complete`, `partial` (some records failed), or `revoked` (the export's root was revoked).
+    pub status: String,
+    pub items: u64,
+    pub failures: Vec<BookmarkImportFailure>,
+}
+
 /// Durable metadata for one current bookmark record.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BookmarkRecord {

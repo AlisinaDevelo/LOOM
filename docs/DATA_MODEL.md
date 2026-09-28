@@ -14,7 +14,8 @@ version matrix and migration policy are maintained in [SCHEMA_COMPATIBILITY.md](
 |artifact_versions|Immutable content observations|content_hash, byte_size, mtime, extractor/version, page_count, parse_warnings_json, extraction_metadata_json, status|
 |passages|Normalized text and exact anchors|artifact version, ordinal, text, text hash, JSON locator, character/line/pixel offsets|
 |relationships|Typed source-to-source relationships|source/target artifacts, kind, origin, optional evidence passage, method, confidence, metadata, relationship schema version|
-|bookmark_imports|One source-faithful local browser export|selected export locator, Netscape format, BLAKE3 export hash, import timestamp|
+|bookmark_imports|One source-faithful local browser export|selected export locator, Netscape format, BLAKE3 export hash, import timestamp, source application, export version, permissions, skipped fields, complete/partial/revoked status|
+|bookmark_import_failures|Per-record failures of one import|import, ordinal, byte offset, code, detail without URL or title, pending/resolved state, resolving import|
 |bookmark_records|Current bookmark metadata and artifact identity|folder path, title, URL, browser timestamps, entry hash, first import|
 |bookmark_import_items|Per-import idempotence and merge history|import, bookmark, ordinal, entry hash, imported/unchanged/merged/conflict outcome|
 |index_jobs|Durable progress for one root scan|discovery fingerprint, total/next unit, state, error, timestamps|
@@ -89,6 +90,15 @@ selected-file locator, format, BLAKE3 content hash, and import time. The hash/lo
 is unique, so repeating an unchanged export returns an `unchanged` report without writing another
 import. The parser is metadata-only: it preserves folder path, title, URL, `ADD_DATE`, and
 `LAST_MODIFIED`, rejects executable URL schemes, and never performs a network request.
+
+Each import also records the detected source application (`firefox`, or `netscape_compatible` for
+Chrome, Edge, Safari, and other exporters that cannot be told apart), the export version, the
+permissions the import used (`read_selected_file` only), and the attribute names it saw but did not
+keep, such as `icon`, `tags`, or `shortcuturl`. A malformed record (executable or invalid URL,
+missing link, empty title) no longer aborts the export: good records are imported, the bad record is
+stored in `bookmark_import_failures` without its URL or title, and the import is `partial`. A later
+import of the same export resolves earlier pending failures. Revoking the export's root marks its
+imports `revoked`; retry is then refused until the user selects the export again.
 
 `bookmark_records` is the current source-faithful view keyed by URL and folder path. Each record
 points to a searchable `text/x-bookmark` artifact and keeps its entry hash plus first import ID;

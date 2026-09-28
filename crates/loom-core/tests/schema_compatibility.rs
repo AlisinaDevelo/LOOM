@@ -62,7 +62,7 @@ fn populated_v3_migration_adds_pdf_metadata_without_rewriting_canonical_rows() {
             |row| row.get(0),
         )
         .unwrap();
-    assert_eq!(schema_version, "7");
+    assert_eq!(schema_version, "8");
     let (hash, warnings, page_count): (String, String, Option<i64>) = connection
         .query_row(
             "SELECT content_hash, parse_warnings_json, page_count
@@ -134,7 +134,7 @@ fn populated_v4_migration_adds_extraction_metadata_without_rewriting_rows() {
             |row| row.get(0),
         )
         .unwrap();
-    assert_eq!(schema_version, "7");
+    assert_eq!(schema_version, "8");
     let metadata: String = connection
         .query_row(
             "SELECT extraction_metadata_json FROM artifact_versions",
@@ -199,7 +199,7 @@ fn populated_v5_migration_adds_relationship_envelope_without_rewriting_rows() {
             |row| row.get(0),
         )
         .unwrap();
-    assert_eq!(schema_version, "7");
+    assert_eq!(schema_version, "8");
     let columns: (i64, String, String) = connection
         .query_row(
             "SELECT relationship_schema_version, origin, metadata_json
@@ -251,7 +251,7 @@ fn populated_v6_migration_adds_bookmark_tables_without_rewriting_canonical_rows(
             |row| row.get(0),
         )
         .unwrap();
-    assert_eq!(schema_version, "7");
+    assert_eq!(schema_version, "8");
     for table in [
         "bookmark_imports",
         "bookmark_records",
@@ -333,7 +333,7 @@ fn assert_preserved_v2_rows(library: &Library, database: &std::path::Path) {
             |row| row.get(0),
         )
         .unwrap();
-    assert_eq!(schema_version, "7");
+    assert_eq!(schema_version, "8");
 
     let (hash, extractor_id, extractor_version): (String, String, String) = connection
         .query_row(
@@ -446,4 +446,61 @@ fn search_marker(library: &Library) -> usize {
         })
         .unwrap()
         .len()
+}
+
+#[test]
+fn populated_v7_migration_adds_connector_metadata_without_rewriting_imports() {
+    let directory = tempdir().unwrap();
+    let database = directory.path().join("v7.sqlite3");
+    let export = directory.path().join("Bookmarks.html");
+    fs::write(&export, include_str!("fixtures/bookmarks/chrome.html")).unwrap();
+    let import_id = {
+        let library = Library::open(&database).unwrap();
+        library.import_bookmarks(&export).unwrap().import_id
+    };
+    let connection = Connection::open(&database).unwrap();
+    connection
+        .execute_batch(
+            "PRAGMA foreign_keys = OFF;
+             DROP TABLE bookmark_import_failures;
+             CREATE TABLE bookmark_imports_v7(
+                id TEXT PRIMARY KEY,
+                source_root_id TEXT NOT NULL REFERENCES source_roots(id) ON DELETE CASCADE,
+                source_locator TEXT NOT NULL,
+                format TEXT NOT NULL,
+                content_hash TEXT NOT NULL,
+                imported_at TEXT NOT NULL,
+                UNIQUE(source_locator, format, content_hash)
+             ) STRICT;
+             INSERT INTO bookmark_imports_v7
+               SELECT id, source_root_id, source_locator, format, content_hash, imported_at
+               FROM bookmark_imports;
+             DROP TABLE bookmark_imports;
+             ALTER TABLE bookmark_imports_v7 RENAME TO bookmark_imports;
+             UPDATE schema_meta SET value = '7' WHERE key = 'schema_version';",
+        )
+        .unwrap();
+    drop(connection);
+
+    let library = Library::open(&database).unwrap();
+    let imports = library.list_bookmark_imports(10).unwrap();
+    assert_eq!(imports.len(), 1);
+    assert_eq!(imports[0].import_id, import_id);
+    assert_eq!(imports[0].source_application, "unknown");
+    assert_eq!(imports[0].export_version, "unknown");
+    assert_eq!(imports[0].permissions, vec!["read_selected_file"]);
+    assert_eq!(imports[0].status, "complete");
+    assert!(imports[0].failures.is_empty());
+    assert_eq!(library.list_bookmarks(10).unwrap().len(), 1);
+    let replay = library.import_bookmarks(&export).unwrap();
+    assert_eq!(replay.import_id, import_id);
+    let connection = Connection::open(&database).unwrap();
+    let schema_version: String = connection
+        .query_row(
+            "SELECT value FROM schema_meta WHERE key = 'schema_version'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(schema_version, "8");
 }

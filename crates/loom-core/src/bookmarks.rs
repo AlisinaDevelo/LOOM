@@ -15,11 +15,73 @@ pub(crate) const BOOKMARK_EXTRACTOR_VERSION: &str = "0.1.0";
 
 type BookmarkTag = (usize, usize, bool, String, BTreeMap<String, String>);
 
+/// Attributes LOOM keeps from an anchor. Every other attribute is recorded as a skipped field.
+const RETAINED_ATTRIBUTES: &[&str] = &["href", "add_date", "last_modified"];
+
+/// What an import is allowed to do. Bookmark import reads one selected file and nothing else.
+pub(crate) const BOOKMARK_IMPORT_PERMISSIONS: &[&str] = &["read_selected_file"];
+
+/// One bookmark record that could not be imported. The detail never contains the record's URL or
+/// title, so a failure can be inspected without re-exposing unsafe content.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RecordFailure {
+    pub(crate) ordinal: u32,
+    pub(crate) byte_offset: usize,
+    pub(crate) code: &'static str,
+    pub(crate) detail: String,
+}
+
+/// A parsed export plus the connector metadata and per-record failures an import records.
+#[derive(Debug, Clone)]
+pub(crate) struct DetailedExport {
+    pub(crate) export: BookmarkExport,
+    pub(crate) source_application: &'static str,
+    pub(crate) export_version: &'static str,
+    pub(crate) skipped_fields: Vec<String>,
+    pub(crate) failures: Vec<RecordFailure>,
+    /// True when parsing stopped early, so records after the failure point were not seen.
+    pub(crate) truncated: bool,
+}
+
+/// Parses an export strictly: any malformed record fails the whole export.
 pub fn parse_bookmark_export(input: &str) -> Result<BookmarkExport> {
-    if !input
-        .to_ascii_lowercase()
-        .contains("netscape-bookmark-file-1")
+    let detailed = parse_bookmark_export_detailed(input)?;
+    if let Some(failure) = detailed.failures.first() {
+        return Err(LoomError::InvalidPath(failure.detail.clone()));
+    }
+    if detailed.export.bookmarks.is_empty() {
+        return Err(LoomError::InvalidPath(
+            "bookmark export contains no usable bookmarks".into(),
+        ));
+    }
+    Ok(detailed.export)
+}
+
+/// Firefox writes a Content-Security-Policy meta tag, a "Bookmarks Menu" heading, and Firefox-only
+/// attributes. Chrome, Edge, Safari, and other exporters share the plain Netscape format and are
+/// not distinguishable, so they are reported as `netscape_compatible`.
+fn detect_application(
+    lowered: &str,
+    attribute_names: &std::collections::BTreeSet<String>,
+) -> &'static str {
+    let firefox_attribute = ["icon_uri", "last_charset", "shortcuturl", "tags"]
+        .iter()
+        .any(|name| attribute_names.contains(*name));
+    if lowered.contains("content-security-policy")
+        || lowered.contains("<h1>bookmarks menu</h1>")
+        || firefox_attribute
     {
+        "firefox"
+    } else {
+        "netscape_compatible"
+    }
+}
+
+/// Parses an export leniently: structural damage (not Netscape HTML, an unterminated tag) still
+/// fails the export, but a bad record becomes a per-record failure and parsing continues.
+pub(crate) fn parse_bookmark_export_detailed(input: &str) -> Result<DetailedExport> {
+    let lowered = input.to_ascii_lowercase();
+    if !lowered.contains("netscape-bookmark-file-1") {
         return Err(LoomError::UnsupportedSource(
             "bookmark export is not Netscape HTML format".into(),
         ));
@@ -28,6 +90,10 @@ pub fn parse_bookmark_export(input: &str) -> Result<BookmarkExport> {
     let mut folders: Vec<String> = Vec::new();
     let mut pending_folder: Option<String> = None;
     let mut bookmarks = Vec::new();
+    let mut failures = Vec::new();
+    let mut attribute_names = std::collections::BTreeSet::new();
+    let mut ordinal = 0u32;
+    let mut truncated = false;
     while let Some((start, end, closing, name, attributes)) = next_tag(input, cursor)? {
         cursor = end;
         if closing {
@@ -37,6 +103,7 @@ pub fn parse_bookmark_export(input: &str) -> Result<BookmarkExport> {
             continue;
         }
         if name == "h3" {
+            attribute_names.extend(attributes.keys().cloned());
             let Some((text, after)) = inner_element(input, cursor, "h3")? else {
                 return Err(LoomError::InvalidPath(
                     "bookmark folder is not closed".into(),
@@ -57,6 +124,7 @@ pub fn parse_bookmark_export(input: &str) -> Result<BookmarkExport> {
         if name != "a" {
             continue;
         }
+        attribute_names.extend(attributes.keys().cloned());
         if pending_folder.is_some() {
             if let Some(folder) = pending_folder.take() {
                 if !folder.is_empty() {
@@ -64,23 +132,47 @@ pub fn parse_bookmark_export(input: &str) -> Result<BookmarkExport> {
                 }
             }
         }
+        let record = ordinal;
+        ordinal += 1;
+        let Some((text, after)) = inner_element(input, cursor, "a")? else {
+            failures.push(RecordFailure {
+                ordinal: record,
+                byte_offset: start,
+                code: "unclosed_anchor",
+                detail: "bookmark anchor is not closed".into(),
+            });
+            truncated = true;
+            break;
+        };
+        cursor = after;
         let Some(url) = attributes.get("href") else {
-            return Err(LoomError::InvalidPath(format!(
-                "bookmark anchor at byte {start} has no HREF"
-            )));
+            failures.push(RecordFailure {
+                ordinal: record,
+                byte_offset: start,
+                code: "missing_href",
+                detail: format!("bookmark anchor at byte {start} has no HREF"),
+            });
+            continue;
         };
         let url = clean_text(url);
-        validate_bookmark_url(&url)?;
-        let Some((text, after)) = inner_element(input, cursor, "a")? else {
-            return Err(LoomError::InvalidPath(
-                "bookmark anchor is not closed".into(),
-            ));
-        };
+        if let Err(error) = validate_bookmark_url(&url) {
+            failures.push(RecordFailure {
+                ordinal: record,
+                byte_offset: start,
+                code: "invalid_url",
+                detail: error.to_string(),
+            });
+            continue;
+        }
         let title = clean_text(&text);
         if title.is_empty() {
-            return Err(LoomError::InvalidPath(format!(
-                "bookmark at byte {start} has an empty title"
-            )));
+            failures.push(RecordFailure {
+                ordinal: record,
+                byte_offset: start,
+                code: "empty_title",
+                detail: format!("bookmark at byte {start} has an empty title"),
+            });
+            continue;
         }
         bookmarks.push(BookmarkEntry {
             folder_path: folders.join(" / "),
@@ -91,16 +183,22 @@ pub fn parse_bookmark_export(input: &str) -> Result<BookmarkExport> {
                 .get("last_modified")
                 .map(|value| clean_text(value)),
         });
-        cursor = after;
     }
-    if bookmarks.is_empty() {
-        return Err(LoomError::InvalidPath(
-            "bookmark export contains no usable bookmarks".into(),
-        ));
-    }
-    Ok(BookmarkExport {
-        format: "netscape_html".into(),
-        bookmarks,
+    let source_application = detect_application(&lowered, &attribute_names);
+    let skipped_fields = attribute_names
+        .into_iter()
+        .filter(|name| !RETAINED_ATTRIBUTES.contains(&name.as_str()))
+        .collect();
+    Ok(DetailedExport {
+        export: BookmarkExport {
+            format: "netscape_html".into(),
+            bookmarks,
+        },
+        source_application,
+        export_version: "netscape-bookmark-file-1",
+        skipped_fields,
+        failures,
+        truncated,
     })
 }
 
