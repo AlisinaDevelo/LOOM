@@ -899,7 +899,7 @@
     {
       "id": "0208",
       "title": "Polish an accessible evidence-first search workflow",
-      "status": "backlog",
+      "status": "review",
       "quarter": "Q04",
       "phase": "v0.2 Needle",
       "workstream": "foundation",
@@ -922,7 +922,7 @@
         "area:accessibility",
         "area:desktop"
       ],
-      "closure_evidence": "Record the exact tests, fixtures, measurements, review artifacts, or consented study evidence that satisfy every criterion; report only work actually performed.",
+      "closure_evidence": "Criteria 1 and 2: src/accessibility.test.tsx runs axe-core WCAG 2.0/2.1/2.2 A/AA rules on the empty, results, and evidence-viewer states and tests focus order, focus return on Close and Escape, and the polite live region; scripts/test-accessibility-contract.py checks 4.5:1 text and 3:1 control-border and focus-ring contrast on every panel background, enabled desktop zoom, no body min-width plus a 640px reflow breakpoint, 24px minimum targets, reduced motion, skip link, and shortcuts. Fixes in this change: focus returned to the trigger when the evidence viewer closes, Escape closes it, control borders raised from 1.41-1.87:1 to at least 3.3:1, zoom hotkeys enabled in tauri.conf.json, body min-width removed, scope actions and viewer controls brought to 24px targets. The focus-return and Escape tests fail on the previous App.tsx; reflow was checked in a browser at 320 CSS px with no horizontal overflow. See docs/ACCESSIBILITY.md. Criterion 3 (usability sessions confirming users understand why a result matched) has not been run; it needs participants.",
       "product_boundary": "LOOM remains local-first and evidence-first. Canonical source identity and evidence stay authoritative; derived indexes, model output, snapshots, and transport state remain inspectable, rebuildable, and explicitly uncertain."
     },
     {

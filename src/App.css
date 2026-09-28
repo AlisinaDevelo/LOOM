@@ -10,6 +10,8 @@
   --panel-raised: #1d201c;
   --line: #2d302a;
   --line-strong: #3e433a;
+  /* Borders that identify an interactive control: at least 3:1 on every panel (WCAG 1.4.11). */
+  --control-border: #6b7263;
   --text: #ebe9e4;
   --muted: #989d91;
   --faint: #a5ab9e;
@@ -20,9 +22,15 @@
 
 * { box-sizing: border-box; }
 html, body, #root { min-height: 100%; margin: 0; }
-body { min-width: 760px; min-height: 100vh; background: var(--canvas); }
+body { min-height: 100vh; background: var(--canvas); }
 button, input { font: inherit; }
 button { color: inherit; }
+
+/* Minimum pointer target (WCAG 2.5.8). Zero specificity, so components can grow but not shrink. */
+:where(button, input:not([type="checkbox"]):not([type="radio"]), select) {
+  min-height: 24px;
+}
+:where(button) { min-width: 24px; }
 
 :where(a, button, input, select, textarea):focus-visible {
   outline: 3px solid var(--thread);
@@ -138,7 +146,7 @@ nav { display: grid; gap: 6px; }
 .stat-grid dd { margin: 0 0 2px; font: 16px ui-monospace, monospace; }
 .add-source {
   width: 100%;
-  border: 1px solid var(--line-strong);
+  border: 1px solid var(--control-border);
   background: #242820;
   padding: 9px 10px;
   border-radius: 7px;
@@ -161,14 +169,14 @@ nav { display: grid; gap: 6px; }
 .storage-summary dd { margin: 0; color: #c5d79e; font: 10px ui-monospace, monospace; }
 .capture-controls { margin-top: 18px; padding-top: 14px; border-top: 1px solid var(--line); }
 .capture-button-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 5px; margin-top: 10px; }
-.capture-action { padding: 5px 3px; border: 1px solid var(--line-strong); border-radius: 5px; text-transform: capitalize; }
+.capture-action { padding: 5px 3px; border: 1px solid var(--control-border); border-radius: 5px; text-transform: capitalize; }
 .capture-action:disabled { cursor: not-allowed; opacity: 0.45; }
 .capture-context-fields { display: grid; gap: 4px; margin-top: 10px; }
 .capture-context-fields label { color: var(--muted); font-size: 9px; }
 .capture-context-fields input, .capture-exclusion-row input {
   min-width: 0;
   width: 100%;
-  border: 1px solid var(--line);
+  border: 1px solid var(--control-border);
   border-radius: 5px;
   padding: 5px 6px;
   color: var(--text);
@@ -189,7 +197,7 @@ nav { display: grid; gap: 6px; }
 .scope-unsafe .scope-status, .scope-unavailable .scope-status { color: var(--warm); }
 .scope-revoked .scope-status { color: var(--faint); }
 .scope-actions { display: flex; justify-content: flex-end; gap: 7px; }
-.scope-action { border: 0; padding: 2px 0; background: transparent; color: var(--thread); font: 9px ui-monospace, monospace; cursor: pointer; }
+.scope-action { border: 0; padding: 5px 2px; background: transparent; color: var(--thread); font: 9px ui-monospace, monospace; cursor: pointer; }
 .scope-action:hover:not(:disabled) { text-decoration: underline; }
 .scope-action:disabled { cursor: wait; opacity: 0.5; }
 .scope-revoke { color: #d49b86; }
@@ -249,7 +257,7 @@ h1 { margin: 0; font: 500 clamp(34px, 5vw, 54px)/1.04 Georgia, serif; letter-spa
   height: 62px;
   padding: 7px 8px 7px 20px;
   background: var(--panel-raised);
-  border: 1px solid var(--line-strong);
+  border: 1px solid var(--control-border);
   border-radius: 12px;
   box-shadow: 0 20px 60px rgba(0, 0, 0, 0.2);
 }
@@ -406,7 +414,10 @@ h1 { margin: 0; font: 500 clamp(34px, 5vw, 54px)/1.04 Georgia, serif; letter-spa
 .evidence-location { margin: 6px 0 0; color: var(--muted); font: 9px ui-monospace, monospace; }
 .viewer-actions { display: flex; align-items: center; gap: 7px; }
 .viewer-close, .viewer-control {
-  border: 1px solid var(--line-strong);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--control-border);
   border-radius: 6px;
   background: transparent;
   color: var(--muted);
@@ -572,6 +583,20 @@ mark {
   .workspace { grid-column: 2; padding-inline: 26px; }
   .evidence-row span:nth-child(3) { display: none; }
   .relationship-endpoints { grid-template-columns: 1fr; }
+}
+
+/* Reflow (WCAG 1.4.10): at high zoom the sidebar stacks above the workspace instead of forcing
+   horizontal scrolling. */
+@media (max-width: 640px) {
+  .app-shell { display: block; }
+  .sidebar { position: static; width: auto; border-right: 0; border-bottom: 1px solid var(--line); }
+  .workspace { padding-inline: 16px; }
+  .search-form { flex-wrap: wrap; height: auto; padding: 10px 12px; }
+  .search-form input { flex-basis: 60%; }
+  .keyboard-hints { display: none; }
+  .result-card { grid-template-columns: 1fr; }
+  .relationship-endpoints { grid-template-columns: 1fr; }
+  .notice { white-space: normal; }
 }
 
 @media (prefers-reduced-motion: reduce) {

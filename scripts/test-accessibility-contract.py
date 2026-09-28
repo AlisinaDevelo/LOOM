@@ -8,6 +8,7 @@ reduced-motion, and the selected AA text-color budget from regressing silently.
 
 from __future__ import annotations
 
+import json
 import re
 import unittest
 from pathlib import Path
@@ -16,6 +17,12 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 APP = (ROOT / "src" / "App.tsx").read_text()
 CSS = (ROOT / "src" / "App.css").read_text()
+INDEX = (ROOT / "index.html").read_text()
+TAURI = json.loads((ROOT / "src-tauri" / "tauri.conf.json").read_text())
+
+# Backgrounds that text and controls sit on: canvas, panels, sidebar, and scope rows.
+BACKGROUNDS = ("--canvas", "--panel", "--panel-raised")
+LITERAL_BACKGROUNDS = ("#141612", "#151814", "#11130f")
 
 
 def luminance(color: str) -> float:
@@ -70,6 +77,47 @@ class AccessibilityContractTests(unittest.TestCase):
                 4.5,
                 f"{variable} must meet 4.5:1 against {background}",
             )
+
+    def test_text_tokens_meet_aa_on_every_panel_background(self) -> None:
+        backgrounds = [css_color(token) for token in BACKGROUNDS] + list(LITERAL_BACKGROUNDS)
+        for variable in ("--text", "--muted", "--faint", "--thread", "--warm"):
+            for background in backgrounds:
+                self.assertGreaterEqual(
+                    contrast(css_color(variable), background),
+                    4.5,
+                    f"{variable} must meet 4.5:1 against {background}",
+                )
+
+    def test_control_borders_and_focus_ring_meet_non_text_contrast(self) -> None:
+        backgrounds = [css_color(token) for token in BACKGROUNDS] + list(LITERAL_BACKGROUNDS)
+        for variable in ("--control-border", "--thread"):
+            for background in backgrounds:
+                self.assertGreaterEqual(
+                    contrast(css_color(variable), background),
+                    3.0,
+                    f"{variable} must meet 3:1 against {background} (WCAG 1.4.11)",
+                )
+        for selector in (".search-form {", ".capture-context-fields input", ".viewer-close, .viewer-control {"):
+            block = CSS[CSS.index(selector) :]
+            block = block[: block.index("}")]
+            self.assertIn("var(--control-border)", block, selector)
+
+    def test_desktop_zoom_and_reflow_are_allowed(self) -> None:
+        window = TAURI["app"]["windows"][0]
+        self.assertTrue(window.get("zoomHotkeysEnabled"), "webview zoom must be enabled (WCAG 1.4.4)")
+        self.assertNotIn("user-scalable=no", INDEX)
+        self.assertNotIn("maximum-scale", INDEX)
+        self.assertIsNone(re.search(r"(?m)^body\s*\{[^}]*min-width", CSS), "body min-width blocks reflow")
+        self.assertIn("@media (max-width: 640px)", CSS)
+
+    def test_pointer_targets_have_a_minimum_size(self) -> None:
+        self.assertIn(':where(button, input:not([type="checkbox"]):not([type="radio"]), select)', CSS)
+        self.assertIn("min-height: 24px;", CSS)
+        self.assertIn(":where(button) { min-width: 24px; }", CSS)
+
+    def test_evidence_viewer_returns_focus_and_closes_on_escape(self) -> None:
+        for marker in ("evidenceTriggerRef", 'event.key === "Escape"', 'aria-keyshortcuts="Escape"'):
+            self.assertIn(marker, APP)
 
 
 if __name__ == "__main__":
