@@ -87,6 +87,18 @@ No desktop screenshot was used as evidence. If a future handoff includes a visua
 it must be cropped to the relevant LOOM/result panel only, with no full desktop, credentials,
 source paths, or private documents.
 
-Issue #31 remains open in `review` until the merged-main desktop compile/test gate can be
-rerun on a device with sufficient free storage and the packaged interactive viewer is
-verified.
+## Merged-main desktop rerun (2026-09-28)
+
+With enough free storage, `scripts/verify-device.sh` was rerun on the same Mac at merged-main
+`f0352715f41985dfba4d1aa6f8c48806d4d0f16d`, which includes this relationship work. All 28 steps
+passed (`summary.txt` SHA-256 `935a5c1f77e804911a5675a0eaecf1f2f8a954f51585d8920b19269da660bb31`,
+`log-sha256.txt` SHA-256 `c406efb31007b6d56536ec34c4c36d87a19f34a4dea8ede1dde1b8640b32555c`),
+including `cargo clippy --workspace --all-targets`, the locked workspace test profile (139
+passed, 0 failed; `rust-workspace.log` SHA-256
+`36ca1b4ec5c9799ba50cd8d46a759e77d135f2741ef3ef9b3a977b270359550d`), the Rust 1.88 workspace
+check, and `npm run tauri build -- --debug --no-bundle` (`tauri-build.log` SHA-256
+`c4b6bee208700406f70bb46424727196867ffe803d5e830ec468eac5f7b9903d`). This clears the earlier
+`ENOSPC` limitation for the desktop compile/test gate.
+
+Issue #31 remains open in `review` until the packaged interactive viewer is verified by a person
+on the device; no interactive session is claimed here.

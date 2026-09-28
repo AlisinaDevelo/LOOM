@@ -1218,7 +1218,7 @@
     {
       "id": "0310",
       "title": "Define capture consent and snapshot retention states",
-      "status": "review",
+      "status": "done",
       "quarter": "Q05",
       "phase": "v0.3 Pattern",
       "workstream": "privacy",
@@ -1240,7 +1240,7 @@
         "phase:v0-3-pattern",
         "area:privacy"
       ],
-      "closure_evidence": "State machine in crates/loom-browser-capture/src/lifecycle.rs with the exhaustive transition fixture crates/loom-browser-capture/fixtures/lifecycle-v1.json (all 36 state/event pairs). Tests: lifecycle::tests::transition_fixture_covers_every_state_and_event, terminal_states_accept_no_event, only_accepted_revoked_and_deleted_are_persisted, protocol_documents_every_state_message, rejection_codes_map_to_rejected_or_expired; tests::accepted_capture_records_requested_and_accepted_transitions, lifecycle_fixture_revoke_repair_delete_leaves_no_managed_copy (a host-accepted capture is revoked, re-paired, revoked, and deleted; no spool file retains its URLs, title, selection, or snapshot bytes, and the tombstone keeps only the allowed fields), deletion_rejects_unknown_and_malformed_request_ids, rejected_and_expired_requests_persist_nothing; and the extension test 'lifecycle copy matches the protocol and maps host responses'. Per-state URL, snapshot, credential, and referrer handling is documented in docs/protocol/browser-capture-v1.md and docs/PRIVACY.md. Spooled captures are not yet indexed into the searchable library, so no searchable derivative exists to purge; the protocol requires indexing to purge by capture locator when it lands. No device or consented-session evidence was collected.",
+      "closure_evidence": "State machine in crates/loom-browser-capture/src/lifecycle.rs with the exhaustive transition fixture crates/loom-browser-capture/fixtures/lifecycle-v1.json (all 36 state/event pairs). Tests: lifecycle::tests::transition_fixture_covers_every_state_and_event, terminal_states_accept_no_event, only_accepted_revoked_and_deleted_are_persisted, protocol_documents_every_state_message, rejection_codes_map_to_rejected_or_expired; tests::accepted_capture_records_requested_and_accepted_transitions, lifecycle_fixture_revoke_repair_delete_leaves_no_managed_copy (a host-accepted capture is revoked, re-paired, revoked, and deleted; no spool file retains its URLs, title, selection, or snapshot bytes, and the tombstone keeps only the allowed fields), deletion_rejects_unknown_and_malformed_request_ids, rejected_and_expired_requests_persist_nothing; and the extension test 'lifecycle copy matches the protocol and maps host responses'. Per-state URL, snapshot, credential, and referrer handling is documented in docs/protocol/browser-capture-v1.md and docs/PRIVACY.md. Spooled captures are not yet indexed into the searchable library, so no searchable derivative exists to purge; the protocol requires indexing to purge by capture locator when it lands. Merged-main device evidence is retained in docs/evidence/0310-device.md: scripts/verify-device.sh passed all 28 steps at f0352715f41985dfba4d1aa6f8c48806d4d0f16d on MacBook Pro 17,1 Apple M1 8GB, macOS 26.6.2 (summary SHA-256 935a5c1f77e804911a5675a0eaecf1f2f8a954f51585d8920b19269da660bb31).",
       "product_boundary": "LOOM remains local-first and evidence-first. Canonical source identity and evidence stay authoritative; derived indexes, model output, snapshots, and transport state remain inspectable, rebuildable, and explicitly uncertain."
     },
     {
