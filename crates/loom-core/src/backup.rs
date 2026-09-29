@@ -135,9 +135,10 @@ fn unhex(text: &str, length: usize) -> Result<Vec<u8>> {
         b'a'..=b'f' => Ok(byte - b'a' + 10),
         _ => Err(backup_error("malformed header")),
     };
-    bytes
-        .chunks_exact(2)
-        .map(|pair| Ok(nibble(pair[0])? << 4 | nibble(pair[1])?))
+    let (pairs, _) = bytes.as_chunks::<2>();
+    pairs
+        .iter()
+        .map(|[high, low]| Ok(nibble(*high)? << 4 | nibble(*low)?))
         .collect()
 }
 
