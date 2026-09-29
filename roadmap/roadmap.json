@@ -928,7 +928,7 @@
     {
       "id": "0209",
       "title": "Add intentional screenshot and region capture",
-      "status": "backlog",
+      "status": "review",
       "quarter": "Q04",
       "phase": "v0.2 Needle",
       "workstream": "foundation",
@@ -952,7 +952,7 @@
         "area:desktop",
         "area:privacy"
       ],
-      "closure_evidence": "Record the exact tests, fixtures, measurements, review artifacts, or consented study evidence that satisfy every criterion; report only work actually performed.",
+      "closure_evidence": "Implemented in PR #207; evidence in docs/evidence/0209-device.md. Capture records original pixels, BLAKE3 hash, capture time, display scale, bounds, and app/window context before OCR; exclusions, pause, duplicates, and purge are covered by the capture tests plus capture_policy::tests (#281) and the capture commit tests (#283). Merged-main verify-device.sh passed all 28 steps at 74dcb80 including the Tauri debug build, clearing the earlier ENOSPC packaging gap. The consented interactive Screen Recording permission session has not been run.",
       "product_boundary": "LOOM remains local-first and evidence-first. Canonical source identity and evidence stay authoritative; derived indexes, model output, snapshots, and transport state remain inspectable, rebuildable, and explicitly uncertain."
     },
     {

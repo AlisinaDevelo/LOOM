@@ -76,3 +76,26 @@ does not claim background capture; the implementation deliberately excludes it.
 No user files or live screen contents were read or uploaded. The live issue stays
 open until the permission path and packaging are exercised on a device with
 enough free space, with any captured evidence cropped to the relevant region.
+
+## Merged-main rerun (2026-09-29)
+
+With enough free storage, `scripts/verify-device.sh` passed all 28 steps at merged-main `74dcb80` on
+the same MacBook Pro M1 (`summary.txt` SHA-256
+`fda0b6bbc0c4800f4dac328a98d6aa358151a9d0e302fd0a4a50582b4a2f0041`), including
+`npm run tauri build -- --debug --no-bundle` (`tauri-build.log` SHA-256
+`fa3f303790e35c8b79bd65d7c075fa765e83d447c376d1d5503896a0fc8cd9ed`). This clears the `ENOSPC`
+packaging limitation above.
+
+Capture regression coverage added since the original record also passed in that run:
+
+- `capture_policy::tests` (ten tests, #281): a missing policy is the first-run default; unreadable,
+  symlinked, oversized, malformed, or unknown-version policies load paused; failed writes and
+  renames change neither memory nor disk; a rejected policy cannot resume until exclusions are
+  re-saved.
+- `invalid_or_empty_capture_output_is_never_committed` and
+  `valid_capture_commits_once_and_duplicates_keep_the_original` (#283): capture storage never holds
+  pixels that failed validation or indexing, and duplicates keep the original.
+
+The roadmap status moves from `backlog` to `review`. The interactive Screen Recording permission
+session is still not claimed; issue #28 stays open for it.
+
