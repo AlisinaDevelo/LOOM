@@ -9,9 +9,10 @@ use tempfile::{tempdir, TempDir};
 
 const CHROME_EXPORT: &str = include_str!("fixtures/bookmarks/chrome.html");
 const PASSWORD: &[u8] = b"correct horse battery staple";
+/// The cheapest cost the public API accepts (the OWASP Argon2id floor).
 const FAST: BackupOptions = BackupOptions {
-    kdf_memory_kib: 64,
-    kdf_iterations: 1,
+    kdf_memory_kib: loom_core::MIN_KDF_MEMORY_KIB,
+    kdf_iterations: loom_core::MIN_KDF_ITERATIONS,
     kdf_parallelism: 1,
 };
 
@@ -429,4 +430,85 @@ fn tampered_truncated_or_wrong_password_backups_never_create_a_library() {
     if restore_dir.exists() {
         assert_eq!(fs::read_dir(&restore_dir).unwrap().count(), 0);
     }
+}
+
+#[test]
+fn weak_key_derivation_options_are_refused_when_writing() {
+    let (directory, library) = populated();
+    for weak in [
+        BackupOptions {
+            kdf_memory_kib: 64,
+            ..FAST
+        },
+        BackupOptions {
+            kdf_iterations: 1,
+            ..FAST
+        },
+    ] {
+        let path = directory.path().join("weak.loombak");
+        assert!(library
+            .write_encrypted_backup(&path, PASSWORD, weak)
+            .is_err());
+        assert!(!path.exists());
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn restore_sweeps_stale_staging_and_rejects_non_regular_inputs() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let (directory, library) = populated();
+    let backup = directory.path().join("library.loombak");
+    library
+        .write_encrypted_backup(&backup, PASSWORD, FAST)
+        .unwrap();
+    let restore_dir = directory.path().join("restore");
+    fs::create_dir(&restore_dir).unwrap();
+    let stale = restore_dir.join(".loom-restore-stale");
+    fs::create_dir(&stale).unwrap();
+    fs::write(stale.join("library.sqlite3"), b"leftover plaintext").unwrap();
+    let old = std::time::SystemTime::now() - std::time::Duration::from_secs(7200);
+    fs::File::open(&stale).unwrap().set_modified(old).unwrap();
+
+    Library::restore_encrypted_backup(&backup, PASSWORD, restore_dir.join("library.sqlite3"))
+        .unwrap();
+    let names = fs::read_dir(&restore_dir)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        names,
+        vec!["library.sqlite3"],
+        "staging left behind: {names:?}"
+    );
+    let reopened = Library::open(restore_dir.join("library.sqlite3")).unwrap();
+    assert!(reopened.stats().unwrap().passages > 0);
+
+    let not_a_file = directory.path().join("folder.loombak");
+    fs::create_dir(&not_a_file).unwrap();
+    assert!(Library::restore_encrypted_backup(
+        &not_a_file,
+        PASSWORD,
+        restore_dir.join("b.sqlite3")
+    )
+    .is_err());
+    assert!(fs::metadata(&restore_dir).unwrap().permissions().mode() & 0o777 != 0);
+}
+
+#[test]
+fn integers_beyond_sqlite_range_are_rejected_on_import() {
+    let (_directory, library) = populated();
+    let mut export = library.export_portable().unwrap();
+    let versions = export.tables.get_mut("artifact_versions").unwrap();
+    let byte_size = versions
+        .columns
+        .iter()
+        .position(|column| column == "byte_size")
+        .unwrap();
+    versions.rows[0][byte_size] = json!(u64::MAX);
+    export.seal().unwrap();
+    let target = Library::open_in_memory().unwrap();
+    assert!(target.import_portable(&export).is_err());
+    assert_eq!(target.stats().unwrap().artifacts, 0);
 }

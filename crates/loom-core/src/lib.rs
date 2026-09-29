@@ -13,7 +13,10 @@ mod search;
 mod semantic;
 mod store;
 
-pub use backup::{BackupOptions, BackupReport, RestoreReport};
+pub use backup::{
+    read_bounded_file, BackupOptions, BackupReport, RestoreReport, MAX_BACKUP_BYTES,
+    MIN_KDF_ITERATIONS, MIN_KDF_MEMORY_KIB,
+};
 pub use bookmarks::parse_bookmark_export;
 pub use domain::{
     ArtifactObservation, BookmarkEntry, BookmarkExport, BookmarkImportFailure,
