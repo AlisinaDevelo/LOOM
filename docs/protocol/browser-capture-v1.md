@@ -136,7 +136,14 @@ match the request hash. `failed` and `not_requested` requests have no payload fr
    request. A major mismatch is `protocol_version_unsupported`.
 6. `session.counter` is strictly increasing and `request_id` is single-use within the session.
    The host rejects duplicate or older counters, expired timestamps (more than two minutes of
-   clock skew), expired sessions, and reused intent tokens as `replay_rejected`.
+   clock skew), expired sessions, and reused intent tokens as `replay_rejected`. Browsers start a
+   new host process for every connection, so this state is kept in a replay ledger
+   (`.loom-replay-ledger.json` in the spool) rather than in memory: per-session counters, SHA-256
+   fingerprints of used request IDs and intent tokens (never the raw values), and the last minute of
+   acceptance times for the rate limit. It is updated under an exclusive lock file so concurrent
+   host processes cannot both accept one request; a corrupt or unknown-version ledger rejects every
+   request as `replay_state_unavailable`. Independently of the ledger, committing a capture never
+   replaces an existing spool record or snapshot.
 7. `intent.kind=user_gesture` and a fresh, single-use intent token are mandatory. The extension
    may mint that token only in the visible command handler. The host rejects missing, expired, or
    already-used tokens as `capture_not_approved`; it never accepts a timer, page script, history
@@ -264,7 +271,7 @@ purge or hide the derived rows for the capture locator.
 | Compromised extension | Pairing secret, user gesture token, revocation, explicit scope, no history APIs | `capture_not_approved` or a user-visible capture record |
 | Native messaging spoof | Browser allowlist, signed executable path, no listening socket | Session challenge/proof failure |
 | Origin spoofing | Host-side paired-caller allowlist over the browser-reported origin or extension ID | Host exits before reading input; nothing is spooled |
-| Replay | Session expiry, monotonic counter, single-use request and intent IDs | `replay_rejected` |
+| Replay | Session expiry, monotonic counter, single-use request and intent IDs in a persisted replay ledger; no-overwrite spool commit | `replay_rejected` |
 | Downgrade | Major-version match and negotiated minor feature set | `protocol_version_unsupported` |
 | Sensitive fields | Explicit exclusion list and selection preview | Field is absent; user can cancel |
 | Redirect abuse | Bounded chain, same-origin default, no host-side fetch | `cross_origin_redirect` partial state |

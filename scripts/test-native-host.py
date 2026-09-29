@@ -278,7 +278,9 @@ def main() -> int:
             raise AssertionError("accepted sanitized snapshot was not spooled")
         if list(spool.glob("*.html")) != [spool / f"{first['request_id']}.html"]:
             raise AssertionError("rejected/replayed snapshots left files behind")
-        if list(spool.glob("*.json")) != [spool / f"{first['request_id']}.json"]:
+        # The replay ledger (a dot-file of hashes) is not a capture record.
+        records = [path for path in spool.glob("*.json") if not path.name.startswith(".")]
+        if records != [spool / f"{first['request_id']}.json"]:
             raise AssertionError("metadata spool is not one accepted capture")
     print(
         "native host device contract: PASS (1 accepted, 4 deterministic rejections, "

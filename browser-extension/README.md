@@ -31,6 +31,14 @@ node --test browser-extension/test/capture.test.js
 python3 scripts/test-native-host.py --host target/debug/loom-native-host
 ```
 
+`scripts/firefox-native-session.sh` runs the same host against a real Firefox. It loads the
+extension as a temporary add-on in a throwaway headless profile over WebDriver BiDi, registers the
+built host only for the run (and removes the registration afterwards), and checks that a save is
+accepted, a replay on a new connection is rejected without changing the stored record, and an
+unpaired extension is refused. It drives the extension's capture builder and native port from a
+test page, so it does not exercise the toolbar gesture or the `activeTab` grant. Chrome is not
+covered: branded Chrome no longer loads unpacked extensions from the command line.
+
 The suite covers sanitization and remote-execution removal, authenticated payload construction,
 same/cross-origin redirect semantics, oversized snapshots, offline pages, denied page access, and
 the exact permission sets in both manifests. The native-host smoke test covers real framing,
