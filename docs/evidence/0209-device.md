@@ -98,4 +98,3 @@ Capture regression coverage added since the original record also passed in that 
 
 The roadmap status moves from `backlog` to `review`. The interactive Screen Recording permission
 session is still not claimed; issue #28 stays open for it.
-
