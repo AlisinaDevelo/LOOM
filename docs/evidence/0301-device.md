@@ -107,3 +107,29 @@ credentials, or private documents.
 The repository owner is the only available GitHub reviewer, so no independent approval is claimed.
 Issue #30 remains open in `review` until the consented interactive browser/native-host session is
 run on this Mac or an equivalent permitted target.
+
+## Real Firefox native-messaging session (2026-09-29)
+
+`scripts/firefox-native-session.sh` was run at merged-main `ea19dbd` on this Mac with Firefox
+152.0.4. It loads the extension as a temporary add-on in a throwaway headless profile over WebDriver
+BiDi, registers the built `loom-native-host` for the run only, and removes the registration
+afterwards; other native-messaging registrations on the machine were untouched.
+
+| Scenario | Result |
+| --- | --- |
+| Paired save through the extension's capture builder and `runtime.connectNative` | `capture.accepted`; record and snapshot spooled |
+| Replay of the same request on a new connection | `capture.rejected` / `replay_rejected`; stored record byte-for-byte unchanged |
+| Extension not on the host's paired-caller allowlist | Host refused before any I/O; Firefox reported a disconnect |
+
+Firefox launched the host with the manifest path and extension ID as arguments, matching the caller
+check added in #299. The first run of this session found #303: replay protection lived in host
+memory, and Firefox starts a new host per connection, so a replayed request was accepted and
+overwrote the earlier capture. #304 persisted the replay ledger and made the spool commit
+no-overwrite; the replay row above is from the fixed build. Session output SHA-256:
+`c4dd4b4e82ff4f252ad6c43ba173eab2d44af81dab48c0fd4af4e8145135a029`.
+
+This session drives the extension's real capture builder and native port from a test page. It does
+not press the toolbar button or keyboard shortcut, so the visible-gesture and `activeTab` grant are
+not exercised, and Chrome is not covered because branded Chrome no longer loads unpacked extensions
+from the command line. Issue #30 stays open for one person-driven save in each browser.
+
