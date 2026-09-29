@@ -11,7 +11,6 @@ use hmac::{Hmac, KeyInit, Mac};
 use serde::de::{DeserializeSeed, MapAccess, SeqAccess, Visitor};
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
-use std::collections::{HashSet, VecDeque};
 use std::fs::{self, OpenOptions};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
@@ -22,6 +21,7 @@ use uuid::{Uuid, Version};
 type HmacSha256 = Hmac<Sha256>;
 
 pub mod lifecycle;
+pub mod replay;
 
 pub const PROTOCOL_MAJOR: u64 = 1;
 pub const PROTOCOL_MINOR: u64 = 0;
@@ -187,21 +187,11 @@ pub struct AcceptedCapture {
 #[derive(Debug)]
 pub struct NativeHost {
     config: HostConfig,
-    last_counter: Option<u64>,
-    seen_request_ids: HashSet<String>,
-    seen_intent_tokens: HashSet<String>,
-    accepted_at: VecDeque<DateTime<Utc>>,
 }
 
 impl NativeHost {
     pub fn new(config: HostConfig) -> Self {
-        Self {
-            config,
-            last_counter: None,
-            seen_request_ids: HashSet::new(),
-            seen_intent_tokens: HashSet::new(),
-            accepted_at: VecDeque::new(),
-        }
+        Self { config }
     }
 
     pub fn config(&self) -> &HostConfig {
@@ -263,37 +253,38 @@ impl NativeHost {
     ) -> Result<AcceptedCapture, Rejection> {
         let request = validate_capture_request(&value, &self.config, now)
             .map_err(|code| self.rejection(code, request_id_from(&value)))?;
-        if self.seen_request_ids.contains(&request.request_id)
-            || self
-                .last_counter
-                .is_some_and(|last| request.counter <= last)
-        {
-            self.discard_payloads(&value, reader);
-            return Err(self.rejection("replay_rejected", Some(request.request_id.clone())));
+        // Consume the request, counter, and intent in the persisted ledger before reading payload
+        // chunks. Browsers start a new host process per connection, so this state must outlive the
+        // process. A rejected payload is not retryable with the same gesture or request ID;
+        // recovery is a fresh visible save with a new counter and intent token.
+        let decision = replay::consume(
+            &self.config.spool_root,
+            &request.session_id,
+            request.counter,
+            &request.request_id,
+            &request.intent_token,
+            MAX_REQUESTS_PER_MINUTE,
+            now,
+        );
+        match decision {
+            Ok(replay::Decision::Accept) => {}
+            Ok(replay::Decision::Replay) => {
+                self.discard_payloads(&value, reader);
+                return Err(self.rejection("replay_rejected", Some(request.request_id.clone())));
+            }
+            Ok(replay::Decision::RateLimited) => {
+                self.discard_payloads(&value, reader);
+                return Err(
+                    self.rejection("capture_rate_limited", Some(request.request_id.clone()))
+                );
+            }
+            Err(_) => {
+                self.discard_payloads(&value, reader);
+                return Err(
+                    self.rejection("replay_state_unavailable", Some(request.request_id.clone()))
+                );
+            }
         }
-        while self
-            .accepted_at
-            .front()
-            .is_some_and(|timestamp| *timestamp + Duration::minutes(1) <= now)
-        {
-            self.accepted_at.pop_front();
-        }
-        if self.accepted_at.len() >= MAX_REQUESTS_PER_MINUTE {
-            self.discard_payloads(&value, reader);
-            return Err(self.rejection("capture_rate_limited", Some(request.request_id.clone())));
-        }
-        if self.seen_intent_tokens.contains(&request.intent_token) {
-            self.discard_payloads(&value, reader);
-            return Err(self.rejection("replay_rejected", Some(request.request_id.clone())));
-        }
-
-        // Consume the request, counter, and intent before reading payload chunks. A rejected
-        // payload must not be retryable with the same user gesture or request ID; recovery is a
-        // fresh visible save that carries a new counter and intent token.
-        self.last_counter = Some(request.counter);
-        self.seen_request_ids.insert(request.request_id.clone());
-        self.seen_intent_tokens.insert(request.intent_token.clone());
-        self.accepted_at.push_back(now);
 
         let mut snapshot_bytes = Vec::with_capacity(request.snapshot_bytes.min(MAX_SNAPSHOT_BYTES));
         if request.snapshot_bytes > 0 {
@@ -399,6 +390,7 @@ struct Rejection {
 struct RequestView {
     value: Value,
     request_id: String,
+    session_id: String,
     counter: u64,
     intent_token: String,
     snapshot_state: String,
@@ -512,7 +504,7 @@ fn validate_capture_request(
 
     let session = expect_object(root.get("session").ok_or("session_missing")?, "session")?;
     exact_keys(session, &["id", "counter", "issued_at", "expires_at"])?;
-    let _session_id = non_empty_string(session, "id", "session_id_missing")?;
+    let session_id = non_empty_string(session, "id", "session_id_missing")?.to_owned();
     let counter = session
         .get("counter")
         .and_then(Value::as_u64)
@@ -660,6 +652,7 @@ fn validate_capture_request(
     Ok(RequestView {
         value: value.clone(),
         request_id: request_id.to_owned(),
+        session_id,
         counter,
         intent_token,
         snapshot_state: state.to_owned(),
@@ -852,23 +845,23 @@ fn persist_capture(
     Ok(())
 }
 
-/// Writes `bytes` to a new temporary file, syncs it, and renames it to `destination`. The
-/// temporary file is removed on any failure.
+/// Writes `bytes` to a new temporary file, syncs it, and links it to a new `destination`. The
+/// temporary file is always removed; an existing destination is never replaced.
 fn write_new_atomically(temporary: &Path, destination: &Path, bytes: &[u8]) -> io::Result<()> {
     let mut file = OpenOptions::new()
         .write(true)
         .create_new(true)
         .open(temporary)?;
+    // A hard link commits without ever replacing an existing record: an earlier capture with the
+    // same request ID is never overwritten, even if replay state were lost.
     let result = file
         .write_all(bytes)
         .and_then(|()| file.sync_all())
         .and_then(|()| {
             drop(file);
-            fs::rename(temporary, destination)
+            fs::hard_link(temporary, destination)
         });
-    if result.is_err() {
-        let _ = fs::remove_file(temporary);
-    }
+    let _ = fs::remove_file(temporary);
     result
 }
 
@@ -1475,7 +1468,7 @@ mod tests {
             let response = single_response(root, resign(value));
             assert_eq!(response["error"], expected, "{name}");
         }
-        assert!(fs::read_dir(root).unwrap().next().is_none());
+        assert!(spool_entries(root).is_empty());
 
         let mut oversized_frame = Vec::new();
         oversized_frame.extend_from_slice(&((MAX_FRAME_BYTES as u32) + 1).to_le_bytes());
@@ -1483,7 +1476,72 @@ mod tests {
         assert!(NativeHost::new(config(root))
             .run_at(&mut Cursor::new(oversized_frame), &mut Vec::new(), now())
             .is_err());
-        assert!(fs::read_dir(root).unwrap().next().is_none());
+        assert!(spool_entries(root).is_empty());
+    }
+
+    #[test]
+    fn replay_is_refused_across_host_processes_and_never_overwrites_a_capture() {
+        // Browsers start a new host process per connection; model each with a fresh NativeHost.
+        let directory = tempdir().unwrap();
+        let root = directory.path();
+        let body = b"<p>first capture</p>";
+        let first = request("complete", body, 1);
+        let frames = framed(&[first.clone(), payload(&first, body, 0, true)]);
+        let mut output = Vec::new();
+        NativeHost::new(config(root))
+            .run_at(&mut Cursor::new(frames.clone()), &mut output, now())
+            .unwrap();
+        assert_eq!(read_responses(&output)[0]["type"], "capture.accepted");
+        let stored = fs::read(root.join(format!("{REQUEST_ID}.json"))).unwrap();
+
+        // An exact replay of the same frames in a new process.
+        let mut output = Vec::new();
+        NativeHost::new(config(root))
+            .run_at(&mut Cursor::new(frames), &mut output, now())
+            .unwrap();
+        assert_eq!(read_responses(&output)[0]["error"], "replay_rejected");
+
+        // The same request ID with a fresh intent and re-signed envelope in another process.
+        let mut reused = first.clone();
+        reused["intent"]["token"] = Value::String("intent-reused".into());
+        let reused = resign(reused);
+        let mut output = Vec::new();
+        NativeHost::new(config(root))
+            .run_at(
+                &mut Cursor::new(framed(&[reused.clone(), payload(&reused, body, 0, true)])),
+                &mut output,
+                now(),
+            )
+            .unwrap();
+        assert_eq!(read_responses(&output)[0]["error"], "replay_rejected");
+        assert_eq!(
+            fs::read(root.join(format!("{REQUEST_ID}.json"))).unwrap(),
+            stored,
+            "the first capture was overwritten"
+        );
+
+        // Even if replay state were lost, the commit refuses to replace an existing record.
+        fs::remove_file(root.join(replay::LEDGER_FILE)).unwrap();
+        let mut output = Vec::new();
+        NativeHost::new(config(root))
+            .run_at(
+                &mut Cursor::new(framed(&[reused.clone(), payload(&reused, body, 0, true)])),
+                &mut output,
+                now(),
+            )
+            .unwrap();
+        assert_eq!(
+            read_responses(&output)[0]["error"],
+            "capture_storage_failed"
+        );
+        assert_eq!(
+            fs::read(root.join(format!("{REQUEST_ID}.json"))).unwrap(),
+            stored
+        );
+        assert_eq!(
+            spool_entries(root),
+            vec![format!("{REQUEST_ID}.html"), format!("{REQUEST_ID}.json")]
+        );
     }
 
     #[test]
@@ -1543,10 +1601,15 @@ mod tests {
         }
     }
 
+    /// Capture files in the spool. The replay ledger holds only hashes and is not a capture.
     fn spool_entries(root: &Path) -> Vec<String> {
+        if !root.exists() {
+            return Vec::new();
+        }
         let mut names = fs::read_dir(root)
             .unwrap()
             .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|name| name != replay::LEDGER_FILE)
             .collect::<Vec<_>>();
         names.sort();
         names
@@ -1779,7 +1842,7 @@ mod tests {
             lifecycle::rejection_state(&code),
             lifecycle::CaptureState::Expired
         );
-        assert!(fs::read_dir(directory.path()).unwrap().next().is_none());
+        assert!(spool_entries(directory.path()).is_empty());
     }
 
     #[test]
@@ -1794,7 +1857,7 @@ mod tests {
             .unwrap();
         let responses = read_responses(&output);
         assert_eq!(responses[0]["error"], "snapshot_untrusted");
-        assert!(fs::read_dir(directory.path()).unwrap().next().is_none());
+        assert!(spool_entries(directory.path()).is_empty());
     }
 
     #[test]
@@ -1808,7 +1871,7 @@ mod tests {
             .run_at(&mut Cursor::new(input), &mut output, now())
             .unwrap();
         assert_eq!(read_responses(&output)[0]["error"], "snapshot_untrusted");
-        assert!(fs::read_dir(directory.path()).unwrap().next().is_none());
+        assert!(spool_entries(directory.path()).is_empty());
     }
 
     #[test]
