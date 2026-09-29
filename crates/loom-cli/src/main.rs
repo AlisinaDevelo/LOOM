@@ -396,12 +396,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         Command::Export { path } => {
             let library = Library::open(arguments.database)?;
             let export = library.export_portable()?;
-            let mut file = fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&path)?;
-            serde_json::to_writer(&mut file, &export)?;
-            file.sync_all()?;
+            write_private_file(&path, &serde_json::to_vec(&export)?)?;
             println!(
                 "{}",
                 serde_json::json!({
@@ -414,7 +409,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         }
         Command::ImportExport { path } => {
             let export: PortableExport =
-                serde_json::from_reader(BufReader::new(File::open(path)?))?;
+                serde_json::from_slice(&loom_core::read_bounded_file(&path)?)?;
             let library = Library::open(arguments.database)?;
             println!(
                 "{}",
@@ -633,17 +628,58 @@ fn main() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
+/// Writes a new file readable only by the owner (0600 on Unix) through a temporary file and a hard
+/// link, so a failed write never leaves a partial file and an existing file is never replaced.
+fn write_private_file(path: &Path, bytes: &[u8]) -> Result<(), Box<dyn Error>> {
+    use std::io::Write;
+    let name = path
+        .file_name()
+        .ok_or("export path has no file name")?
+        .to_string_lossy()
+        .into_owned();
+    let temporary = path.with_file_name(format!(".{name}.{}.tmp", std::process::id()));
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let written = options.open(&temporary).and_then(|mut file| {
+        file.write_all(bytes)?;
+        file.sync_all()
+    });
+    let committed = written.and_then(|()| fs::hard_link(&temporary, path));
+    let _ = fs::remove_file(&temporary);
+    committed.map_err(Into::into)
+}
+
 /// Reads the backup password from a file (first line) or LOOM_BACKUP_PASSWORD. Command-line
 /// arguments are visible to other local processes, so a password flag is deliberately absent.
-fn read_backup_password(password_file: Option<&Path>) -> Result<String, Box<dyn Error>> {
+/// The password and the file contents are wiped from memory when dropped.
+fn read_backup_password(
+    password_file: Option<&Path>,
+) -> Result<zeroize::Zeroizing<String>, Box<dyn Error>> {
     let password = match password_file {
-        Some(path) => fs::read_to_string(path)?
-            .lines()
-            .next()
-            .unwrap_or_default()
-            .to_owned(),
-        None => std::env::var("LOOM_BACKUP_PASSWORD")
-            .map_err(|_| "set LOOM_BACKUP_PASSWORD or pass --password-file")?,
+        Some(path) => {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let mode = fs::metadata(path)?.permissions().mode();
+                if mode & 0o077 != 0 {
+                    eprintln!(
+                        "warning: {} is readable by other users; restrict it with chmod 600",
+                        path.display()
+                    );
+                }
+            }
+            let contents = zeroize::Zeroizing::new(fs::read_to_string(path)?);
+            zeroize::Zeroizing::new(contents.lines().next().unwrap_or_default().to_owned())
+        }
+        None => zeroize::Zeroizing::new(
+            std::env::var("LOOM_BACKUP_PASSWORD")
+                .map_err(|_| "set LOOM_BACKUP_PASSWORD or pass --password-file")?,
+        ),
     };
     if password.is_empty() {
         return Err("backup password is empty".into());

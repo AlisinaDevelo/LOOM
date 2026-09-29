@@ -173,6 +173,29 @@ impl Library {
         )
     }
 
+    /// Checkpoints the WAL into the main database file and switches to a rollback journal, so the
+    /// database is a single self-contained file that can be moved once this connection closes.
+    pub(crate) fn checkpoint_for_handoff(&self) -> Result<()> {
+        let connection = self.lock()?;
+        let (busy, _, _): (i64, i64, i64) =
+            connection.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+            })?;
+        if busy != 0 {
+            return Err(LoomError::PortableExport(
+                "the restored database could not be checkpointed".into(),
+            ));
+        }
+        let mode: String =
+            connection.query_row("PRAGMA journal_mode = DELETE", [], |row| row.get(0))?;
+        if !mode.eq_ignore_ascii_case("delete") {
+            return Err(LoomError::PortableExport(
+                "the restored database could not leave WAL mode".into(),
+            ));
+        }
+        Ok(())
+    }
+
     pub(crate) fn set_ocr_enabled_cache(&self, enabled: bool) {
         self.ocr_enabled.store(enabled, Ordering::SeqCst);
     }

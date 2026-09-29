@@ -137,6 +137,10 @@ fn to_sql(value: &Value, table: &str) -> Result<rusqlite::types::Value> {
         Value::Number(number) => {
             if let Some(integer) = number.as_i64() {
                 Sql::Integer(integer)
+            } else if number.is_u64() {
+                return Err(LoomError::PortableExport(format!(
+                    "integer out of range in {table}"
+                )));
             } else if let Some(real) = number.as_f64() {
                 Sql::Real(real)
             } else {
