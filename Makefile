@@ -31,6 +31,7 @@ roadmap-check:
 	python3 scripts/roadmap.py --validate-only
 	python3 scripts/test-ci-contract.py
 	python3 -m unittest discover -s tests -v
+	python3 scripts/test-browser-capture-protocol.py
 
 verify-device:
 	bash scripts/verify-device.sh
