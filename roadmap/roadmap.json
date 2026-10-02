@@ -501,7 +501,7 @@
     {
       "id": "0110",
       "title": "Define the v0.1 activation and recovery gate",
-      "status": "review",
+      "status": "done",
       "quarter": "Q02",
       "phase": "v0.1 Thread",
       "workstream": "product-evaluation",
@@ -523,7 +523,7 @@
         "area:evaluation",
         "area:product"
       ],
-      "closure_evidence": "Record the exact tests, fixtures, measurements, review artifacts, or consented study evidence that satisfy every criterion; report only work actually performed.",
+      "closure_evidence": "Definition evidence: [docs/evidence/0110-device.md](https://github.com/AlisinaDevelo/LOOM/blob/main/docs/evidence/0110-device.md), merged runtime commit 6cf16040c59f896649c163ffa9273ffd37db91f8, PRs #309 and #312. Seven numeric thresholds, activation and negative-query denominators, consent withdrawal/report-cutoff rules, cohort minimums and stop/advance/narrow precedence are explicit and contract-tested. The CC0 fixture is hash/projection-verified and linked to a privacy-safe 12–20 participant worksheet. Actual merged-main checks passed on Apple M1/macOS 26.6.2: 182 Rust workspace tests, 139 core/CLI MSRV tests, 35 UI and 12 extension tests, 24 Python/8 CI/10 protocol tests, Clippy, lint/typecheck/build, v0/v1 benchmark budgets and the local security check. Retained command/log digests, the earlier complete 31-step pipe, read-only criterion review and active main protection are recorded in the evidence document. This closes only the gate definition: measurement_status remains not_run; no participant or product-quality pass is claimed, and v1 retains the paraphrase and hard-negative failures. Study #35 remains open.",
       "product_boundary": "LOOM remains local-first and evidence-first. Canonical source identity and evidence stay authoritative; derived indexes, model output, snapshots, and transport state remain inspectable, rebuildable, and explicitly uncertain."
     },
     {
@@ -1154,7 +1154,7 @@
         "area:evidence",
         "area:core"
       ],
-      "closure_evidence": "Record the exact tests, fixtures, measurements, review artifacts, or consented study evidence that satisfy every criterion; report only work actually performed.",
+      "closure_evidence": "Implementation evidence: [docs/evidence/0302-device.md](https://github.com/AlisinaDevelo/LOOM/blob/main/docs/evidence/0302-device.md), PRs #223, #310 and #311; latest merged runtime 6cf16040c59f896649c163ffa9273ffd37db91f8. Typed/versioned edges, method/evidence/confidence checks, bounded endpoint and current-first version projections, exact current-file evidence resolution, metadata-only historical/non-file versions, stale refusal and async response guards are covered by Rust and UI tests. The packaged debug app on Apple M1/macOS 26.6.2 navigated a synthetic related source through native IPC to its verified passage and refused it after bytes changed; the app-only screenshot and retained build/session record contain no private material. Current merged-main regression and digest links are in the evidence document. Status remains review: dependent 0301 browser permission/release gates and a consented person-driven workflow study are not complete. No historical-byte archive or human study success is claimed.",
       "product_boundary": "LOOM remains local-first and evidence-first. Canonical source identity and evidence stay authoritative; derived indexes, model output, snapshots, and transport state remain inspectable, rebuildable, and explicitly uncertain."
     },
     {
