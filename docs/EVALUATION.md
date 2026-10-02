@@ -72,7 +72,7 @@ geometry before search, so a changed screenshot crop or PDF cannot silently chan
 
 An empty denominator is `null` (not measured), never an invented 0% or 100%. This also applies
 to per-source slices and empty latency samples. A configured threshold cannot pass with an
-unmeasured metric; omitted reformulation thresholds are explicitly optional. A measured failure
+unmeasured metric; omitted MRR and reformulation thresholds are explicitly optional. A measured failure
 still reports zero. Consumers of earlier reports must accept nullable metric values in schema v4.
 
 The first v1 run is intentionally a diagnostic baseline. It exposes the current lexical failure

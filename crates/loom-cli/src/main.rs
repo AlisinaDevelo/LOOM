@@ -157,7 +157,7 @@ struct BenchmarkManifest {
     fixtures: Vec<BenchmarkFixture>,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 struct BenchmarkThresholds {
     exact_source_recall_at_1: f64,
     exact_source_recall_at_5: f64,
@@ -165,7 +165,7 @@ struct BenchmarkThresholds {
     false_positive_rate: f64,
     index_completeness: f64,
     #[serde(default)]
-    mean_reciprocal_rank: f64,
+    mean_reciprocal_rank: Option<f64>,
     #[serde(default)]
     reformulation_success: Option<f64>,
 }
@@ -1008,7 +1008,7 @@ fn validate_manifest_inputs(
         ("index_completeness", manifest.thresholds.index_completeness),
         (
             "mean_reciprocal_rank",
-            manifest.thresholds.mean_reciprocal_rank,
+            manifest.thresholds.mean_reciprocal_rank.unwrap_or(0.0),
         ),
         (
             "reformulation_success",
@@ -1403,9 +1403,11 @@ fn benchmark_passes(
         && metrics
             .exact_source_recall_at_5
             .is_some_and(|value| value + EPSILON >= thresholds.exact_source_recall_at_5)
-        && metrics
-            .mean_reciprocal_rank
-            .is_some_and(|value| value + EPSILON >= thresholds.mean_reciprocal_rank)
+        && thresholds.mean_reciprocal_rank.is_none_or(|threshold| {
+            metrics
+                .mean_reciprocal_rank
+                .is_some_and(|value| value + EPSILON >= threshold)
+        })
         && metrics
             .anchor_precision
             .is_some_and(|value| value + EPSILON >= thresholds.anchor_precision)
@@ -1893,7 +1895,7 @@ mod tests {
             anchor_precision: 1.0,
             false_positive_rate: 0.0,
             index_completeness: 1.0,
-            mean_reciprocal_rank: 0.0,
+            mean_reciprocal_rank: None,
             reformulation_success: None,
         };
         let passing = super::BenchmarkMetrics {
@@ -1939,6 +1941,16 @@ mod tests {
             ..passing.clone()
         };
         assert!(!benchmark_passes(&thresholds, &missing_recall, 1.0));
+        let missing_mrr = super::BenchmarkMetrics {
+            mean_reciprocal_rank: None,
+            ..passing.clone()
+        };
+        let requires_mrr = BenchmarkThresholds {
+            mean_reciprocal_rank: Some(0.0),
+            ..thresholds.clone()
+        };
+        assert!(!benchmark_passes(&requires_mrr, &missing_mrr, 1.0));
+        assert!(benchmark_passes(&thresholds, &missing_mrr, 1.0));
         let requires_reformulation = BenchmarkThresholds {
             reformulation_success: Some(0.0),
             ..thresholds
