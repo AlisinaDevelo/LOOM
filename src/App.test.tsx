@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { invoke } from "@tauri-apps/api/core";
 
@@ -317,7 +317,7 @@ describe("desktop truth path", () => {
     });
   });
 
-  it("traverses a verified result through source-backed relationship endpoints", async () => {
+  it("lists source-backed relationship endpoint metadata", async () => {
     const evidenceView = {
       artifact_id: hit.artifact_id,
       version_id: hit.version_id,
@@ -356,6 +356,196 @@ describe("desktop truth path", () => {
     await waitFor(() => {
       expect(invokeMock).toHaveBeenCalledWith("list_relationships", { artifactId: hit.artifact_id });
     });
+  });
+
+  it("navigates a related source through its current verified version without substituting historical bytes", async () => {
+    const targetReference = {
+      artifact_id: relationshipView.target.artifact_id,
+      version_id: relationshipView.target.version_id,
+      passage_id: "77777777-7777-4777-8777-777777777777",
+      content_hash: relationshipView.target.content_hash,
+    };
+    const target = { ...relationshipView.target, title: "related.md", source_uri: "/tmp/fixture/related.md", media_type: "text/markdown" };
+    const view = { ...hit, passage_text: "original source evidence", extractor_id: "loom.text", extractor_version: "0.1.0", extraction_metadata: {} };
+    const version = { version_id: target.version_id, content_hash: target.content_hash, byte_size: 27, extractor_id: "loom.text", extractor_version: "0.1.0", created_at: "2026-10-02T00:00:00Z" };
+    invokeMock.mockImplementation(async (command, args) => {
+      if (command === "reconcile_approved_roots") return {};
+      if (command === "list_source_roots") return [];
+      if (command === "library_stats") return readyStats;
+      if (command === "search") return [hit];
+      if (command === "list_relationships") return [{ ...relationshipView, target }];
+      if (command === "artifact_version_history") return {
+        artifact: target,
+        versions: [
+          { ...version, is_current: true, evidence: targetReference },
+          { ...version, version_id: "88888888-8888-4888-8888-888888888888", is_current: false, evidence: null },
+        ],
+        truncated: true,
+      };
+      if (command === "resolve_evidence") return (args as { request: typeof targetReference }).request.artifact_id === hit.artifact_id ? view : { ...view, ...targetReference, title: target.title, source_uri: target.source_uri };
+      if (command === "open_artifact") return undefined;
+      throw new Error(`unexpected command: ${command}`);
+    });
+    render(<App />);
+    fireEvent.change(screen.getByRole("textbox", { name: "Search your local sources" }), { target: { value: "evidence" } });
+    fireEvent.submit(screen.getByRole("search"));
+    fireEvent.click(await screen.findByRole("button", { name: "View evidence" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Show relationships" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Inspect current source and versions for related.md" }));
+    expect(invokeMock).toHaveBeenCalledWith("artifact_version_history", { artifactId: target.artifact_id });
+    expect(await screen.findByText("Historical version — metadata only")).toBeInTheDocument();
+    expect(screen.getByText("Earlier versions omitted; this view is bounded.")).toBeInTheDocument();
+    expect(screen.getAllByRole("button", { name: "View current verified evidence" })).toHaveLength(1);
+    fireEvent.click(screen.getByRole("button", { name: "View current verified evidence" }));
+    expect(await screen.findByRole("heading", { name: "related.md" })).toBeInTheDocument();
+    expect(invokeMock).toHaveBeenCalledWith("resolve_evidence", { request: targetReference });
+    fireEvent.click(screen.getAllByRole("button", { name: /Open original/ })[0]);
+    await waitFor(() => expect(invokeMock).toHaveBeenCalledWith("open_artifact", { request: {
+      artifact_id: targetReference.artifact_id,
+      version_id: targetReference.version_id,
+      content_hash: targetReference.content_hash,
+    } }));
+  });
+
+  it("discloses stale related evidence without opening the locator or restoring the old result", async () => {
+    const reference = { artifact_id: relationshipView.target.artifact_id, version_id: relationshipView.target.version_id, passage_id: hit.passage_id, content_hash: relationshipView.target.content_hash };
+    invokeMock.mockImplementation(async (command, args) => {
+      if (command === "reconcile_approved_roots") return {};
+      if (command === "list_source_roots") return [];
+      if (command === "library_stats") return readyStats;
+      if (command === "search") return [hit];
+      if (command === "artifact_version_history") return {
+        artifact: relationshipView.target,
+        versions: [{ ...reference, byte_size: 1, extractor_id: "loom.text", extractor_version: "0.1.0", created_at: "2026-10-02", is_current: true, evidence: reference }],
+        truncated: false,
+      };
+      if (command === "resolve_evidence") {
+        if ((args as { request: typeof reference }).request.artifact_id !== hit.artifact_id) throw new Error("related source changed; re-index before viewing");
+        return { ...hit, passage_text: "original evidence", extractor_id: "loom.text", extractor_version: "0.1.0", extraction_metadata: {} };
+      }
+      throw new Error(`unexpected command: ${command}`);
+    });
+    render(<App />);
+    fireEvent.change(screen.getByRole("textbox", { name: "Search your local sources" }), { target: { value: "evidence" } });
+    fireEvent.submit(screen.getByRole("search"));
+    fireEvent.click(await screen.findByRole("button", { name: "View evidence" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Source versions" }));
+    fireEvent.click(await screen.findByRole("button", { name: "View current verified evidence" }));
+    expect(await screen.findByRole("heading", { name: "Source needs attention." })).toBeInTheDocument();
+    expect(screen.queryByText("original evidence")).not.toBeInTheDocument();
+    expect(invokeMock.mock.calls.some(([command]) => command === "open_artifact")).toBe(false);
+  });
+
+  it("keeps non-file source history inspectable without a verified-evidence or URL-open action", async () => {
+    invokeMock.mockImplementation(async (command) => {
+      if (command === "reconcile_approved_roots") return {};
+      if (command === "list_source_roots") return [];
+      if (command === "library_stats") return readyStats;
+      if (command === "search") return [hit];
+      if (command === "resolve_evidence") return { ...hit, passage_text: "local evidence", extractor_id: "loom.text", extractor_version: "0.1.0", extraction_metadata: {} };
+      if (command === "list_relationships") return [relationshipView];
+      if (command === "artifact_version_history") return {
+        artifact: relationshipView.target,
+        versions: [{ version_id: relationshipView.target.version_id, content_hash: relationshipView.target.content_hash, byte_size: 42, extractor_id: "loom.bookmarks", extractor_version: "0.1.0", created_at: "2026-10-02", is_current: true, evidence: null }],
+        truncated: false,
+      };
+      throw new Error(`unexpected command: ${command}`);
+    });
+    render(<App />);
+    fireEvent.change(screen.getByRole("textbox", { name: "Search your local sources" }), { target: { value: "evidence" } });
+    fireEvent.submit(screen.getByRole("search"));
+    fireEvent.click(await screen.findByRole("button", { name: "View evidence" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Show relationships" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Inspect current source and versions for saved-page.html" }));
+    expect(await screen.findByRole("heading", { name: "Source and versions: saved-page.html" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "View current verified evidence" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: relationshipView.target.source_uri })).not.toBeInTheDocument();
+    expect(invokeMock.mock.calls.filter(([command]) => command === "resolve_evidence")).toHaveLength(1);
+  });
+
+  it("ignores an older history response after a different source is selected", async () => {
+    let finishOldHistory!: (value: unknown) => void;
+    const oldHistory = new Promise((resolve) => { finishOldHistory = resolve; });
+    invokeMock.mockImplementation(async (command, args) => {
+      if (command === "reconcile_approved_roots") return {};
+      if (command === "list_source_roots") return [];
+      if (command === "library_stats") return readyStats;
+      if (command === "search") return [hit];
+      if (command === "resolve_evidence") return { ...hit, passage_text: "local evidence", extractor_id: "loom.text", extractor_version: "0.1.0", extraction_metadata: {} };
+      if (command === "list_relationships") return [relationshipView];
+      if (command === "artifact_version_history") return (args as { artifactId: string }).artifactId === hit.artifact_id
+        ? { artifact: relationshipView.source, versions: [], truncated: false } : oldHistory;
+      throw new Error(`unexpected command: ${command}`);
+    });
+    render(<App />);
+    fireEvent.change(screen.getByRole("textbox", { name: "Search your local sources" }), { target: { value: "evidence" } });
+    fireEvent.submit(screen.getByRole("search"));
+    fireEvent.click(await screen.findByRole("button", { name: "View evidence" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Show relationships" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Inspect current source and versions for saved-page.html" }));
+    fireEvent.click(screen.getByRole("button", { name: "Source versions" }));
+    expect(await screen.findByRole("heading", { name: "Source and versions: isolation.md" })).toBeInTheDocument();
+    await act(async () => finishOldHistory({ artifact: relationshipView.target, versions: [], truncated: false }));
+    expect(screen.queryByRole("heading", { name: "Source and versions: saved-page.html" })).not.toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Source and versions: isolation.md" })).toBeInTheDocument();
+  });
+
+  it("does not attach an old relationship response to a newly verified version", async () => {
+    let finishRelationships!: (value: unknown) => void;
+    const pending = new Promise((resolve) => { finishRelationships = resolve; });
+    const reference = { artifact_id: hit.artifact_id, version_id: relationshipView.target.version_id, passage_id: hit.passage_id, content_hash: relationshipView.target.content_hash };
+    invokeMock.mockImplementation(async (command, args) => {
+      if (command === "reconcile_approved_roots") return {};
+      if (command === "list_source_roots") return [];
+      if (command === "library_stats") return readyStats;
+      if (command === "search") return [hit];
+      if (command === "list_relationships") return pending;
+      if (command === "artifact_version_history") return {
+        artifact: { ...relationshipView.source, ...reference },
+        versions: [{ ...reference, byte_size: 42, extractor_id: "loom.text", extractor_version: "0.1.0", created_at: "2026-10-02", is_current: true, evidence: reference }],
+        truncated: false,
+      };
+      if (command === "resolve_evidence") return {
+        ...hit, ...(args as { request: typeof reference }).request,
+        title: (args as { request: typeof reference }).request.version_id === hit.version_id ? hit.title : "new-version.md",
+        passage_text: "verified evidence", extractor_id: "loom.text", extractor_version: "0.1.0", extraction_metadata: {},
+      };
+      throw new Error(`unexpected command: ${command}`);
+    });
+    render(<App />);
+    fireEvent.change(screen.getByRole("textbox", { name: "Search your local sources" }), { target: { value: "evidence" } });
+    fireEvent.submit(screen.getByRole("search"));
+    fireEvent.click(await screen.findByRole("button", { name: "View evidence" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Show relationships" }));
+    fireEvent.click(screen.getByRole("button", { name: "Source versions" }));
+    fireEvent.click(await screen.findByRole("button", { name: "View current verified evidence" }));
+    expect(await screen.findByRole("heading", { name: "new-version.md" })).toBeInTheDocument();
+    await act(async () => finishRelationships([relationshipView]));
+    expect(screen.queryByRole("heading", { name: "Related source records" })).not.toBeInTheDocument();
+    expect(screen.queryByText("saved-page.html")).not.toBeInTheDocument();
+  });
+
+  it("does not reopen a closed viewer when a pending verification completes", async () => {
+    let finishVerification!: (value: unknown) => void;
+    const pending = new Promise((resolve) => { finishVerification = resolve; });
+    invokeMock.mockImplementation(async (command) => {
+      if (command === "reconcile_approved_roots") return {};
+      if (command === "list_source_roots") return [];
+      if (command === "library_stats") return readyStats;
+      if (command === "search") return [hit];
+      if (command === "resolve_evidence") return pending;
+      throw new Error(`unexpected command: ${command}`);
+    });
+    render(<App />);
+    fireEvent.change(screen.getByRole("textbox", { name: "Search your local sources" }), { target: { value: "evidence" } });
+    fireEvent.submit(screen.getByRole("search"));
+    fireEvent.click(await screen.findByRole("button", { name: "View evidence" }));
+    expect(await screen.findByRole("heading", { name: "Checking the source…" })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Close" }));
+    await act(async () => finishVerification({ ...hit, passage_text: "late source evidence", extractor_id: "loom.text", extractor_version: "0.1.0", extraction_metadata: {} }));
+    expect(screen.queryByText("late source evidence")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Close" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "View evidence" })).toBeEnabled();
   });
 
   it("renders an image region evidence map with rotation controls", async () => {
