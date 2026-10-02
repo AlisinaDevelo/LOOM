@@ -45,6 +45,21 @@ class CiContractTests(unittest.TestCase):
         for ecosystem in ("cargo", "npm", "github-actions"):
             self.assertRegex(DEPENDABOT, rf"package-ecosystem:\s+{re.escape(ecosystem)}")
 
+    def test_device_runner_validates_the_complete_roadmap(self) -> None:
+        self.assertIn(
+            "run_step roadmap-validate python3 scripts/roadmap.py --validate-only", DEVICE
+        )
+
+    def test_device_runner_executes_the_python_suite(self) -> None:
+        self.assertIn(
+            "run_step python-contract python3 -m unittest discover -s tests -v", DEVICE
+        )
+
+    def test_device_runner_executes_the_browser_protocol_contract(self) -> None:
+        self.assertIn(
+            "run_step browser-protocol python3 scripts/test-browser-capture-protocol.py", DEVICE
+        )
+
     def test_local_release_hygiene_matches_the_public_contract(self) -> None:
         for marker in ("gitleaks detect", "npm audit --audit-level=high", "cargo metadata --locked"):
             self.assertIn(marker, SECURITY)
