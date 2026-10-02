@@ -132,4 +132,3 @@ This session drives the extension's real capture builder and native port from a 
 not press the toolbar button or keyboard shortcut, so the visible-gesture and `activeTab` grant are
 not exercised, and Chrome is not covered because branded Chrome no longer loads unpacked extensions
 from the command line. Issue #30 stays open for one person-driven save in each browser.
-
