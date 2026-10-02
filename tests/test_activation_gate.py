@@ -36,6 +36,7 @@ class ActivationGateTests(unittest.TestCase):
         study = self.gate["participant_study"]
         self.assertEqual(12, study["minimum_participants"])
         self.assertEqual(20, study["maximum_participants"])
+        self.assertEqual(12, study["minimum_eligible_participants"])
         self.assertLessEqual(study["minimum_completed_participants"], study["minimum_participants"])
         self.assertTrue(self.gate["fixture_rights_clean"])
         self.assertTrue((ROOT / self.gate["fixture_manifest"]).is_file())
@@ -86,6 +87,19 @@ class ActivationGateTests(unittest.TestCase):
         self.assertIn("nonzero denominators", self.gate["decisions"]["advance"])
         for required in ("First-session activation", "0.70", "all completed negative queries", "not measured"):
             self.assertIn(required, self.gate_doc)
+
+    def test_withdrawal_eligibility_and_decision_partition_are_explicit(self) -> None:
+        self.assertEqual(["stop", "advance", "narrow"], self.gate["decision_order"])
+        denominator = self.gate["metrics"]["activation_rate"]["denominator"]
+        for required in ("explicit consent withdrawal", "study-data deletion request", "recorded report cutoff", "both numerator and denominator"):
+            self.assertIn(required, denominator)
+            self.assertIn(required, re.sub(r"\s+", " ", self.gate_doc))
+            self.assertIn(required, re.sub(r"\s+", " ", self.worksheet))
+        self.assertIn("superseding decision", self.gate["withdrawal_policy"])
+        self.assertIn("12–20 participants enrolled", self.gate["decisions"]["advance"])
+        self.assertIn("at least 12 eligible", self.gate["decisions"]["advance"])
+        for required in ("No stop condition", "any numeric threshold", "not measured", "cohort eligibility"):
+            self.assertIn(required, self.gate["decisions"]["narrow"])
 
     def test_worksheet_minimizes_private_data_and_tracks_failure_classes(self) -> None:
         for required in (

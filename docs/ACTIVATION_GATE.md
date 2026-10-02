@@ -11,21 +11,27 @@ The fixture is synthetic CC0 text/Markdown; it never receives private participan
 
 | Measure | Advance threshold | Evidence source |
 | --- | ---: | --- |
-| First-session activation | ≥ 0.70 | Activated participants / consented participants who start setup |
+| First-session activation | ≥ 0.70 | Activated participants / eligible setup participants (defined below) |
 | Exact-source Recall@1 | ≥ 0.80 | Held-out rights-clean benchmark report |
 | Exact-source Recall@5 | ≥ 0.95 | Held-out rights-clean benchmark report |
 | Evidence-open success | ≥ 0.90 | Consent-safe task worksheet; source opens with the returned artifact/version/hash tuple |
 | Query p95 latency | ≤ 1,000 ms | Target-device benchmark report |
 | Index completeness | ≥ 0.98 | Benchmark/index health report; failures and skipped inputs are separate |
 | No-result disclosure | 1.00 | Negative-query worksheet; no unsupported answer is shown as a result |
-| Completed participants | ≥ 8 of 12–20 | Privacy-safe participant worksheet |
+| Eligible cohort | ≥ 12 retained setup participants, 12–20 enrolled | Privacy-safe participant worksheet |
+| Completed participants | ≥ 8 of 12–20 enrolled | Privacy-safe participant worksheet |
 | Returning participants | ≥ 2 in a later week | Privacy-safe participant worksheet |
 
 An **activated participant** completes consented corpus setup, independently recovers at least one
 known item, and opens its matching source evidence during the first session. The denominator includes
-every consented participant who starts setup, including setup and retrieval failures. Withdrawn data
-is excluded and its count disclosed separately. Finishing the study or returning later is not a
-substitute for activation.
+every consented participant with retained study data who starts setup, including setup and retrieval
+failures. An explicit consent withdrawal or study-data deletion request received before the recorded
+report cutoff removes that participant from **both numerator and denominator**, with all their
+measurements excluded and the withdrawn count disclosed separately. A later request invalidates an
+earlier advance decision until the aggregates and cohort eligibility are recalculated and a
+superseding decision is recorded. At least 12 participants must remain eligible from 12–20 enrolled;
+withdrawals cannot manufacture a pass from an undersized cohort. Finishing the study or returning
+later is not a substitute for activation.
 
 No-result disclosure uses a separate negative-query task set: the numerator counts completed negative
 queries with zero unsupported results and an explicit no-match disclosure; the denominator counts
@@ -40,13 +46,16 @@ passed.
 
 ## Decision rules
 
-- **Advance:** every numeric threshold passes with nonzero denominators, including 70% first-session
-  activation; at least eight participants complete the known-item
+- Apply **stop first**, then advance if every condition passes, otherwise narrow. No participant
+  decision or activation result is claimed while measurement status is `not_run`.
+- **Advance:** no stop condition applies; 12–20 participants enrolled with at least 12 eligible
+  setup participants remaining; every numeric threshold passes with nonzero denominators, including
+  70% first-session activation; at least eight participants complete the known-item
   task set; at least two return unaided; and no critical privacy, source-integrity, unanchored-result,
   or data-loss issue remains open.
-- **Narrow:** source integrity and the rights-clean benchmark remain safe, but activation, latency,
-  capture friction, or a non-critical cohort slice misses. Publish the failure, reduce scope, and
-  rerun before adding formats, passive capture, sync, or synthesis.
+- **Narrow:** no stop condition applies, but any numeric threshold misses or is not measured,
+  the cohort is ineligible, or capture friction prevents activation. Publish missing evidence or the
+  failure, reduce scope, and rerun before adding formats, passive capture, sync, or synthesis.
 - **Stop:** any critical privacy/source-integrity defect, fabricated or unanchored result,
   unrecoverable data loss, or rights-clean benchmark failure blocks the next expansion. Preserve the
   export and decision record; stopping is a valid product outcome.

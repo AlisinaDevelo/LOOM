@@ -8,6 +8,7 @@
   "participant_study": {
     "minimum_participants": 12,
     "maximum_participants": 20,
+    "minimum_eligible_participants": 12,
     "minimum_completed_participants": 8,
     "minimum_returning_participants": 2,
     "worksheet": "docs/studies/v0.1-participant-worksheet.md"
@@ -24,7 +25,7 @@
   "metrics": {
     "activation_rate": {
       "numerator": "Participants who complete consented corpus setup and independently recover at least one known item with matching source evidence opened during their first session.",
-      "denominator": "Consented participants who start setup, including setup and retrieval failures; withdrawn data is excluded and its count disclosed separately.",
+      "denominator": "Consented participants with retained study data who start setup, including setup and retrieval failures. An explicit consent withdrawal or study-data deletion request before the recorded report cutoff removes that participant from both numerator and denominator; disclose the withdrawn count separately.",
       "zero_denominator": "not_measured"
     },
     "no_result_disclosure": {
@@ -33,9 +34,11 @@
       "zero_denominator": "not_measured"
     }
   },
+  "withdrawal_policy": "Exclude all measurements for an explicit consent withdrawal or study-data deletion request received before a report cutoff. A later request invalidates the previous advance decision until aggregates and cohort eligibility are recalculated and a superseding decision is recorded.",
+  "decision_order": ["stop", "advance", "narrow"],
   "decisions": {
-    "advance": "All numeric thresholds pass, including at least 70% first-session activation with nonzero denominators, at least 8 participants complete the known-item task set, at least 2 return unaided, and no unresolved critical privacy or source-loss issue exists.",
-    "narrow": "Retrieval and source integrity remain safe but activation, latency, capture friction, or a non-critical cohort slice misses its threshold; publish the failure and narrow scope before adding formats or capture.",
+    "advance": "No stop condition applies; 12–20 participants enrolled, at least 12 eligible participants remain in the activation denominator, all numeric thresholds pass including at least 70% first-session activation with nonzero denominators, at least 8 participants complete the known-item task set, and at least 2 return unaided.",
+    "narrow": "No stop condition applies but any numeric threshold misses or is not measured, cohort eligibility is insufficient, or capture friction prevents activation. Publish the missing evidence or failure, narrow scope, and gather evidence before adding formats or capture.",
     "stop": "Any critical privacy/source-integrity defect, fabricated or unanchored result, unrecoverable data loss, or failure of the rights-clean benchmark makes the next expansion ineligible."
   }
 }
