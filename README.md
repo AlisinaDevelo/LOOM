@@ -39,6 +39,10 @@ path, content hash, excerpt, and exact text or pixel-region anchor with every re
   be rotated and zoomed; a stale or unavailable source is disclosed and never replaced silently.
 - A complete rescan hides deleted or unreadable sources. Opening a result verifies its artifact,
   version, and current BLAKE3 hash before handing the path to another application.
+- `Source versions` inspects the current source record and bounded historical metadata. Relationship
+  endpoints can be inspected the same way. Only current passage-bearing selected local files offer
+  a verified-evidence action; older original bytes are not retained, and URL-only or revoked sources
+  are metadata only. Inspection-time metadata can differ from an earlier relationship projection.
 - The CLI and Tauri desktop UI use the same Rust core and local database.
 - Saved desktop scopes persist as exact read-only locators. Missing, denied, moved, unsafe, and
   revoked roots are visible; re-selection is explicit and never broadens access.

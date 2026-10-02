@@ -128,8 +128,10 @@ type EvidenceView = {
   extraction_metadata: Record<string, unknown>;
 };
 
+type EvidenceIdentity = Pick<SearchHit, "artifact_id" | "version_id" | "passage_id" | "content_hash">;
+
 type EvidenceState = {
-  hit: SearchHit;
+  hit: EvidenceIdentity;
   status: "loading" | "ready" | "error";
   view?: EvidenceView;
   error?: string;
@@ -167,6 +169,28 @@ type RelationshipState = {
   artifactId: string;
   status: "loading" | "ready" | "error";
   items: RelationshipView[];
+  error?: string;
+};
+
+type ArtifactVersionHistory = {
+  artifact: RelationshipEndpoint;
+  versions: {
+    version_id: string;
+    content_hash: string;
+    byte_size: number;
+    extractor_id: string;
+    extractor_version: string;
+    created_at: string;
+    is_current: boolean;
+    evidence: EvidenceIdentity | null;
+  }[];
+  truncated: boolean;
+};
+
+type SourceHistoryState = {
+  artifactId: string;
+  status: "loading" | "ready" | "error";
+  history?: ArtifactVersionHistory;
   error?: string;
 };
 
@@ -258,7 +282,7 @@ function sourceRootStatusLabel(status: SourceRootStatus): string {
   }[status];
 }
 
-function RelationshipPanel({ state }: { state: RelationshipState }) {
+function RelationshipPanel({ state, onInspect }: { state: RelationshipState; onInspect: (artifactId: string) => void }) {
   if (state.status === "loading") {
     return <p className="relationship-status" role="status">Loading source relationships…</p>;
   }
@@ -294,6 +318,9 @@ function RelationshipPanel({ state }: { state: RelationshipState }) {
                     <span className="relationship-endpoint-state">{endpoint.state}</span>
                     <code>{endpoint.version_id ? `version ${endpoint.version_id.slice(0, 12)}…` : "no active version"}</code>
                     <p title={endpoint.source_uri ?? undefined}>{endpoint.source_uri ? compactPath(endpoint.source_uri) : "source locator unavailable"}</p>
+                    <button type="button" className="viewer-control" onClick={() => onInspect(endpoint.artifact_id)} aria-label={`Inspect current source and versions for ${endpoint.title}`}>
+                      Inspect current source and versions
+                    </button>
                   </div>
                 ))}
               </div>
@@ -310,6 +337,33 @@ function RelationshipPanel({ state }: { state: RelationshipState }) {
   );
 }
 
+function SourceHistoryPanel({ state, onViewEvidence }: { state: SourceHistoryState; onViewEvidence: (reference: EvidenceIdentity) => void }) {
+  if (state.status === "loading") return <p role="status">Loading source versions…</p>;
+  if (state.status === "error" || !state.history) return <p role="alert">{state.error ?? "Source versions are unavailable."}</p>;
+  const { artifact, versions, truncated } = state.history;
+  return (
+    <section className="relationship-panel" aria-labelledby="source-history-heading">
+      <h3 id="source-history-heading">Source and versions: {artifact.title}</h3>
+      <p>{artifact.state} · {artifact.source_uri ?? "source locator unavailable"}</p>
+      <p>This is the current record at inspection time, which may differ from earlier relationship metadata. Files without indexed passages have no evidence action.</p>
+      <p>Historical entries are metadata only; older original bytes are not retained. Only current selected local files have a verified-evidence action.</p>
+      {versions.length === 0 && <p>No stored versions.</p>}
+      <ol className="relationship-list">
+        {versions.map((version) => (
+          <li key={version.version_id} className="relationship-card relationship-endpoint">
+            <strong>{version.is_current ? "Current indexed version" : "Historical version — metadata only"}</strong>
+            <code title={version.version_id}>{version.version_id}</code>
+            <code title={version.content_hash}>{version.content_hash.slice(0, 28)}…</code>
+            <p>{version.created_at} · {version.byte_size} bytes · {version.extractor_id} {version.extractor_version}</p>
+            {version.evidence && <button type="button" className="viewer-control" onClick={() => onViewEvidence(version.evidence!)}>View current verified evidence</button>}
+          </li>
+        ))}
+      </ol>
+      {truncated && <p>Earlier versions omitted; this view is bounded.</p>}
+    </section>
+  );
+}
+
 type EvidenceViewerProps = {
   state: EvidenceState;
   zoom: number;
@@ -317,9 +371,12 @@ type EvidenceViewerProps = {
   onZoomChange: (zoom: number) => void;
   onRotationChange: (rotation: number) => void;
   onClose: () => void;
-  onOpenOriginal: (hit: SearchHit) => void;
+  onOpenOriginal: (hit: EvidenceIdentity) => void;
   relationshipState: RelationshipState | null;
   onLoadRelationships: (artifactId: string) => void;
+  historyState: SourceHistoryState | null;
+  onLoadHistory: (artifactId: string) => void;
+  onViewVersion: (reference: EvidenceIdentity) => void;
 };
 
 function EvidenceViewer({
@@ -332,6 +389,9 @@ function EvidenceViewer({
   onOpenOriginal,
   relationshipState,
   onLoadRelationships,
+  historyState,
+  onLoadHistory,
+  onViewVersion,
 }: EvidenceViewerProps) {
   const headingRef = useRef<HTMLHeadingElement>(null);
   const view = state.view;
@@ -462,8 +522,10 @@ function EvidenceViewer({
         >
           {relationshipState?.artifactId === view.artifact_id ? "Refresh relationships" : "Show relationships"}
         </button>
+        <button type="button" className="viewer-control" onClick={() => onLoadHistory(view.artifact_id)}>Source versions</button>
       </div>
-      {relationshipState?.artifactId === view.artifact_id && <RelationshipPanel state={relationshipState} />}
+      {relationshipState?.artifactId === view.artifact_id && <RelationshipPanel state={relationshipState} onInspect={onLoadHistory} />}
+      {historyState && <SourceHistoryPanel state={historyState} onViewEvidence={onViewVersion} />}
     </section>
   );
 }
@@ -483,6 +545,7 @@ function App() {
   const [sourceRoots, setSourceRoots] = useState<SourceRootInfo[]>([]);
   const [evidenceState, setEvidenceState] = useState<EvidenceState | null>(null);
   const [relationshipState, setRelationshipState] = useState<RelationshipState | null>(null);
+  const [sourceHistoryState, setSourceHistoryState] = useState<SourceHistoryState | null>(null);
   const [evidenceZoom, setEvidenceZoom] = useState(1);
   const [evidenceRotation, setEvidenceRotation] = useState(0);
   const [notice, setNotice] = useState("Ready. LOOM does not upload your library.");
@@ -501,6 +564,9 @@ function App() {
   const focusResultsAfterSearchRef = useRef(false);
   // The control that opened the evidence viewer gets focus back when the viewer closes (WCAG 2.4.3).
   const evidenceTriggerRef = useRef<HTMLElement | null>(null);
+  const evidenceRequestRef = useRef(0);
+  const historyRequestRef = useRef(0);
+  const relationshipRequestRef = useRef(0);
 
   const refreshStats = useCallback(async () => {
     try {
@@ -825,6 +891,12 @@ function App() {
     setSearched(true);
     focusResultsAfterSearchRef.current = true;
     setNotice("Searching canonical local passages…");
+    evidenceRequestRef.current += 1;
+    historyRequestRef.current += 1;
+    relationshipRequestRef.current += 1;
+    setEvidenceState(null);
+    setSourceHistoryState(null);
+    setRelationshipState(null);
     try {
       const results = await invoke<SearchHit[]>("search", {
         request: { text: query, limit: 30 },
@@ -845,7 +917,7 @@ function App() {
     }
   };
 
-  const openArtifact = async (hit: SearchHit) => {
+  const openArtifact = async (hit: EvidenceIdentity) => {
     setError(null);
     try {
       await invoke("open_artifact", {
@@ -861,8 +933,13 @@ function App() {
   };
 
   const closeEvidence = useCallback(() => {
+    evidenceRequestRef.current += 1;
+    historyRequestRef.current += 1;
+    relationshipRequestRef.current += 1;
     setEvidenceState(null);
     setRelationshipState(null);
+    setSourceHistoryState(null);
+    setBusy(null);
     const trigger = evidenceTriggerRef.current;
     evidenceTriggerRef.current = null;
     // Wait for the viewer to unmount, then return focus if the trigger is still in the document.
@@ -887,8 +964,13 @@ function App() {
     return () => window.removeEventListener("keydown", closeOnEscape);
   }, [evidenceState, closeEvidence]);
 
-  const resolveEvidence = async (hit: SearchHit) => {
-    if (document.activeElement instanceof HTMLElement && document.activeElement !== document.body) {
+  const resolveEvidence = async (hit: EvidenceIdentity) => {
+    const requestId = ++evidenceRequestRef.current;
+    historyRequestRef.current += 1;
+    relationshipRequestRef.current += 1;
+    setSourceHistoryState(null);
+    setRelationshipState(null);
+    if (!evidenceState && document.activeElement instanceof HTMLElement && document.activeElement !== document.body) {
       evidenceTriggerRef.current = document.activeElement;
     }
     setError(null);
@@ -905,23 +987,37 @@ function App() {
           content_hash: hit.content_hash,
         },
       });
-      setEvidenceState({ hit, status: "ready", view });
+      if (evidenceRequestRef.current === requestId) setEvidenceState({ hit, status: "ready", view });
     } catch (caught) {
       const message = errorMessage(caught);
-      setEvidenceState({ hit, status: "error", error: message });
-      setError(message);
+      if (evidenceRequestRef.current === requestId) {
+        setEvidenceState({ hit, status: "error", error: message });
+        setError(message);
+      }
     } finally {
-      setBusy(null);
+      if (evidenceRequestRef.current === requestId) setBusy(null);
+    }
+  };
+
+  const loadSourceHistory = async (artifactId: string) => {
+    const requestId = ++historyRequestRef.current;
+    setSourceHistoryState({ artifactId, status: "loading" });
+    try {
+      const history = await invoke<ArtifactVersionHistory>("artifact_version_history", { artifactId });
+      if (historyRequestRef.current === requestId) setSourceHistoryState({ artifactId, status: "ready", history });
+    } catch (caught) {
+      if (historyRequestRef.current === requestId) setSourceHistoryState({ artifactId, status: "error", error: errorMessage(caught) });
     }
   };
 
   const loadRelationships = async (artifactId: string) => {
+    const requestId = ++relationshipRequestRef.current;
     setRelationshipState({ artifactId, status: "loading", items: [] });
     try {
       const items = await invoke<RelationshipView[]>("list_relationships", { artifactId });
-      setRelationshipState({ artifactId, status: "ready", items });
+      if (relationshipRequestRef.current === requestId) setRelationshipState({ artifactId, status: "ready", items });
     } catch (caught) {
-      setRelationshipState({ artifactId, status: "error", items: [], error: errorMessage(caught) });
+      if (relationshipRequestRef.current === requestId) setRelationshipState({ artifactId, status: "error", items: [], error: errorMessage(caught) });
     }
   };
 
@@ -1225,6 +1321,9 @@ function App() {
                 onOpenOriginal={openArtifact}
                 relationshipState={relationshipState}
                 onLoadRelationships={loadRelationships}
+                historyState={sourceHistoryState}
+                onLoadHistory={loadSourceHistory}
+                onViewVersion={resolveEvidence}
               />
             )}
             <ol>
