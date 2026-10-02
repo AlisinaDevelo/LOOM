@@ -61,13 +61,19 @@ cargo run --locked -p loom-cli -- benchmark \
   --queries benchmarks/retrieval/v1/queries.jsonl
 ```
 
-Schema v3 reports exact-source Recall@1/5, MRR, anchor precision, false-positive rate, negative
+Report schema v4 (with input fixture schema v2/v3 recorded separately) reports exact-source
+Recall@1/5, MRR, anchor precision, false-positive rate, negative
 no-result rate, reformulation success, index completeness, median/p95 latency, and index cost
 (elapsed time, source bytes, database bytes, and amplification). It also splits the metrics and
 failure taxonomy by local text, PDF, saved web, and screenshot. A positive result is not complete
 unless its expected source and exact text/page/region anchor match; a negative query is not
 complete unless it returns no result. The command validates the raw fixture bytes and anchor
 geometry before search, so a changed screenshot crop or PDF cannot silently change the baseline.
+
+An empty denominator is `null` (not measured), never an invented 0% or 100%. This also applies
+to per-source slices and empty latency samples. A configured threshold cannot pass with an
+unmeasured metric; omitted MRR and reformulation thresholds are explicitly optional. A measured failure
+still reports zero. Consumers of earlier reports must accept nullable metric values in schema v4.
 
 The first v1 run is intentionally a diagnostic baseline. It exposes the current lexical failure
 modes (an ambiguous paraphrase can produce no result, and a hard-negative query can retrieve an

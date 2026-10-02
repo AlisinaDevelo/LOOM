@@ -157,7 +157,7 @@ struct BenchmarkManifest {
     fixtures: Vec<BenchmarkFixture>,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 struct BenchmarkThresholds {
     exact_source_recall_at_1: f64,
     exact_source_recall_at_5: f64,
@@ -165,9 +165,9 @@ struct BenchmarkThresholds {
     false_positive_rate: f64,
     index_completeness: f64,
     #[serde(default)]
-    mean_reciprocal_rank: f64,
+    mean_reciprocal_rank: Option<f64>,
     #[serde(default)]
-    reformulation_success: f64,
+    reformulation_success: Option<f64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -253,21 +253,21 @@ struct BenchmarkFailure {
     returned: Vec<String>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 struct BenchmarkMetrics {
     queries: usize,
     positive_queries: usize,
     negative_queries: usize,
-    exact_source_recall_at_1: f64,
-    exact_source_recall_at_5: f64,
-    mean_reciprocal_rank: f64,
-    anchor_precision: f64,
-    false_positive_rate: f64,
+    exact_source_recall_at_1: Option<f64>,
+    exact_source_recall_at_5: Option<f64>,
+    mean_reciprocal_rank: Option<f64>,
+    anchor_precision: Option<f64>,
+    false_positive_rate: Option<f64>,
     reformulation_queries: usize,
-    reformulation_success: f64,
-    negative_no_result_rate: f64,
-    median_latency_ms: f64,
-    p95_latency_ms: f64,
+    reformulation_success: Option<f64>,
+    negative_no_result_rate: Option<f64>,
+    median_latency_ms: Option<f64>,
+    p95_latency_ms: Option<f64>,
 }
 
 #[derive(Debug, Default)]
@@ -304,6 +304,7 @@ struct BenchmarkIndexMetrics {
 #[derive(Debug, Serialize)]
 struct BenchmarkReport {
     schema_version: u32,
+    fixture_schema_version: u32,
     thresholds: BenchmarkThresholds,
     index: BenchmarkIndexMetrics,
     overall: BenchmarkMetrics,
@@ -927,7 +928,8 @@ fn run_benchmark(corpus: &Path, queries: &Path) -> Result<(), Box<dyn Error>> {
     let passed = benchmark_passes(&manifest.thresholds, &overall_metrics, completeness)
         && index.failures.is_empty();
     let report = BenchmarkReport {
-        schema_version: manifest.schema_version,
+        schema_version: 4,
+        fixture_schema_version: manifest.schema_version,
         thresholds: manifest.thresholds,
         index: BenchmarkIndexMetrics {
             discovered: index.discovered,
@@ -1006,11 +1008,11 @@ fn validate_manifest_inputs(
         ("index_completeness", manifest.thresholds.index_completeness),
         (
             "mean_reciprocal_rank",
-            manifest.thresholds.mean_reciprocal_rank,
+            manifest.thresholds.mean_reciprocal_rank.unwrap_or(0.0),
         ),
         (
             "reformulation_success",
-            manifest.thresholds.reformulation_success,
+            manifest.thresholds.reformulation_success.unwrap_or(0.0),
         ),
     ];
     if threshold_values
@@ -1297,26 +1299,34 @@ fn update_accumulator(
 
 fn finalize_metrics(mut accumulator: BenchmarkAccumulator) -> BenchmarkMetrics {
     accumulator.latencies.sort_by(f64::total_cmp);
-    let positive_denominator = accumulator.positive_queries.max(1) as f64;
-    let reformulation_denominator = accumulator.reformulation_queries.max(1) as f64;
-    let negative_denominator = accumulator.negative_queries.max(1) as f64;
+    let ratio = |numerator: f64, denominator: usize| {
+        (denominator > 0).then(|| numerator / denominator as f64)
+    };
     BenchmarkMetrics {
         queries: accumulator.queries,
         positive_queries: accumulator.positive_queries,
         negative_queries: accumulator.negative_queries,
-        exact_source_recall_at_1: accumulator.top_one as f64 / positive_denominator,
-        exact_source_recall_at_5: accumulator.top_five as f64 / positive_denominator,
-        mean_reciprocal_rank: accumulator.mrr_sum / positive_denominator,
-        anchor_precision: accumulator.anchor_correct as f64
-            / accumulator.anchor_candidates.max(1) as f64,
-        false_positive_rate: accumulator.false_positives as f64
-            / accumulator.returned.max(1) as f64,
+        exact_source_recall_at_1: ratio(accumulator.top_one as f64, accumulator.positive_queries),
+        exact_source_recall_at_5: ratio(accumulator.top_five as f64, accumulator.positive_queries),
+        mean_reciprocal_rank: ratio(accumulator.mrr_sum, accumulator.positive_queries),
+        anchor_precision: ratio(
+            accumulator.anchor_correct as f64,
+            accumulator.anchor_candidates,
+        ),
+        false_positive_rate: ratio(accumulator.false_positives as f64, accumulator.returned),
         reformulation_queries: accumulator.reformulation_queries,
-        reformulation_success: accumulator.reformulation_successes as f64
-            / reformulation_denominator,
-        negative_no_result_rate: accumulator.negative_no_result as f64 / negative_denominator,
-        median_latency_ms: median(&accumulator.latencies),
-        p95_latency_ms: percentile(&accumulator.latencies, 0.95),
+        reformulation_success: ratio(
+            accumulator.reformulation_successes as f64,
+            accumulator.reformulation_queries,
+        ),
+        negative_no_result_rate: ratio(
+            accumulator.negative_no_result as f64,
+            accumulator.negative_queries,
+        ),
+        median_latency_ms: (!accumulator.latencies.is_empty())
+            .then(|| median(&accumulator.latencies)),
+        p95_latency_ms: (!accumulator.latencies.is_empty())
+            .then(|| percentile(&accumulator.latencies, 0.95)),
     }
 }
 
@@ -1387,12 +1397,28 @@ fn benchmark_passes(
     completeness: f64,
 ) -> bool {
     const EPSILON: f64 = 1e-12;
-    metrics.exact_source_recall_at_1 + EPSILON >= thresholds.exact_source_recall_at_1
-        && metrics.exact_source_recall_at_5 + EPSILON >= thresholds.exact_source_recall_at_5
-        && metrics.mean_reciprocal_rank + EPSILON >= thresholds.mean_reciprocal_rank
-        && metrics.anchor_precision + EPSILON >= thresholds.anchor_precision
-        && metrics.false_positive_rate <= thresholds.false_positive_rate + EPSILON
-        && metrics.reformulation_success + EPSILON >= thresholds.reformulation_success
+    metrics
+        .exact_source_recall_at_1
+        .is_some_and(|value| value + EPSILON >= thresholds.exact_source_recall_at_1)
+        && metrics
+            .exact_source_recall_at_5
+            .is_some_and(|value| value + EPSILON >= thresholds.exact_source_recall_at_5)
+        && thresholds.mean_reciprocal_rank.is_none_or(|threshold| {
+            metrics
+                .mean_reciprocal_rank
+                .is_some_and(|value| value + EPSILON >= threshold)
+        })
+        && metrics
+            .anchor_precision
+            .is_some_and(|value| value + EPSILON >= thresholds.anchor_precision)
+        && metrics
+            .false_positive_rate
+            .is_some_and(|value| value <= thresholds.false_positive_rate + EPSILON)
+        && thresholds.reformulation_success.is_none_or(|threshold| {
+            metrics
+                .reformulation_success
+                .is_some_and(|value| value + EPSILON >= threshold)
+        })
         && completeness + EPSILON >= thresholds.index_completeness
 }
 
@@ -1776,9 +1802,9 @@ mod tests {
         let metrics = finalize_metrics(accumulator);
         assert_eq!(metrics.positive_queries, 1);
         assert_eq!(metrics.negative_queries, 1);
-        assert_eq!(metrics.mean_reciprocal_rank, 0.5);
-        assert_eq!(metrics.reformulation_success, 1.0);
-        assert_eq!(metrics.negative_no_result_rate, 1.0);
+        assert_eq!(metrics.mean_reciprocal_rank, Some(0.5));
+        assert_eq!(metrics.reformulation_success, Some(1.0));
+        assert_eq!(metrics.negative_no_result_rate, Some(1.0));
     }
 
     #[test]
@@ -1869,23 +1895,23 @@ mod tests {
             anchor_precision: 1.0,
             false_positive_rate: 0.0,
             index_completeness: 1.0,
-            mean_reciprocal_rank: 0.0,
-            reformulation_success: 0.0,
+            mean_reciprocal_rank: None,
+            reformulation_success: None,
         };
         let passing = super::BenchmarkMetrics {
             queries: 3,
             positive_queries: 3,
             negative_queries: 0,
-            exact_source_recall_at_1: 1.0,
-            exact_source_recall_at_5: 1.0,
-            mean_reciprocal_rank: 1.0,
-            anchor_precision: 1.0,
-            false_positive_rate: 0.0,
+            exact_source_recall_at_1: Some(1.0),
+            exact_source_recall_at_5: Some(1.0),
+            mean_reciprocal_rank: Some(1.0),
+            anchor_precision: Some(1.0),
+            false_positive_rate: Some(0.0),
             reformulation_queries: 0,
-            reformulation_success: 0.0,
-            negative_no_result_rate: 1.0,
-            median_latency_ms: 1.0,
-            p95_latency_ms: 2.0,
+            reformulation_success: None,
+            negative_no_result_rate: None,
+            median_latency_ms: Some(1.0),
+            p95_latency_ms: Some(2.0),
         };
         assert!(benchmark_passes(&thresholds, &passing, 1.0));
 
@@ -1897,7 +1923,7 @@ mod tests {
             exact_source_recall_at_5: passing.exact_source_recall_at_5,
             mean_reciprocal_rank: passing.mean_reciprocal_rank,
             anchor_precision: passing.anchor_precision,
-            false_positive_rate: 0.01,
+            false_positive_rate: Some(0.01),
             reformulation_queries: passing.reformulation_queries,
             reformulation_success: passing.reformulation_success,
             negative_no_result_rate: passing.negative_no_result_rate,
@@ -1910,5 +1936,78 @@ mod tests {
             1.0
         ));
         assert!(!benchmark_passes(&thresholds, &passing, 0.99));
+        let missing_recall = super::BenchmarkMetrics {
+            exact_source_recall_at_1: None,
+            ..passing.clone()
+        };
+        assert!(!benchmark_passes(&thresholds, &missing_recall, 1.0));
+        let missing_mrr = super::BenchmarkMetrics {
+            mean_reciprocal_rank: None,
+            ..passing.clone()
+        };
+        let requires_mrr = BenchmarkThresholds {
+            mean_reciprocal_rank: Some(0.0),
+            ..thresholds.clone()
+        };
+        assert!(!benchmark_passes(&requires_mrr, &missing_mrr, 1.0));
+        assert!(benchmark_passes(&thresholds, &missing_mrr, 1.0));
+        let requires_reformulation = BenchmarkThresholds {
+            reformulation_success: Some(0.0),
+            ..thresholds
+        };
+        assert!(!benchmark_passes(&requires_reformulation, &passing, 1.0));
+    }
+
+    #[test]
+    fn empty_metric_categories_are_unmeasured_instead_of_invented_zeroes() {
+        let metrics = finalize_metrics(BenchmarkAccumulator::default());
+        let json = serde_json::to_value(metrics).unwrap();
+        for name in [
+            "exact_source_recall_at_1",
+            "exact_source_recall_at_5",
+            "mean_reciprocal_rank",
+            "anchor_precision",
+            "false_positive_rate",
+            "reformulation_success",
+            "negative_no_result_rate",
+            "median_latency_ms",
+            "p95_latency_ms",
+        ] {
+            assert!(json[name].is_null(), "{name} has no observations");
+        }
+    }
+
+    #[test]
+    fn negative_only_metrics_do_not_invent_recall_and_measured_failure_stays_zero() {
+        let mut accumulator = BenchmarkAccumulator::default();
+        let negative = QueryEvaluation {
+            negative: true,
+            top_one: false,
+            top_five: false,
+            anchor_correct: false,
+            mrr: 0.0,
+            returned: 0,
+            false_positives: 0,
+            negative_no_result: true,
+            failure_kind: None,
+        };
+        update_accumulator(&mut accumulator, &negative, None, 1.0);
+        let metrics = finalize_metrics(accumulator);
+        assert_eq!(metrics.exact_source_recall_at_1, None);
+        assert_eq!(metrics.false_positive_rate, None);
+        assert_eq!(metrics.reformulation_success, None);
+        assert_eq!(metrics.negative_no_result_rate, Some(1.0));
+
+        let mut failed = BenchmarkAccumulator::default();
+        let unsupported = QueryEvaluation {
+            returned: 1,
+            false_positives: 1,
+            negative_no_result: false,
+            ..negative
+        };
+        update_accumulator(&mut failed, &unsupported, None, 2.0);
+        let metrics = finalize_metrics(failed);
+        assert_eq!(metrics.negative_no_result_rate, Some(0.0));
+        assert_eq!(metrics.false_positive_rate, Some(1.0));
     }
 }
