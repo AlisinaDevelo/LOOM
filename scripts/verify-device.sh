@@ -127,6 +127,9 @@ mkdir -p "$EVIDENCE_DIR"
 
 run_step fmt cargo fmt --all --check
 run_step diff-check git diff --check
+run_step roadmap-validate python3 scripts/roadmap.py --validate-only
+run_step python-contract python3 -m unittest discover -s tests -v
+run_step browser-protocol python3 scripts/test-browser-capture-protocol.py
 run_step clippy cargo clippy --workspace --all-targets --locked -- -D warnings
 run_step clear-clippy-target clear_rust_outputs
 run_step rust-workspace cargo test --workspace --locked
