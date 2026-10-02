@@ -30,6 +30,7 @@
     "allow-set-ocr-enabled",
     "allow-purge-ocr-records",
     "allow-open-artifact",
-    "allow-resolve-evidence"
+    "allow-resolve-evidence",
+    "allow-artifact-version-history"
   ]
 }

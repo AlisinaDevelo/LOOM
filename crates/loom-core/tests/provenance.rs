@@ -1,6 +1,8 @@
 use std::fs;
 
-use loom_core::{Library, RelationshipInput, RelationshipKind, RelationshipOrigin, SearchRequest};
+use loom_core::{
+    Library, LoomError, RelationshipInput, RelationshipKind, RelationshipOrigin, SearchRequest,
+};
 use serde_json::json;
 use tempfile::tempdir;
 
@@ -177,4 +179,151 @@ fn duplicate_relationships_are_idempotent_and_source_purge_cascades() {
         .list_relationships(&source_id, 10)
         .unwrap()
         .is_empty());
+}
+
+#[test]
+fn version_history_keeps_old_metadata_but_only_resolves_the_current_source() {
+    let (directory, library, source_id, target_id, _) = indexed_pair();
+    let original = library.artifact_version_history(&source_id, 20).unwrap();
+    let old_version = original.versions[0].version_id.clone();
+    let old_reference = original.versions[0].evidence.as_ref().unwrap();
+    fs::write(
+        directory.path().join("source.md"),
+        "new current source evidence",
+    )
+    .unwrap();
+    library
+        .index_path(directory.path().join("source.md"))
+        .unwrap();
+
+    let history = library.artifact_version_history(&source_id, 20).unwrap();
+    assert_eq!(history.artifact.artifact_id, source_id);
+    assert_eq!(history.versions.len(), 2);
+    assert!(!history.truncated);
+    assert!(history.versions[0].is_current);
+    assert_eq!(history.versions[1].version_id, old_version);
+    assert!(!history.versions[1].is_current);
+    assert!(history.versions[1].evidence.is_none());
+    assert!(library.resolve_verified_evidence(old_reference).is_err());
+    assert!(library
+        .resolve_verified_artifact_path(
+            &old_reference.artifact_id,
+            &old_reference.version_id,
+            &old_reference.content_hash,
+        )
+        .is_err());
+    let reference = history.versions[0].evidence.as_ref().unwrap();
+    let verified = library.resolve_verified_evidence(reference).unwrap();
+    assert_eq!(verified.artifact_id, source_id);
+    assert_eq!(verified.version_id, history.versions[0].version_id);
+    assert_eq!(verified.passage_text, "new current source evidence");
+    let mut forged = reference.clone();
+    forged.artifact_id = target_id;
+    assert!(library.resolve_verified_evidence(&forged).is_err());
+
+    fs::write(
+        directory.path().join("source.md"),
+        "changed after inspection",
+    )
+    .unwrap();
+    assert!(matches!(
+        library.resolve_verified_evidence(reference),
+        Err(LoomError::ArtifactStale(_))
+    ));
+}
+
+#[test]
+fn revoked_source_history_has_no_evidence_action_and_unknown_ids_fail_closed() {
+    let (directory, library, source_id, _, _) = indexed_pair();
+    let selected = library.artifact_version_history(&source_id, 20).unwrap();
+    let reference = selected.versions[0].evidence.as_ref().unwrap();
+    let source = directory.path().join("source.md").canonicalize().unwrap();
+    library
+        .revoke_source_root(source.to_str().unwrap())
+        .unwrap();
+    let history = library.artifact_version_history(&source_id, 20).unwrap();
+    assert_eq!(history.artifact.state, "missing");
+    assert!(history
+        .versions
+        .iter()
+        .all(|version| version.evidence.is_none()));
+    assert!(library.resolve_verified_evidence(reference).is_err());
+    assert!(library
+        .resolve_verified_artifact_path(
+            &reference.artifact_id,
+            &reference.version_id,
+            &reference.content_hash,
+        )
+        .is_err());
+    assert!(library
+        .artifact_version_history("not-an-artifact-id", 20)
+        .is_err());
+    assert!(matches!(
+        library.artifact_version_history("11111111-1111-4111-8111-111111111111", 20),
+        Err(LoomError::ArtifactNotFound(_))
+    ));
+}
+
+#[test]
+fn version_history_clamps_limits_and_discloses_truncation() {
+    let (directory, library, source_id, _, _) = indexed_pair();
+    for version in 0..101 {
+        fs::write(
+            directory.path().join("source.md"),
+            format!("source version {version}"),
+        )
+        .unwrap();
+        library
+            .index_path(directory.path().join("source.md"))
+            .unwrap();
+    }
+    let bounded = library
+        .artifact_version_history(&source_id, u32::MAX)
+        .unwrap();
+    assert_eq!(bounded.versions.len(), 100);
+    assert!(bounded.truncated);
+    assert!(bounded.versions[0].is_current);
+    assert_eq!(
+        bounded
+            .versions
+            .iter()
+            .filter(|version| version.evidence.is_some())
+            .count(),
+        1
+    );
+    let minimum = library.artifact_version_history(&source_id, 0).unwrap();
+    assert_eq!(minimum.versions.len(), 1);
+    assert!(minimum.truncated);
+    assert_eq!(minimum.versions[0], bounded.versions[0]);
+}
+
+#[test]
+fn bookmark_version_history_is_metadata_only_without_a_local_file_scope() {
+    let directory = tempdir().unwrap();
+    let export = directory.path().join("bookmarks.html");
+    fs::write(&export, include_str!("fixtures/bookmarks/chrome.html")).unwrap();
+    let library = Library::open_in_memory().unwrap();
+    library.import_bookmarks(&export).unwrap();
+    let bookmark = library.list_bookmarks(1).unwrap().remove(0);
+    let history = library
+        .artifact_version_history(&bookmark.artifact_id, 20)
+        .unwrap();
+    assert_eq!(history.artifact.source_uri, Some(bookmark.url));
+    assert_eq!(history.versions.len(), 1);
+    assert!(history.versions[0].is_current);
+    assert!(history.versions[0].evidence.is_none());
+    assert!(!history.truncated);
+}
+
+#[test]
+fn empty_local_source_history_has_no_passage_or_verified_evidence_action() {
+    let (directory, library, source_id, _, _) = indexed_pair();
+    let source = directory.path().join("source.md");
+    fs::write(&source, "").unwrap();
+    library.index_path(&source).unwrap();
+    let observation = library.inspect_source(&source).unwrap();
+    assert!(observation.passages.is_empty());
+    let history = library.artifact_version_history(&source_id, 20).unwrap();
+    assert!(history.versions[0].is_current);
+    assert!(history.versions[0].evidence.is_none());
 }

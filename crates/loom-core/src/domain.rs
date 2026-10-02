@@ -627,6 +627,29 @@ pub struct ResolveEvidenceRequest {
     pub content_hash: String,
 }
 
+/// Stored version metadata; historical source bytes are not promised by the index.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ArtifactVersionSummary {
+    pub version_id: String,
+    pub content_hash: String,
+    pub byte_size: u64,
+    pub extractor_id: String,
+    pub extractor_version: String,
+    pub created_at: String,
+    pub is_current: bool,
+    /// Only a current, selected local-file version can enter the verified viewer.
+    /// The resolver must still re-check the source bytes before displaying evidence.
+    pub evidence: Option<ResolveEvidenceRequest>,
+}
+
+/// Bounded, source-backed version metadata for one artifact.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ArtifactVersionHistory {
+    pub artifact: RelationshipEndpoint,
+    pub versions: Vec<ArtifactVersionSummary>,
+    pub truncated: bool,
+}
+
 /// One source-derived segment in a structured evidence excerpt.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EvidenceSegment {

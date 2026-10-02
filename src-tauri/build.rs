@@ -25,6 +25,7 @@ fn main() {
             "purge_ocr_records",
             "open_artifact",
             "resolve_evidence",
+            "artifact_version_history",
         ]),
     ))
     .expect("failed to build LOOM's Tauri manifest");
