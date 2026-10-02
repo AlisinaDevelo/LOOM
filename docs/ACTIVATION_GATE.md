@@ -11,6 +11,7 @@ The fixture is synthetic CC0 text/Markdown; it never receives private participan
 
 | Measure | Advance threshold | Evidence source |
 | --- | ---: | --- |
+| First-session activation | ≥ 0.70 | Activated participants / consented participants who start setup |
 | Exact-source Recall@1 | ≥ 0.80 | Held-out rights-clean benchmark report |
 | Exact-source Recall@5 | ≥ 0.95 | Held-out rights-clean benchmark report |
 | Evidence-open success | ≥ 0.90 | Consent-safe task worksheet; source opens with the returned artifact/version/hash tuple |
@@ -20,6 +21,18 @@ The fixture is synthetic CC0 text/Markdown; it never receives private participan
 | Completed participants | ≥ 8 of 12–20 | Privacy-safe participant worksheet |
 | Returning participants | ≥ 2 in a later week | Privacy-safe participant worksheet |
 
+An **activated participant** completes consented corpus setup, independently recovers at least one
+known item, and opens its matching source evidence during the first session. The denominator includes
+every consented participant who starts setup, including setup and retrieval failures. Withdrawn data
+is excluded and its count disclosed separately. Finishing the study or returning later is not a
+substitute for activation.
+
+No-result disclosure uses a separate negative-query task set: the numerator counts completed negative
+queries with zero unsupported results and an explicit no-match disclosure; the denominator counts
+**all completed negative queries**, including failed disclosures and unsupported-result failures.
+Record issued and completed negative queries separately from positive known-item tasks. A zero
+denominator for either rate is **not measured**, never 0% or 100%; the advance decision is ineligible.
+
 The current v0 smoke fixture reports Recall@1/5 1.0, anchor precision 1.0, false-positive rate
 0.0, completeness 1.0, and sub-second p95 on the target Mac. Those are reproducibility
 observations for three synthetic local-text queries, not evidence that the activation gate has
@@ -27,7 +40,8 @@ passed.
 
 ## Decision rules
 
-- **Advance:** every numeric threshold passes; at least eight participants complete the known-item
+- **Advance:** every numeric threshold passes with nonzero denominators, including 70% first-session
+  activation; at least eight participants complete the known-item
   task set; at least two return unaided; and no critical privacy, source-integrity, unanchored-result,
   or data-loss issue remains open.
 - **Narrow:** source integrity and the rights-clean benchmark remain safe, but activation, latency,

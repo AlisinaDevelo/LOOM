@@ -60,6 +60,16 @@ class CiContractTests(unittest.TestCase):
             "run_step browser-protocol python3 scripts/test-browser-capture-protocol.py", DEVICE
         )
 
+    def test_roadmap_recipe_covers_the_protocol_and_python_suite(self) -> None:
+        recipe = MAKEFILE.split("roadmap-check:", 1)[1].split("\n\n", 1)[0]
+        for command in (
+            "python3 scripts/roadmap.py --validate-only",
+            "python3 -m unittest discover -s tests -v",
+            "python3 scripts/test-browser-capture-protocol.py",
+        ):
+            self.assertIn(command, recipe)
+        self.assertIn("run: make roadmap-check", CI)
+
     def test_local_release_hygiene_matches_the_public_contract(self) -> None:
         for marker in ("gitleaks detect", "npm audit --audit-level=high", "cargo metadata --locked"):
             self.assertIn(marker, SECURITY)
