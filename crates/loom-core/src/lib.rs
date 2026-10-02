@@ -19,13 +19,13 @@ pub use backup::{
 };
 pub use bookmarks::parse_bookmark_export;
 pub use domain::{
-    ArtifactObservation, BookmarkEntry, BookmarkExport, BookmarkImportFailure,
-    BookmarkImportReport, BookmarkImportSummary, BookmarkRecord, CaptureBounds, CaptureContext,
-    CaptureMode, CapturePurgeReport, CaptureReport, CompactedRelationship, DeletionReport,
-    EvidenceAnchor, EvidenceExcerpt, EvidenceSegment, EvidenceView, FtsHealthReport,
-    FtsRepairReport, IndexCancellationToken, IndexCheckpoint, IndexFailure, IndexReport,
-    LibraryStats, ObservationReport, OcrConfidenceState, OcrPurgeReport, OcrStatus,
-    OpenArtifactRequest, PassageObservation, RankContributions, RelationshipCompaction,
+    ArtifactObservation, ArtifactVersionHistory, ArtifactVersionSummary, BookmarkEntry,
+    BookmarkExport, BookmarkImportFailure, BookmarkImportReport, BookmarkImportSummary,
+    BookmarkRecord, CaptureBounds, CaptureContext, CaptureMode, CapturePurgeReport, CaptureReport,
+    CompactedRelationship, DeletionReport, EvidenceAnchor, EvidenceExcerpt, EvidenceSegment,
+    EvidenceView, FtsHealthReport, FtsRepairReport, IndexCancellationToken, IndexCheckpoint,
+    IndexFailure, IndexReport, LibraryStats, ObservationReport, OcrConfidenceState, OcrPurgeReport,
+    OcrStatus, OpenArtifactRequest, PassageObservation, RankContributions, RelationshipCompaction,
     RelationshipCompactionReport, RelationshipEndpoint, RelationshipInput, RelationshipKind,
     RelationshipOrigin, RelationshipRecord, RelationshipView, ResolveEvidenceRequest,
     RetentionPolicy, RetentionReport, SearchHit, SearchRequest, SemanticCandidate,

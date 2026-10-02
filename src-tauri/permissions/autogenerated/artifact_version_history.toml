@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-artifact-version-history"
+description = "Enables the artifact_version_history command without any pre-configured scope."
+commands.allow = ["artifact_version_history"]
+
+[[permission]]
+identifier = "deny-artifact-version-history"
+description = "Denies the artifact_version_history command without any pre-configured scope."
+commands.deny = ["artifact_version_history"]

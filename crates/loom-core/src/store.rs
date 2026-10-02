@@ -15,16 +15,16 @@ use uuid::Uuid;
 use crate::{
     bookmarks::{self, BOOKMARK_EXTRACTOR_ID, BOOKMARK_EXTRACTOR_VERSION},
     domain::{
-        ArtifactObservation, BookmarkEntry, BookmarkImportFailure, BookmarkImportReport,
-        BookmarkImportSummary, BookmarkRecord, CompactedRelationship, DeletionReport,
-        EvidenceAnchor, EvidenceExcerpt, EvidenceSegment, EvidenceView, FtsHealthReport,
-        FtsRepairReport, IndexCancellationToken, IndexCheckpoint, IndexFailure, IndexReport,
-        LibraryStats, ObservationReport, OcrPurgeReport, OcrStatus, PassageObservation,
-        RankContributions, RelationshipCompaction, RelationshipCompactionReport,
-        RelationshipEndpoint, RelationshipInput, RelationshipKind, RelationshipOrigin,
-        RelationshipRecord, RelationshipView, ResolveEvidenceRequest, RetentionPolicy,
-        RetentionReport, SearchHit, SearchRequest, SemanticCandidate, SemanticDropReport,
-        SemanticIndexConfig, SemanticIndexManifest, SemanticIndexStatus,
+        ArtifactObservation, ArtifactVersionHistory, ArtifactVersionSummary, BookmarkEntry,
+        BookmarkImportFailure, BookmarkImportReport, BookmarkImportSummary, BookmarkRecord,
+        CompactedRelationship, DeletionReport, EvidenceAnchor, EvidenceExcerpt, EvidenceSegment,
+        EvidenceView, FtsHealthReport, FtsRepairReport, IndexCancellationToken, IndexCheckpoint,
+        IndexFailure, IndexReport, LibraryStats, ObservationReport, OcrPurgeReport, OcrStatus,
+        PassageObservation, RankContributions, RelationshipCompaction,
+        RelationshipCompactionReport, RelationshipEndpoint, RelationshipInput, RelationshipKind,
+        RelationshipOrigin, RelationshipRecord, RelationshipView, ResolveEvidenceRequest,
+        RetentionPolicy, RetentionReport, SearchHit, SearchRequest, SemanticCandidate,
+        SemanticDropReport, SemanticIndexConfig, SemanticIndexManifest, SemanticIndexStatus,
         SemanticProviderMeasurement, SemanticRebuildReport, SourceRootInfo, SourceRootStatus,
         StorageEntry, StorageInspection,
     },
@@ -918,6 +918,92 @@ impl Library {
                 })
             })
             .collect()
+    }
+
+    /// Inspects version metadata without opening or substituting source bytes.
+    ///
+    /// Returns the current version first, then newest historical versions, with a hard limit of
+    /// 100 rows and an explicit truncation flag. Historical and revoked/non-file versions never
+    /// receive a viewer reference; current references still require `resolve_verified_evidence`.
+    pub fn artifact_version_history(
+        &self,
+        artifact_id: &str,
+        limit: u32,
+    ) -> Result<ArtifactVersionHistory> {
+        validate_relationship_id(artifact_id, "artifact")?;
+        let limit = limit.clamp(1, 100) as usize;
+        let mut connection = self.lock()?;
+        let transaction = connection.transaction()?;
+        let artifact = relationship_endpoint(&transaction, artifact_id)?;
+        let can_view: bool = transaction.query_row(
+            "SELECT EXISTS(
+                SELECT 1 FROM artifacts a
+                JOIN source_roots r ON r.id = a.source_root_id AND r.enabled = 1
+                JOIN artifact_locators l ON l.artifact_id = a.id AND l.active = 1
+                WHERE a.id = ?1 AND a.state = 'active' AND l.kind = 'file'
+            )",
+            [artifact_id],
+            |row| row.get(0),
+        )?;
+        let mut versions = {
+            let mut statement = transaction.prepare(
+                "SELECT v.id, v.content_hash, v.byte_size, v.extractor_id, v.extractor_version,
+                        v.created_at,
+                        (SELECT p.id FROM passages p WHERE p.artifact_version_id = v.id
+                         ORDER BY p.ordinal LIMIT 1)
+                 FROM artifact_versions v WHERE v.artifact_id = ?1
+                 ORDER BY (v.id = ?2) DESC, v.created_at DESC, v.id DESC LIMIT ?3",
+            )?;
+            let result = statement
+                .query_map(
+                    params![
+                        artifact_id,
+                        artifact.version_id.as_deref().unwrap_or(""),
+                        (limit + 1) as i64
+                    ],
+                    |row| {
+                        let version_id: String = row.get(0)?;
+                        let content_hash: String = row.get(1)?;
+                        let passage_id: Option<String> = row.get(6)?;
+                        let is_current = artifact.version_id.as_deref() == Some(&version_id);
+                        let evidence =
+                            passage_id
+                                .filter(|_| is_current && can_view)
+                                .map(|passage_id| ResolveEvidenceRequest {
+                                    artifact_id: artifact_id.into(),
+                                    version_id: version_id.clone(),
+                                    passage_id,
+                                    content_hash: content_hash.clone(),
+                                });
+                        Ok(ArtifactVersionSummary {
+                            version_id,
+                            content_hash,
+                            byte_size: u64::try_from(row.get::<_, i64>(2)?).map_err(|error| {
+                                rusqlite::Error::FromSqlConversionFailure(
+                                    2,
+                                    rusqlite::types::Type::Integer,
+                                    Box::new(error),
+                                )
+                            })?,
+                            extractor_id: row.get(3)?,
+                            extractor_version: row.get(4)?,
+                            created_at: row.get(5)?,
+                            is_current,
+                            evidence,
+                        })
+                    },
+                )?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            result
+        };
+        let truncated = versions.len() > limit;
+        versions.truncate(limit);
+        transaction.commit()?;
+        Ok(ArtifactVersionHistory {
+            artifact,
+            versions,
+            truncated,
+        })
     }
 
     /// Removes redundant inferred relationships and records a digest-linked summary of them.

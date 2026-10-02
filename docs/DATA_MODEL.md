@@ -80,9 +80,18 @@ same source/target/kind/origin/method observation returns the existing row witho
 evidence.
 
 The core exposes a bounded relationship listing that joins both endpoint artifacts to their active
-source URI, version ID, content hash, title, media type, and lifecycle state. The desktop viewer
-uses that projection to traverse a verified result to its related source and current version without
-introducing a graph database or treating inferred edges as confirmed facts.
+source URI, version ID, content hash, title, media type, and lifecycle state. This projection does
+not require a graph database and does not turn inferred edges into confirmed facts.
+
+`artifact_version_history` reads one artifact and its versions in a single database snapshot.
+It returns the current indexed version first, then historical metadata in deterministic order;
+the core limit is 1–100 rows and the desktop command requests 20. A `truncated` flag discloses
+omitted versions. Each entry preserves its hash, byte size, extractor identity, and timestamp.
+Historical original bytes are not retained by this index and must not be silently replaced with
+the current file. Only a current passage-bearing version in an enabled selected-file scope receives
+an evidence reference. Revoked scopes and URL-only bookmarks remain inspectable metadata without
+an open action. That reference carries artifact/version/passage/hash and must pass the existing
+source-byte and anchor verifier before any evidence is displayed or an original is opened.
 
 ### Graph bounds and compaction
 
