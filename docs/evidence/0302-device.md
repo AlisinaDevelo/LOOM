@@ -1,13 +1,56 @@
 # Issue 0302 — provenance relationship evidence
 
 - Issue: [#31](https://github.com/AlisinaDevelo/LOOM/issues/31)
-- Implementation PR: [#223](https://github.com/AlisinaDevelo/LOOM/pull/223)
-- Implementation commit: `ea16b95fb413d0cd30cd0b6ac07a45fc08c53c20`
-- Merged-main SHA: `217903c82e500b85519781cf2beb3da403808d5e`
+- Implementation PRs: [#223](https://github.com/AlisinaDevelo/LOOM/pull/223),
+  [#310](https://github.com/AlisinaDevelo/LOOM/pull/310),
+  [#311](https://github.com/AlisinaDevelo/LOOM/pull/311)
+- Latest runtime verification: merged main `6cf16040c59f896649c163ffa9273ffd37db91f8`
 - Roadmap status: `review`
-- Verification status: core, CLI, frontend, extension, and migration paths pass on the
-  device; the desktop Tauri check and test-profile rebuild are resource-limited by local
-  disk and the issue remains open for that gate.
+- Verification status: core, CLI, frontend, extension, migration and packaged native navigation
+  checks pass on the target device. The dependent browser-capture permission/release gates
+  remain open; no consented human workflow study is claimed. Earlier resource-limited attempts
+  below are historical, not the current desktop build result.
+
+## Current source/version navigation (2026-10-02 UTC)
+
+The Rust history API returns bounded current-first version metadata (20 records in the UI,
+clamped to 1–100 in the core), with a visible truncation indicator. Only the currently eligible
+file version with a passage receives a resolvable evidence tuple. Historical bytes are not
+retained; bookmark, empty-file and revoked-source histories remain metadata-only.
+
+Eight provenance integration tests verify stable identity, bounded ordering/truncation,
+current-version resolution, old/forged/revoked tuple refusal, changed-byte refusal,
+unknown IDs and metadata-only records. The Tauri command registration and tracked allow/deny
+permissions are checked. UI tests cover current related-source navigation, stale refusal,
+non-file records, out-of-order history/relationship responses and closing a pending viewer.
+
+The packaged debug app was built and operated at merged-main
+`48d8c62a66957c64e16dd44de11a0b60692d3c26`, whose tree is identical to its tested PR #311
+candidate. Later gate/CLI edits through `6cf1604` did not change desktop/core navigation code.
+The isolated app identifier `dev.loom.source-validation` used a fresh synthetic-only library;
+the normal LOOM application data was not touched. Two local Markdown files, three versions and
+one explicitly seeded `synthetic-fixture` relationship supplied the test corpus.
+
+Through the packaged UI and native IPC, searching `amber spindle` opened the source and its
+two version records. Selecting the related source and its current-version action displayed
+the verified `Violet spindle` passage with artifact/version/hash and line range 1–4. The old
+version was metadata only, not represented as an immutable byte snapshot.
+
+After the related file's bytes changed without reindexing, the current-version action displayed
+`Source needs attention` and stale-or-unavailable, without retaining the old passage as verified
+evidence. The fixture bytes were restored and indexed again afterward. A screenshot of the
+positive result was captured inline, cropped to the application window with synthetic content
+only; no full-desktop/private-document image or local PNG artifact was created.
+
+The build log is `/tmp/loom-source-version-evidence.1ghGPQ/native-app-build.log`, SHA-256
+`13b4cdbb99b25640b70a248a18d8c778a195b6c66c84bbabddcd61e148500965`.
+The command/source and interactive-session record is `merged-main-regression.md` in the same
+retained directory. The subsequent actual merged-main regression ran 182 Rust workspace tests,
+139 core/CLI tests on Rust 1.88, 35 UI and 12 extension tests, warnings-denied Clippy, typecheck,
+lint/build, 24 Python/8 CI/10 protocol tests and both benchmark commands; digests are recorded in
+[0110-device.md](0110-device.md). This automated native session is not a participant usability,
+browser toolbar/permission or signed-release test. Issue #31 stays in review while those
+prerequisite and human workflow gates remain unresolved.
 
 ## Target and retained evidence
 
@@ -43,7 +86,7 @@ e9dca69c19b5746097fdfa0fe9c065c0408b567380d15322b5b8fd489f137e65  loom-0302-merg
 | --- | --- | --- |
 | `LOOM-0302-SCHEMA` | Versioned typed relationships preserve future kinds | `RelationshipKind` serializes known values and preserves `Unknown(String)`. The v6 table adds an independent relationship schema version, origin, metadata envelope, endpoint and confidence checks. `schema_compatibility` passes six tests, including populated v2, v3, v4, and v5 migrations without rewriting canonical rows. |
 | `LOOM-0302-INFERENCE` | Inferred links record method, evidence, confidence, and time; confirmation stays distinct | `add_relationship` rejects inferred rows without both passage evidence and confidence, requires a non-empty method, records RFC3339 `created_at`, and stores `origin` separately. `provenance` covers round-trip metadata, unknown kinds, invalid evidence, NaN confidence, oversized/non-object metadata, and user-confirmed edges. |
-| `LOOM-0302-TRAVERSE` | UI traverses source and versions without a graph database | `list_relationships` returns bounded source/target endpoint projections with active locator, version, hash, and state. The React test `traverses a verified result through source-backed relationship endpoints` exercises the evidence viewer and Tauri invocation. `cargo check --locked -p loom` passed before merge on this device. |
+| `LOOM-0302-TRAVERSE` | UI traverses source and versions without a graph database | `list_relationships` returns bounded endpoints; `artifact_version_history` returns current-first versions and resolvable current-file evidence only. The React test `navigates a related source through its current verified version without substituting historical bytes` verifies the exact native tuple, with stale and async-race negatives. The packaged positive/stale session and current merged-main checks are recorded above. |
 
 ## Merged-main device checks
 
@@ -83,9 +126,8 @@ attempt likewise failed while compiling `objc2-app-kit` for the same device-capa
   the viewer. The relationship command is read-only; no network or account is required.
 - v2–v5 migration fixtures verify defaults, canonical identity preservation, and FTS recovery.
 
-No desktop screenshot was used as evidence. If a future handoff includes a visual capture,
-it must be cropped to the relevant LOOM/result panel only, with no full desktop, credentials,
-source paths, or private documents.
+No desktop screenshot was used in that historical run. The current packaged session above used
+an application-window-only capture of synthetic content, with no private source material.
 
 ## Merged-main desktop rerun (2026-09-28)
 
@@ -100,5 +142,6 @@ check, and `npm run tauri build -- --debug --no-bundle` (`tauri-build.log` SHA-2
 `c4b6bee208700406f70bb46424727196867ffe803d5e830ec468eac5f7b9903d`). This clears the earlier
 `ENOSPC` limitation for the desktop compile/test gate.
 
-Issue #31 remains open in `review` until the packaged interactive viewer is verified by a person
-on the device; no interactive session is claimed here.
+At that historical point, no interactive session was claimed. The automated packaged session
+above now covers navigation and stale refusal; the dependent browser and human study gates
+remain open and no person-driven usability result is claimed.

@@ -5,6 +5,76 @@ The gate is intentionally a product hypothesis: its machine-readable status is `
 `measurement_status` is `not_run` until a rights-clean benchmark and a consented participant study
 produce retained evidence.
 
+## Current acceptance record (2026-10-02 UTC)
+
+The definition is complete at merged-main commit `6cf16040c59f896649c163ffa9273ffd37db91f8`
+([#309](https://github.com/AlisinaDevelo/LOOM/pull/309),
+[#312](https://github.com/AlisinaDevelo/LOOM/pull/312)). The participant study is **not run**;
+closing this definition issue does not advance the product gate or close study issue
+[#35](https://github.com/AlisinaDevelo/LOOM/issues/35).
+
+| Artifact ID | Current acceptance evidence |
+| --- | --- |
+| `LOOM-0110-THRESHOLDS` | `gate.json` declares seven numeric thresholds, including activation ≥ 70%, separate positive/negative denominators, consent withdrawal and report-cutoff handling, at least 12 eligible participants, eight completed and two returning. Decision precedence is stop, then advance if every condition passes, otherwise narrow. Missing measurements cannot pass. |
+| `LOOM-0110-FIXTURE` | The actual CC0 manifest and contained fixture paths are checked; the CLI recomputes original-byte hashes and verifies extractor/anchor projections before retrieval. On merged main, v0 indexed 3/3 fixtures, Recall@1/5 1.0, anchor precision 1.0, false-positive rate 0.0 and p95 1.67125 ms. Negative-query and reformulation rates are `null` because this smoke fixture does not measure them. |
+| `LOOM-0110-WORKSHEET` | The 12–20 participant worksheet records activated/eligible/withdrawn participants and negative queries issued/completed/correctly disclosed/unsupported, as well as capture, indexing, retrieval and viewer failures. It prohibits private source content in the repository or aggregate export. |
+| `LOOM-0110-TRACEABILITY` | The contract suite verifies the actual README, evaluation, product and roadmap links, fixture rights/projections, worksheet fields, numeric thresholds and decision/withdrawal rules. Current behavior remains separate from product hypotheses. |
+
+### Current merged-main checks
+
+The target remains MacBook Pro 17,1, Apple M1, 8 GB; macOS 26.6.2 (25G83), arm64;
+Rust/Cargo 1.96.0 and MSRV 1.88.0; Node 26.7.0 and npm 11.19.0.
+The PR candidate `20b8afa0d58b9432fd95510040e8c21e35f504fd` and merged commit have the identical
+tree `8a119bfe4737ac748b05f5059053d7243d87abaf`. Commands were rerun on the merged commit:
+
+```text
+cargo fmt --all -- --check                                  passed
+cargo clippy --locked --workspace --all-targets -- -D warnings passed
+cargo test --locked --workspace                              182 passed
+cargo +1.88.0 test --locked -p loom-core -p loom-cli           139 passed
+npm run check                                               passed: 35 UI, 12 extension tests
+make roadmap-check                                          passed: 24 Python, 8 CI, 10 protocol tests
+loom benchmark --corpus benchmarks/retrieval/v0/corpus --queries benchmarks/retrieval/v0/queries.jsonl
+loom benchmark --corpus benchmarks/retrieval/v1/corpus --queries benchmarks/retrieval/v1/queries.jsonl
+bash scripts/security-check.sh                              passed: no detected secrets; npm audit 0
+git diff --check                                            passed
+```
+
+Both benchmark commands met their checked-in diagnostic budgets. v1 nevertheless records
+`q008` (paraphrase returns no result) and `q009` (hard-negative false positive), with Recall@1/5
+0.9, false-positive rate 0.1538461538 and negative no-result rate **0.0**, a measured failure.
+No product-quality or participant-gate pass is inferred from these command exits. Report schema v4
+distinguishes `null` (not measured) from measured zero; explicitly configured thresholds require
+measurements, while omitted MRR/reformulation thresholds remain optional.
+
+Retained logs and the exact command/source record are in
+`/tmp/loom-source-version-evidence.1ghGPQ/merged-main-regression.md`:
+
+```text
+merged-main-clippy.log       sha256:1cb45c4e6df41d95ad203fe1212dbb403700f40680f94b0dbcdae5de6b08d630
+merged-main-workspace.log    sha256:914ca48f33ce60498168eb391395c1f9288290bcaa6f34bc795a488636dce45d
+merged-main-msrv.log         sha256:22fb62ea841ee914a1158a0918fd4436f8db5b09066fcbb4e3434cc39a3e96e6
+merged-main-npm-check.log    sha256:411405411668d00ce24c2d7bde8cd4fe8e38aa35ac370a355494db16b07d4e59
+merged-main-gates.log        sha256:14c64a352057eed369ad449d8316b81b3d54216938d927b6f9b4fb5dbd847fb4
+merged-main-retrieval-v0.json sha256:e81bf7db6d241485cd126a2ea40906d4daba52fe90aece98599043eedd9356c3
+merged-main-retrieval-v1.json sha256:99fe841980404e702f154524fbf17d634c86bf5f93758da89b112949971952bc
+merged-main-security.log     sha256:dbf0dac7108c6f111f04a511bb5ca324639f08f2c5c49dd43a11e1ed4cece941
+```
+
+The complete 31-step `scripts/verify-device.sh` pipe also passed at `5227254` (PR #308), whose
+tree equals merged main `ac2ceb1`; summary SHA-256
+`e39705a5e659617e4a980ae1d135f7768a4ff885cda1999ea5381917a65f6b0a`, log-manifest SHA-256
+`5d29f69157baebd48891ff2c31c0e633b79703951f5f7f56c7a0fa914d0b2ff4`, retained in
+`/tmp/loom-device-verify.Bn4Qrt`. It covered native packaging, mixed failure/recovery, OCR/PDF,
+semantic and 10k/100k synthetic performance checks. That full pipe preceded the navigation and
+benchmark-report changes; it is not presented as a complete 31-step rerun of `6cf1604`.
+The later packaged navigation session is recorded in [0302-device.md](0302-device.md).
+
+The active `main-protection` ruleset `21332347` was verified read-only, and the definition received
+a criterion-by-criterion read-only review. No hosted Actions result, participant study, third-party
+security audit, notarization or full dependency-advisory clearance is claimed. The tracked `glib`
+advisory remains open. The following sections preserve earlier device records, not current counts.
+
 ## Device and toolchain
 
 - Device: MacBook Pro 17,1, Apple M1, 8 GB
@@ -76,12 +146,12 @@ specified Mac. It does not claim that the activation gate has passed: no 12–20
 returning-participant observation, capture-friction aggregate, or held-out personal corpus has
 been collected. It also does not claim another OS/architecture, notarization, a third-party
 security audit, or a cargo-audit result. The post-merge reproduction below satisfies the code and
-device-evidence portion of the gate; Issue 63 remains open until independent review and a
-protected-main policy are available.
+device-evidence portion of the gate. At that historical point, review and protected-main policy
+were still outstanding; the current definition closure is supported by the record above.
 
 ## Merged-main reproduction
 
-The same `scripts/verify-device.sh` harness was rerun against the current merged `main` commit
+The same `scripts/verify-device.sh` harness was rerun against the then-current merged `main` commit
 `eee1236710b98375e86b12187d545ed451ee2b7c` on the target Mac. This is a documentation-only merge
 after the runtime-tested code commit `ae102616700a0913f21af118609e727df9617e26`; no runtime source
 changed between the tested code and the current main tip.
