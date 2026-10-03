@@ -3377,15 +3377,7 @@ impl SourceAuthorization {
         let locator = locator.ok_or_else(|| LoomError::SourceRevoked(self.root_id.clone()))?;
         // Source shape is part of the selected capability. A replacement directory/file or
         // symlink is not the same scope, even before a controller updates its persisted row.
-        let metadata = fs::symlink_metadata(&locator)
-            .map_err(|_| LoomError::SourceRevoked(self.root_id.clone()))?;
-        if metadata.file_type().is_symlink()
-            || match self.kind.as_str() {
-                "file" => !metadata.is_file(),
-                "directory" => !metadata.is_dir(),
-                _ => true,
-            }
-        {
+        if source_root_status(&locator, &self.kind, true) != SourceRootStatus::Available {
             return Err(LoomError::SourceRevoked(self.root_id.clone()));
         }
         Ok(())
@@ -4364,6 +4356,12 @@ fn ensure_source_root(
     locator: &str,
     directory: bool,
 ) -> Result<SourceAuthorization> {
+    let kind = if directory { "directory" } else { "file" };
+    if source_root_status(locator, kind, true) != SourceRootStatus::Available {
+        return Err(LoomError::InvalidPath(
+            "selected source is not currently available".into(),
+        ));
+    }
     let now = Utc::now().to_rfc3339();
     // RETURNING observes the same atomic upsert. There is no check-then-re-enable window.
     let authorization = connection.query_row(
@@ -4377,7 +4375,7 @@ fn ensure_source_root(
             (SELECT value FROM schema_meta WHERE key = 'authorization_incarnation'), kind",
         params![
             Uuid::new_v4().to_string(),
-            if directory { "directory" } else { "file" },
+            kind,
             locator,
             now
         ],
@@ -5473,6 +5471,61 @@ mod tests {
             ),
             "versioned"
         );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_denied_single_file_root_cannot_commit_prepared_work_or_checkpoint_updates() {
+        use std::os::unix::fs::PermissionsExt;
+        let directory = tempdir().unwrap();
+        let source = directory.path().join("denied.md");
+        fs::write(&source, "deniedrootmarker").unwrap();
+        let library = Library::open_in_memory().unwrap();
+        library.index_path(&source).unwrap();
+        let source = source.canonicalize().unwrap();
+        let authorization = library
+            .approved_root_authorization(source.to_str().unwrap())
+            .unwrap();
+        let job = library
+            .start_index_job(&authorization, source.to_str().unwrap(), "denied", 1)
+            .unwrap();
+        let prepared = ingest::read_stable(&source, &source, 8 * 1024 * 1024).unwrap();
+        let before = library.export_portable().unwrap().tables;
+        let checkpoint = library.index_checkpoint(&source).unwrap();
+        fs::set_permissions(&source, fs::Permissions::from_mode(0o0)).unwrap();
+        assert_eq!(
+            library.source_roots().unwrap()[0].status,
+            crate::SourceRootStatus::Denied
+        );
+        assert!(matches!(
+            library.index_document_with_extractor(
+                &authorization,
+                &source,
+                prepared,
+                "loom.text",
+                "changed"
+            ),
+            Err(LoomError::SourceRevoked(_))
+        ));
+        for operation in [
+            library.advance_index_job(&authorization, &job.job_id, 1),
+            library.mark_locator_missing_and_advance(
+                &authorization,
+                source.to_str().unwrap(),
+                &job.job_id,
+                1,
+            ),
+            library.interrupt_index_job(&authorization, &job.job_id, "denied"),
+            library.fail_index_job(&authorization, &job.job_id, "denied"),
+            library.complete_index_job(&authorization, &job.job_id, None),
+        ] {
+            assert!(matches!(operation, Err(LoomError::SourceRevoked(_))));
+        }
+        assert!(library.index_path(&source).is_err());
+        assert_eq!(library.export_portable().unwrap().tables, before);
+        assert_eq!(library.index_checkpoint(&source).unwrap(), checkpoint);
+        fs::set_permissions(&source, fs::Permissions::from_mode(0o600)).unwrap();
+        assert_eq!(library.index_path(&source).unwrap().unchanged, 1);
     }
 
     #[test]
