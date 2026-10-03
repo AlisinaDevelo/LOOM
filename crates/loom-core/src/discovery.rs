@@ -814,7 +814,7 @@ mod tests {
         let descriptors = || fs::read_dir("/dev/fd").unwrap().count();
         let directory = tempdir().unwrap();
         let mut path = directory.path().to_path_buf();
-        for _ in 0..8 {
+        for _ in 0..32 {
             path.push("child");
             fs::create_dir(&path).unwrap();
         }
