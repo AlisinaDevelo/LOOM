@@ -810,6 +810,13 @@ fn performance_roots(corpus: &Path, selected: &[PathBuf]) -> Result<Vec<PathBuf>
     if selected.len() > 4_096 {
         return Err("performance accepts at most 4096 explicit indexing roots".into());
     }
+    // Preserve the core's final-component no-follow policy before resolving
+    // a selected alias, including the default corpus selection.
+    for path in std::iter::once(corpus).chain(selected.iter().map(PathBuf::as_path)) {
+        if fs::symlink_metadata(path)?.file_type().is_symlink() {
+            return Err("performance selections must not be final-component symlinks".into());
+        }
+    }
     let corpus = corpus.canonicalize()?;
     if selected.is_empty() {
         return Ok(vec![corpus]);
@@ -909,9 +916,9 @@ fn run_performance(
     if max_files == 0 {
         return Err("performance max-files must be greater than zero".into());
     }
-    let corpus = corpus.canonicalize()?;
     // Validate all explicit selections before opening SQLite or indexing the first batch.
-    let roots = performance_roots(&corpus, selected_roots)?;
+    let roots = performance_roots(corpus, selected_roots)?;
+    let corpus = corpus.canonicalize()?;
     let warm_queries = warm_queries.clamp(1, 1_000);
     let limits = LibraryLimits {
         max_files_per_request: max_files,
@@ -1959,6 +1966,20 @@ mod tests {
         let link = corpus.path().join("shard-escape");
         std::os::unix::fs::symlink(outside.path(), &link).unwrap();
         assert!(super::performance_roots(corpus.path(), &[link]).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn performance_rejects_inside_corpus_root_aliases_before_opening_sqlite() {
+        let corpus = tempfile::tempdir().unwrap();
+        let target = corpus.path().join("real-shard");
+        let alias = corpus.path().join("alias");
+        std::fs::create_dir(&target).unwrap();
+        std::os::unix::fs::symlink(&target, &alias).unwrap();
+        assert!(super::performance_roots(corpus.path(), std::slice::from_ref(&alias)).is_err());
+        let database = corpus.path().join("not-created.sqlite3");
+        assert!(super::run_performance(&database, &alias, "marker", 1, 1, &[]).is_err());
+        assert!(!database.exists());
     }
 
     #[test]

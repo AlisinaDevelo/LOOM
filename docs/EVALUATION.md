@@ -125,7 +125,9 @@ process and one SQLite library. The normal file, entry, directory, path, payload
 time bounds apply to every request; no discovery limit is raised to make the benchmark pass.
 The CLI's `--max-files` is per request and defaults to 20,000, not total library size.
 Explicit roots must be inside the canonical corpus, disjoint and nonduplicated (at most 4,096).
-Validation precedes opening SQLite. An indexing failure produces no performance summary, but
+Final-component symlinks are rejected before canonicalization, including the corpus selection;
+these path checks are not an atomic filesystem sandbox. Validation precedes opening SQLite.
+An indexing failure produces no performance summary, but
 already completed batches remain in that library: batching is not an atomic multi-root operation.
 Version 2 reports retain each selected root and its real indexing run ID/counts alongside the
 aggregate metrics; the harness rejects missing or incomplete batch receipts. This admission
