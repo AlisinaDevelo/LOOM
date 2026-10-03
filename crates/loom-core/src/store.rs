@@ -6654,13 +6654,14 @@ mod tests {
         let result = contender_connection
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate);
         assert!(matches!(
-            result,
+            &result,
             Err(rusqlite::Error::SqliteFailure(error, _))
                 if matches!(
                     error.code,
                     rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked
                 )
         ));
+        drop(result);
         drop(contender_connection);
         transaction.commit().unwrap();
     }
