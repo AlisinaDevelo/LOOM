@@ -26,9 +26,15 @@ stream buffers, vector/record overhead, sorting, SQLite and extraction have sepa
 A limit, I/O error, probe refusal or detected directory mutation returns an error, not a
 truncated successful list. Discovery finishes before `start_index_job`, so failure cannot create
 or advance a checkpoint, publish any discovered artifact or reconcile unseen sources as missing.
-Explicit selection still executes the existing source-root consent/last-seen update before
-discovery: this is not permission-free admission. File extraction failures after a complete walk
-retain the existing per-file outcome behavior.
+Discovery observes the prior exact scope and library incarnation without creating or re-enabling
+a root. Only successful enumeration may persist selection, in a writer transaction that verifies
+the observation is unchanged. A failed first selection creates no approved root; a failed
+reselection leaves prior consent and last-seen metadata unchanged. Revocation, purge, restore or
+scope replacement during the walk refuses the old selection. Root purge also rotates a
+selection-only revision to detect a select-and-purge cycle that begins and ends without a root;
+this conservatively rejects any selection staged before a root purge, but does not invalidate
+unrelated already-admitted jobs. Approved watcher scans never grant consent.
+File extraction failures after a complete walk retain the existing per-file outcome behavior.
 Foreground discovery currently passes a no-op probe: `IndexCancellationToken` is still checked
 between extraction units, not during discovery. No folder-cancellation responsiveness or exact
 cancelled-unit count before membership is known is claimed.

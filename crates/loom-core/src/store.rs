@@ -273,10 +273,10 @@ impl Library {
         }
         let export = detailed.export.clone();
         let authorization = {
-            let mut connection = self.lock()?;
+            let connection = self.lock()?;
             match approved_authorization {
                 Some(authorization) => authorization,
-                None => ensure_source_root(&mut connection, &source_uri, false)?,
+                None => ensure_source_root(&connection, &source_uri, false)?,
             }
         };
         let root_id = &authorization.root_id;
@@ -752,8 +752,18 @@ impl Library {
     /// artifacts are no longer searchable or openable. Re-selection through the folder picker is
     /// the only path that re-enables the exact root.
     pub fn revoke_source_root(&self, locator: &str) -> Result<SourceRootInfo> {
+        self.revoke_source_root_with_probe(locator, || {})
+    }
+
+    // The probe is a private deterministic seam after lookup; production performs no extra work.
+    fn revoke_source_root_with_probe(
+        &self,
+        locator: &str,
+        after_lookup: impl FnOnce(),
+    ) -> Result<SourceRootInfo> {
         let mut connection = self.lock()?;
-        let transaction = connection.transaction()?;
+        let transaction =
+            connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         let exists: bool = transaction.query_row(
             "SELECT EXISTS(SELECT 1 FROM source_roots WHERE locator = ?1)",
             [locator],
@@ -764,6 +774,7 @@ impl Library {
                 "source root is not persisted: {locator}"
             )));
         }
+        after_lookup();
         transaction.execute(
             "UPDATE source_roots SET enabled = 0, scope_generation = scope_generation + 1,
                 last_seen_at = ?1 WHERE locator = ?2",
@@ -906,38 +917,50 @@ impl Library {
     ) -> Result<Vec<RelationshipView>> {
         validate_relationship_id(artifact_id, "artifact")?;
         let limit = limit.clamp(1, 100);
-        let connection = self.lock()?;
-        let mut statement = connection.prepare(
-            "SELECT id, source_artifact_id, target_artifact_id, kind, evidence_passage_id,
+        let mut connection = self.lock()?;
+        let transaction = connection.transaction()?;
+        relationship_endpoint(&transaction, artifact_id)?;
+        let records = {
+            let mut statement = transaction.prepare(
+                "SELECT id, source_artifact_id, target_artifact_id, kind, evidence_passage_id,
                     confidence, method, relationship_schema_version, origin, metadata_json,
                     created_at
-             FROM relationships
-             WHERE source_artifact_id = ?1 OR target_artifact_id = ?1
+             FROM relationships e
+             WHERE (source_artifact_id = ?1 OR target_artifact_id = ?1)
+               AND EXISTS (SELECT 1 FROM artifacts a JOIN source_roots r
+                   ON r.id = a.source_root_id AND r.enabled = 1 WHERE a.id = e.source_artifact_id)
+               AND EXISTS (SELECT 1 FROM artifacts a JOIN source_roots r
+                   ON r.id = a.source_root_id AND r.enabled = 1 WHERE a.id = e.target_artifact_id)
              ORDER BY created_at, id
              LIMIT ?2",
-        )?;
-        let records = statement
-            .query_map(params![artifact_id, limit], relationship_from_row)?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        records
+            )?;
+            let records = statement
+                .query_map(params![artifact_id, limit], relationship_from_row)?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            records
+        };
+        let views = records
             .into_iter()
             .map(|relationship| {
-                let source = relationship_endpoint(&connection, &relationship.source_artifact_id)?;
-                let target = relationship_endpoint(&connection, &relationship.target_artifact_id)?;
+                let source = relationship_endpoint(&transaction, &relationship.source_artifact_id)?;
+                let target = relationship_endpoint(&transaction, &relationship.target_artifact_id)?;
                 Ok(RelationshipView {
                     relationship,
                     source,
                     target,
                 })
             })
-            .collect()
+            .collect::<Result<Vec<_>>>()?;
+        transaction.commit()?;
+        Ok(views)
     }
 
     /// Inspects version metadata without opening or substituting source bytes.
     ///
     /// Returns the current version first, then newest historical versions, with a hard limit of
-    /// 100 rows and an explicit truncation flag. Historical and revoked/non-file versions never
-    /// receive a viewer reference; current references still require `resolve_verified_evidence`.
+    /// 100 rows and an explicit truncation flag. Revoked roots expose no metadata; historical and
+    /// non-file versions never receive a viewer reference. Current references still require
+    /// `resolve_verified_evidence`.
     pub fn artifact_version_history(
         &self,
         artifact_id: &str,
@@ -1247,6 +1270,15 @@ impl Library {
             .canonicalize()
             .map_err(|source| io_error(requested_path, source))?;
         let selected_uri = utf8_path(&selected_path)?;
+        let directory = selected_path.is_dir();
+        let selection = {
+            let connection = self.lock()?;
+            if let Some(authorization) = approved_authorization.as_ref() {
+                authorization.verify_locator(&connection, &selected_uri)?;
+            }
+            SourceSelection::capture(&connection, &selected_uri)?
+        };
+        let discovered = ingest::discover(&selected_path, self.limits.max_files_per_request)?;
         let mut authorization = {
             let mut connection = self.lock()?;
             match approved_authorization {
@@ -1254,10 +1286,9 @@ impl Library {
                     authorization.verify_locator(&connection, &selected_uri)?;
                     authorization
                 }
-                None => ensure_source_root(&mut connection, &selected_uri, selected_path.is_dir())?,
+                None => selection.authorize(&mut connection, &selected_uri, directory)?,
             }
         };
-        let discovered = ingest::discover(&selected_path, self.limits.max_files_per_request)?;
         if authorization.ocr_policy.is_none()
             && discovered.iter().any(|path| {
                 ingest::supported_media_type(path).is_some_and(|media| media.starts_with("image/"))
@@ -2630,7 +2661,8 @@ impl Library {
             ));
         }
         let mut connection = self.lock()?;
-        let transaction = connection.transaction()?;
+        let transaction =
+            connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         let artifact_ids = artifact_ids_for_root(&transaction, locator)?;
         let mut report = DeletionReport {
             selector: format!("root:{locator}"),
@@ -2643,6 +2675,13 @@ impl Library {
                 delete_artifact_transaction(&transaction, &artifact_id)?,
             );
         }
+        // Fence an absent-root selection too: select + purge during discovery must not appear
+        // unchanged just because both the earlier and later snapshots have no persisted root.
+        transaction.execute(
+            "INSERT INTO schema_meta(key, value) VALUES ('source_selection_purge_revision', ?1)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            [Uuid::new_v4().to_string()],
+        )?;
         transaction.execute("DELETE FROM source_roots WHERE locator = ?1", [locator])?;
         transaction.commit()?;
         drop(connection);
@@ -3815,6 +3854,56 @@ struct SourceAuthorization {
     ocr_policy: Option<OcrPolicy>,
 }
 
+/// A selection is not a source grant until bounded discovery succeeds. The read-only observation
+/// preserves consent races, including an absent-root selection/purge ABA, without holding a
+/// transaction or persisting an enabled root while filesystem enumeration runs.
+#[derive(Debug, PartialEq, Eq)]
+struct SourceSelection {
+    incarnation: String,
+    purge_revision: String,
+    scope: Option<(String, i64, String, bool)>,
+}
+
+impl SourceSelection {
+    fn capture(connection: &Connection, locator: &str) -> Result<Self> {
+        connection.query_row(
+            "SELECT m.value,
+                COALESCE((SELECT value FROM schema_meta WHERE key='source_selection_purge_revision'), ''),
+                r.id, r.scope_generation, r.kind, r.enabled
+             FROM schema_meta m LEFT JOIN source_roots r ON r.locator=?1
+             WHERE m.key='authorization_incarnation'",
+            [locator],
+            |row| {
+                let id: Option<String> = row.get(2)?;
+                Ok(Self {
+                    incarnation: row.get(0)?,
+                    purge_revision: row.get(1)?,
+                    scope: match id {
+                        Some(id) => Some((id, row.get(3)?, row.get(4)?, row.get(5)?)),
+                        None => None,
+                    },
+                })
+            },
+        ).map_err(Into::into)
+    }
+
+    fn authorize(
+        &self,
+        connection: &mut Connection,
+        locator: &str,
+        directory: bool,
+    ) -> Result<SourceAuthorization> {
+        let transaction =
+            connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        if Self::capture(&transaction, locator)? != *self {
+            return Err(LoomError::SourceRevoked(locator.to_owned()));
+        }
+        let authorization = ensure_source_root(&transaction, locator, directory)?;
+        transaction.commit()?;
+        Ok(authorization)
+    }
+}
+
 /// Only an exact selected file capability is executable; no directory discovery or source grant.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -4257,6 +4346,7 @@ fn relationship_endpoint(
         .query_row(
             "SELECT a.id, a.title, a.media_type, l.locator, v.id, v.content_hash, a.state
              FROM artifacts a
+             JOIN source_roots r ON r.id = a.source_root_id AND r.enabled = 1
              LEFT JOIN artifact_locators l ON l.artifact_id = a.id AND l.active = 1
              LEFT JOIN artifact_versions v ON v.id = a.active_version_id
              WHERE a.id = ?1",
@@ -5020,7 +5110,7 @@ fn stored_schema_version(connection: &Connection) -> Result<Option<i64>> {
 }
 
 fn ensure_source_root(
-    connection: &mut Connection,
+    connection: &Connection,
     locator: &str,
     directory: bool,
 ) -> Result<SourceAuthorization> {
@@ -5817,6 +5907,102 @@ mod tests {
     use super::{Library, LibraryLimits};
     use crate::{ingest, EvidenceAnchor, LoomError, SearchRequest};
 
+    #[test]
+    fn source_revocation_reserves_writer_before_reading_consent() {
+        let temporary = tempdir().unwrap();
+        let source = temporary.path().join("selected.md");
+        fs::write(&source, "Revocation writer marker").unwrap();
+        let source = source.canonicalize().unwrap();
+        let database = temporary.path().join("library.sqlite3");
+        let library = Library::open(&database).unwrap();
+        library.index_path(&source).unwrap();
+        let mut contender = rusqlite::Connection::open(&database).unwrap();
+        contender.busy_timeout(std::time::Duration::ZERO).unwrap();
+        let revoked = library
+            .revoke_source_root_with_probe(source.to_str().unwrap(), || {
+                let transaction =
+                    contender.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate);
+                assert!(
+                    matches!(transaction,
+                Err(rusqlite::Error::SqliteFailure(error, _))
+                if error.code == rusqlite::ErrorCode::DatabaseBusy),
+                    "a second writer acquired a snapshot after revocation's consent lookup"
+                );
+            })
+            .unwrap();
+        assert!(!revoked.enabled);
+        assert!(library
+            .search(&SearchRequest {
+                text: "Revocation writer marker".into(),
+                limit: 5
+            })
+            .unwrap()
+            .is_empty());
+        // Revocation releases its reservation; no lock is leaked on successful completion.
+        contender
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .unwrap()
+            .commit()
+            .unwrap();
+    }
+
+    #[test]
+    fn staged_selection_cannot_undo_revocation_purge_restore_or_replacement() {
+        for previously_selected in [false, true] {
+            for action in ["revoke", "purge", "restore", "replace"] {
+                let temporary = tempdir().unwrap();
+                let root = temporary.path().join("selected");
+                fs::create_dir(&root).unwrap();
+                fs::write(root.join("source.md"), "Staged selection marker").unwrap();
+                let root = root.canonicalize().unwrap();
+                let locator = root.to_str().unwrap();
+                let database = temporary.path().join("library.sqlite3");
+                let worker = Library::open(&database).unwrap();
+                let controller = Library::open(&database).unwrap();
+                if previously_selected {
+                    controller.index_path(&root).unwrap();
+                }
+                let staged =
+                    super::SourceSelection::capture(&worker.lock().unwrap(), locator).unwrap();
+                // The seam models another connection's action while discovery owns no transaction.
+                if !previously_selected && action != "restore" {
+                    controller.index_path(&root).unwrap();
+                }
+                match action {
+                    "revoke" => {
+                        controller.revoke_source_root(locator).unwrap();
+                    }
+                    "purge" => {
+                        controller.purge_root(locator).unwrap();
+                    }
+                    "restore" => {
+                        // Restore only admits an empty target. The initially empty case proves
+                        // incarnation fencing independently of the root-purge revision.
+                        if previously_selected {
+                            controller.purge_root(locator).unwrap();
+                        }
+                        let archive = controller.export_portable().unwrap();
+                        controller.import_portable(&archive).unwrap();
+                    }
+                    "replace" => {
+                        controller.purge_root(locator).unwrap();
+                        controller.index_path(&root).unwrap();
+                    }
+                    _ => unreachable!(),
+                }
+                let before = controller.export_portable().unwrap();
+                let roots = controller.source_roots().unwrap();
+                let result = staged.authorize(&mut worker.lock().unwrap(), locator, true);
+                assert!(
+                    matches!(result, Err(LoomError::SourceRevoked(_))),
+                    "{previously_selected}/{action}: {result:?}"
+                );
+                assert_eq!(controller.export_portable().unwrap().tables, before.tables);
+                assert_eq!(controller.source_roots().unwrap(), roots);
+            }
+        }
+    }
+
     #[cfg(unix)]
     #[test]
     fn discovery_fingerprint_distinguishes_native_paths_and_bounds() {
@@ -5886,7 +6072,7 @@ mod tests {
         let controller = Library::open(&database).unwrap();
         let source = source.canonicalize().unwrap();
         let mut authorization =
-            super::ensure_source_root(&mut worker.lock().unwrap(), source.to_str().unwrap(), false)
+            super::ensure_source_root(&worker.lock().unwrap(), source.to_str().unwrap(), false)
                 .unwrap();
         authorization.ocr_policy = Some(super::OcrPolicy::load(&worker.lock().unwrap()).unwrap());
         worker
@@ -6078,12 +6264,9 @@ mod tests {
         )
         .unwrap();
         let library = Library::open_in_memory().unwrap();
-        let mut authorization = super::ensure_source_root(
-            &mut library.lock().unwrap(),
-            source.to_str().unwrap(),
-            false,
-        )
-        .unwrap();
+        let mut authorization =
+            super::ensure_source_root(&library.lock().unwrap(), source.to_str().unwrap(), false)
+                .unwrap();
         let before = library.export_portable().unwrap().tables;
         let result = library.index_document_with_extractor(
             &authorization,

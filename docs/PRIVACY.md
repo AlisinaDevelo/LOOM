@@ -63,6 +63,9 @@ or content to the selected external application.
   and checkpoint writes after revocation, including writes from another local connection. A pending
   watcher/startup scan cannot re-enable the root; old workers also cannot inherit a later explicit
   re-selection's consent.
+- Revoked scopes also expose no version-history or relationship endpoint metadata: artifact IDs
+  return an unavailable result, and an enabled artifact's relationships exclude revoked peers.
+  Stored canonical rows remain available only to explicit retention/export/deletion controls.
 - The desktop stop control requests cooperative cancellation at a bounded indexing-unit boundary;
   it does not upload, discard, or roll back a complete source version already committed locally.
 - A complete rescan hides removed or unreadable sources from search, but does not erase their stored
