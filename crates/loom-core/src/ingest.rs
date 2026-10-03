@@ -120,12 +120,7 @@ pub(crate) fn read_stable_with_limits_and_ocr(
     // a separate 16M-pixel process budget, but the extraction implementation is shared.
     let media = loom_extraction::MediaKind::from_mime(media_type)?;
     let output = loom_extraction::extract_bytes(media, &stable.bytes, max_pdf_pages, 100_000_000)?;
-    output.validate_with_limits(
-        media,
-        loom_extraction::ExtractionBudget::for_media(media),
-        max_pdf_pages,
-        100_000_000,
-    )?;
+    output.validate_with_limits(media, max_pdf_pages, 100_000_000)?;
     Ok(stable_document_from_output(
         stable,
         media_type,

@@ -26,26 +26,24 @@ pub enum SourceOutput {
 impl SourceOutput {
     /// Validate helper-owned values using the strict worker resource budget.
     pub fn validate(&self, media: MediaKind, budget: ExtractionBudget) -> Result<()> {
+        budget.validate()?;
         self.validate_with_limits(
             media,
-            budget,
             budget.max_pdf_pages as usize,
             budget.max_image_pixels,
         )
     }
 
-    /// Validate output shape with explicit publication limits after the runtime budget is checked.
+    /// Validate output shape with the caller's explicit publication limits.
     ///
     /// The helper budget remains strict, while foreground indexing can retain its existing
     /// configured PDF and 100M-pixel limits without weakening the worker's resource contract.
     pub fn validate_with_limits(
         &self,
         media: MediaKind,
-        budget: ExtractionBudget,
         max_pdf_pages: usize,
         max_image_pixels: u64,
     ) -> Result<()> {
-        budget.validate()?;
         let invalid = || ExtractionError::Protocol("invalid evidence geometry or media".into());
         match self {
             Self::Text { text } if matches!(media, MediaKind::Text | MediaKind::Markdown) => {
@@ -499,8 +497,36 @@ mod tests {
 
         assert!(output.validate(MediaKind::Png, budget).is_err());
         output
-            .validate_with_limits(MediaKind::Png, budget, 2_048, 100_000_000)
+            .validate_with_limits(MediaKind::Png, 2_048, 100_000_000)
             .unwrap();
+    }
+
+    #[test]
+    fn shared_text_limit_counts_utf8_bytes_and_preserves_the_exact_boundary() {
+        let accepted = SourceOutput::Text {
+            text: "é".repeat(MAX_TEXT_BYTES / 2),
+        };
+        let budget = ExtractionBudget::for_media(MediaKind::Text);
+        accepted.validate(MediaKind::Text, budget).unwrap();
+        accepted
+            .validate_with_limits(MediaKind::Text, 2_048, 100_000_000)
+            .unwrap();
+        let rejected = SourceOutput::Text {
+            text: format!("{}x", "é".repeat(MAX_TEXT_BYTES / 2)),
+        };
+        assert_eq!(
+            rejected.validate(MediaKind::Text, budget),
+            Err(ExtractionError::OutputLimit)
+        );
+        assert_eq!(
+            rejected.validate_with_limits(MediaKind::Text, 2_048, 100_000_000),
+            Err(ExtractionError::OutputLimit)
+        );
+        let mut invalid_worker_budget = budget;
+        invalid_worker_budget.max_image_pixels = 100_000_000;
+        assert!(accepted
+            .validate(MediaKind::Text, invalid_worker_budget)
+            .is_err());
     }
 
     #[test]

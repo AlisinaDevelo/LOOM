@@ -44,6 +44,12 @@ closed. PDF/image text has one wire representation, not a second normalized copy
 publication limits remain 2 MiB text, 2,048 pages, 8,192 regions/passages, 128/16 KiB warnings and
 64 KiB metadata. Provider failure responses contain typed codes, not raw parser/source diagnostics.
 
+Foreground ingestion now applies the same normalized-output checks before canonical conversion:
+UTF-8 text is capped at 2 MiB and rejects controls except newline/tab; PDF/image evidence must
+have valid page/region geometry and bounded warnings. The shared validator does not grant a
+worker resource budget to synchronous providers. Foreground retains its configured PDF-page
+and 100-million-pixel limits; queued validation retains the strict process policy above.
+
 The parent clears the environment, sets a non-source working directory, discards stderr and owns
 the child plus bounded pipe threads. Every return/unwind kills and waits for the owned child
 before joining pipe threads. A monotonic loop checks cancellation, exact target/claim, persisted
