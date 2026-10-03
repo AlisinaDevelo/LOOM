@@ -4,7 +4,209 @@ use loom_core::{parse_bookmark_export, Library};
 use tempfile::tempdir;
 
 const CHROME_EXPORT: &str = include_str!("fixtures/bookmarks/chrome.html");
+
+fn active_artifact_count(library: &Library) -> usize {
+    let export = library.export_portable().unwrap();
+    let artifacts = &export.tables["artifacts"];
+    let state = artifacts
+        .columns
+        .iter()
+        .position(|column| column == "state")
+        .unwrap();
+    artifacts
+        .rows
+        .iter()
+        .filter(|row| row[state].as_str() == Some("active"))
+        .count()
+}
+
+#[test]
+fn reselection_of_a_changed_export_restores_unchanged_bookmarks() {
+    let directory = tempdir().unwrap();
+    let export = directory.path().join("Bookmarks.html");
+    fs::write(&export, CHROME_EXPORT).unwrap();
+    let library = Library::open_in_memory().unwrap();
+    let first = library.import_bookmarks(&export).unwrap();
+    let before = library.list_bookmarks(10).unwrap();
+    library.revoke_source_root(&first.source_uri).unwrap();
+    fs::write(
+        &export,
+        format!("{CHROME_EXPORT}\n<!-- changed export header -->"),
+    )
+    .unwrap();
+    let changed = library.import_bookmarks(&export).unwrap();
+    assert_ne!(changed.import_id, first.import_id);
+    assert_eq!(changed.unchanged, first.discovered);
+    assert_eq!(active_artifact_count(&library), before.len());
+    assert_eq!(
+        library.list_bookmarks(10).unwrap()[0].artifact_id,
+        before[0].artifact_id
+    );
+    assert_eq!(
+        library
+            .search(&loom_core::SearchRequest {
+                text: "Rust SQLite".into(),
+                limit: 10
+            })
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
+#[test]
+fn retry_refuses_a_disabled_root_even_if_legacy_status_is_complete() {
+    let directory = tempdir().unwrap();
+    let export = directory.path().join("Bookmarks.html");
+    let database = directory.path().join("library.sqlite3");
+    fs::write(&export, CHROME_EXPORT).unwrap();
+    let library = Library::open(&database).unwrap();
+    let first = library.import_bookmarks(&export).unwrap();
+    library.revoke_source_root(&first.source_uri).unwrap();
+    let connection = rusqlite::Connection::open(&database).unwrap();
+    // Old connector schemas defaulted to complete even when the persisted root was disabled.
+    connection
+        .execute("UPDATE bookmark_imports SET status = 'complete'", [])
+        .unwrap();
+    assert!(library.retry_bookmark_import(&first.import_id).is_err());
+    assert!(!library.source_roots().unwrap()[0].enabled);
+    assert_eq!(active_artifact_count(&library), 0);
+}
+
+#[test]
+fn identical_replay_refuses_scope_inconsistent_import_items() {
+    let directory = tempdir().unwrap();
+    let first = directory.path().join("first.html");
+    let second = directory.path().join("second.html");
+    let database = directory.path().join("library.sqlite3");
+    fs::write(&first, CHROME_EXPORT).unwrap();
+    fs::write(
+        &second,
+        CHROME_EXPORT.replace("https://", "https://second.example.test/"),
+    )
+    .unwrap();
+    let library = Library::open(&database).unwrap();
+    let first_import = library.import_bookmarks(&first).unwrap();
+    let second_import = library.import_bookmarks(&second).unwrap();
+    library
+        .revoke_source_root(&second_import.source_uri)
+        .unwrap();
+    let connection = rusqlite::Connection::open(&database).unwrap();
+    let second_bookmark: String = connection
+        .query_row(
+            "SELECT bookmark_id FROM bookmark_import_items WHERE import_id = ?1 LIMIT 1",
+            [&second_import.import_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(connection.execute(
+        "UPDATE bookmark_import_items SET bookmark_id = ?1 WHERE import_id = ?2 AND ordinal = 0",
+        rusqlite::params![second_bookmark, first_import.import_id]).unwrap(), 1);
+    let before = library.export_portable().unwrap().tables;
+    assert!(library.import_bookmarks(&first).is_err());
+    let after = library.export_portable().unwrap().tables;
+    for table in [
+        "artifacts",
+        "artifact_versions",
+        "bookmark_imports",
+        "bookmark_import_items",
+        "passages",
+    ] {
+        assert_eq!(before[table], after[table]);
+    }
+    assert_eq!(active_artifact_count(&library), 1);
+}
 const FIREFOX_EXPORT: &str = include_str!("fixtures/bookmarks/firefox.html");
+
+#[test]
+fn a_second_export_cannot_reactivate_or_adopt_another_scopes_bookmark() {
+    for (revoked, changed_folder, changed_title) in [
+        (false, false, false),
+        (false, true, true),
+        (true, false, false),
+        (true, false, true),
+        (true, true, true),
+    ] {
+        let directory = tempdir().unwrap();
+        let first = directory.path().join("first.html");
+        let second = directory.path().join("second.html");
+        let database = directory.path().join("library.sqlite3");
+        fs::write(
+            &first,
+            CHROME_EXPORT.replace("Rust &amp; SQLite", "firstprivatebookmark"),
+        )
+        .unwrap();
+        let library = Library::open(&database).unwrap();
+        library.import_bookmarks(&first).unwrap();
+        let first_locator = first.canonicalize().unwrap().to_string_lossy().into_owned();
+        if revoked {
+            library.revoke_source_root(&first_locator).unwrap();
+        }
+        let before = library.export_portable().unwrap().tables;
+        let mut content = fs::read_to_string(&first).unwrap();
+        if changed_folder {
+            content = content.replace("Engineering", "Other");
+        }
+        if changed_title {
+            content = content.replace("firstprivatebookmark", "secondprivatebookmark");
+        }
+        content = content.replacen(
+            "<DL><p>",
+            "<DL><p>\n<DT><A HREF=\"https://example.test/unique-second\">secondonlybookmark</A>",
+            1,
+        );
+        fs::write(&second, content).unwrap();
+
+        assert!(
+            library.import_bookmarks(&second).is_err(),
+            "an export must not adopt another scope's URL identity"
+        );
+        let after = library.export_portable().unwrap().tables;
+        for table in [
+            "artifacts",
+            "artifact_versions",
+            "bookmark_records",
+            "bookmark_imports",
+            "bookmark_import_items",
+            "passages",
+        ] {
+            assert_eq!(
+                after[table], before[table],
+                "{table} changed on refused cross-scope import"
+            );
+        }
+        let connection = rusqlite::Connection::open(&database).unwrap();
+        let active_under_revoked: i64 = connection
+            .query_row(
+                "SELECT count(*) FROM artifacts a JOIN source_roots r ON r.id = a.source_root_id
+                WHERE r.enabled = 0 AND a.state = 'active'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(active_under_revoked, 0);
+        let hits = library
+            .search(&loom_core::SearchRequest {
+                text: "firstprivatebookmark".into(),
+                limit: 10,
+            })
+            .unwrap();
+        assert_eq!(hits.len(), usize::from(!revoked));
+        if revoked {
+            library.import_bookmarks(&first).unwrap();
+            assert_eq!(
+                library
+                    .search(&loom_core::SearchRequest {
+                        text: "firstprivatebookmark".into(),
+                        limit: 10
+                    })
+                    .unwrap()
+                    .len(),
+                1
+            );
+        }
+    }
+}
 
 #[test]
 fn chrome_and_firefox_exports_preserve_folder_title_url_and_timestamps() {

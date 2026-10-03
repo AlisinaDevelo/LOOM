@@ -27,7 +27,12 @@ consent and visible best-effort capture status.
 
 - Repeated identical exports are idempotent by `(source locator, format, content hash)`.
 - Changed metadata remains recoverable as a new import/version, while current records report merges
-  and duplicate-URL conflicts.
+  and duplicate-URL conflicts within the same selected export scope.
+- URL and folder/URL identities are currently global. An import that collides with an artifact
+  belonging to another selected export is refused transactionally, whether that first scope is
+  enabled or revoked. It never adopts, updates, or reactivates the other scope's evidence. Re-select
+  the original export or explicitly purge its scope before importing that URL from another export.
+  Root-scoped duplicate URL identities are future work, not a silent permission transfer.
 - Bookmark URLs are locators and searchable evidence, not proof that the current remote page exists.
 - The schema adds three canonical history tables in version 7 and migrates version 6 additively.
 - A browser permission session, live fetcher, and web archive are intentionally out of scope.

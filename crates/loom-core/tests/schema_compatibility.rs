@@ -10,6 +10,88 @@ const V2_FIXTURE: &str = include_str!(concat!(
 ));
 
 #[test]
+fn populated_v9_migration_adds_scope_generation_without_rewriting_evidence() {
+    let directory = tempdir().unwrap();
+    let database = directory.path().join("v9.sqlite3");
+    let source = directory.path().join("source.md");
+    fs::write(&source, "scopegenerationfixture canonical evidence").unwrap();
+    let library = Library::open(&database).unwrap();
+    library.index_path(&source).unwrap();
+    let before = library
+        .search(&SearchRequest {
+            text: "scopegenerationfixture".into(),
+            limit: 1,
+        })
+        .unwrap();
+    drop(library);
+    let connection = Connection::open(&database).unwrap();
+    connection
+        .execute_batch(
+            "ALTER TABLE source_roots DROP COLUMN scope_generation;
+        DELETE FROM schema_meta WHERE key = 'authorization_incarnation';
+        UPDATE schema_meta SET value = '9' WHERE key = 'schema_version';",
+        )
+        .unwrap();
+    drop(connection);
+    let migrated = Library::open(&database).unwrap();
+    assert_eq!(
+        migrated
+            .search(&SearchRequest {
+                text: "scopegenerationfixture".into(),
+                limit: 1
+            })
+            .unwrap(),
+        before
+    );
+    let connection = Connection::open(&database).unwrap();
+    let generation: i64 = connection
+        .query_row("SELECT scope_generation FROM source_roots", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(generation, 0);
+    let version: String = connection
+        .query_row(
+            "SELECT value FROM schema_meta WHERE key = 'schema_version'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(version, "10");
+    let incarnation: String = connection
+        .query_row(
+            "SELECT value FROM schema_meta WHERE key = 'authorization_incarnation'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(uuid::Uuid::parse_str(&incarnation).is_ok());
+}
+
+#[test]
+fn malformed_v10_without_scope_generation_is_rejected_before_migration() {
+    let directory = tempdir().unwrap();
+    let database = directory.path().join("malformed-v10.sqlite3");
+    drop(Library::open(&database).unwrap());
+    let connection = Connection::open(&database).unwrap();
+    connection
+        .execute_batch("ALTER TABLE source_roots DROP COLUMN scope_generation;")
+        .unwrap();
+    assert!(
+        matches!(Library::open(&database), Err(LoomError::UnsupportedSchemaVersion(message))
+        if message.contains("source_roots.scope_generation"))
+    );
+    let version: String = connection
+        .query_row(
+            "SELECT value FROM schema_meta WHERE key = 'schema_version'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(version, "10");
+}
+
+#[test]
 fn populated_v2_migration_preserves_canonical_identity_and_evidence() {
     let directory = tempdir().unwrap();
     let database = directory.path().join("v2.sqlite3");
@@ -62,7 +144,7 @@ fn populated_v3_migration_adds_pdf_metadata_without_rewriting_canonical_rows() {
             |row| row.get(0),
         )
         .unwrap();
-    assert_eq!(schema_version, "9");
+    assert_eq!(schema_version, "10");
     let (hash, warnings, page_count): (String, String, Option<i64>) = connection
         .query_row(
             "SELECT content_hash, parse_warnings_json, page_count
@@ -134,7 +216,7 @@ fn populated_v4_migration_adds_extraction_metadata_without_rewriting_rows() {
             |row| row.get(0),
         )
         .unwrap();
-    assert_eq!(schema_version, "9");
+    assert_eq!(schema_version, "10");
     let metadata: String = connection
         .query_row(
             "SELECT extraction_metadata_json FROM artifact_versions",
@@ -199,7 +281,7 @@ fn populated_v5_migration_adds_relationship_envelope_without_rewriting_rows() {
             |row| row.get(0),
         )
         .unwrap();
-    assert_eq!(schema_version, "9");
+    assert_eq!(schema_version, "10");
     let columns: (i64, String, String) = connection
         .query_row(
             "SELECT relationship_schema_version, origin, metadata_json
@@ -251,7 +333,7 @@ fn populated_v6_migration_adds_bookmark_tables_without_rewriting_canonical_rows(
             |row| row.get(0),
         )
         .unwrap();
-    assert_eq!(schema_version, "9");
+    assert_eq!(schema_version, "10");
     for table in [
         "bookmark_imports",
         "bookmark_records",
@@ -333,7 +415,7 @@ fn assert_preserved_v2_rows(library: &Library, database: &std::path::Path) {
             |row| row.get(0),
         )
         .unwrap();
-    assert_eq!(schema_version, "9");
+    assert_eq!(schema_version, "10");
 
     let (hash, extractor_id, extractor_version): (String, String, String) = connection
         .query_row(
@@ -502,7 +584,7 @@ fn populated_v7_migration_adds_connector_metadata_without_rewriting_imports() {
             |row| row.get(0),
         )
         .unwrap();
-    assert_eq!(schema_version, "9");
+    assert_eq!(schema_version, "10");
 }
 
 #[test]
@@ -554,5 +636,5 @@ fn v8_migration_adds_relationship_indexes_checks_and_compaction_table() {
             |row| row.get(0),
         )
         .unwrap();
-    assert_eq!(version, "9");
+    assert_eq!(version, "10");
 }

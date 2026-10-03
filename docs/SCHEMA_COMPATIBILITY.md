@@ -8,15 +8,16 @@ derived or diagnostic and may be rebuilt.
 
 |Database state|Open behavior|Data guarantee|Recovery path|
 |---|---|---|---|
-|No database or empty SQLite file|Create schema version 9 transactionally|Creates the canonical tables, FTS5/vocabulary projections, PDF/image extraction metadata, typed relationship envelope columns with indexes and envelope checks, relationship compaction summaries, bookmark import/record history with connector metadata and per-record failures, triggers, and `schema_meta` marker|Index or import explicitly selected sources|
-|Schema version 9 with the expected shape|Open without changing canonical rows|Validate required tables/columns; rebuild FTS5 only when its row count is inconsistent|Reopen, then re-index approved roots or imports|
-|Schema version 8 with the expected shape|Run the reviewed v8→v9 transaction|Preserve all canonical rows; add relationship source/target/edge indexes, envelope check triggers, and the `relationship_compactions` table|Reopen; run `compact-relationships` if the graph has redundant inferred edges|
-|Schema version 7 with the expected shape|Run the reviewed v7→v9 transaction|Preserve all canonical rows and import IDs; add connector metadata columns to `bookmark_imports` with `unknown`/`complete` defaults and the `bookmark_import_failures` table|Reopen and replay or re-select bookmark exports|
-|Schema version 6 with the expected shape|Run the reviewed v6→v9 transaction|Preserve all canonical rows and add bookmark import/record/item/failure tables and URL index|Reopen and re-index approved roots or imports|
-|Schema version 5 with the expected shape|Run the reviewed v5→v9 transaction|Preserve hashes, extractor identity/version, anchors, relationship rows, and source identity; add relationship envelope defaults and bookmark tables|Reopen and re-index approved roots|
-|Schema version 4 with the expected shape|Run the reviewed v4→v9 transaction|Preserve hashes, extractor identity/version, anchors, relationship rows, and source identity; add extraction metadata, relationship fields, and bookmark tables with safe defaults|Reopen and re-index approved roots|
-|Schema version 3 with the expected shape|Run the reviewed v3→v9 transaction|Preserve hashes, extractor identity/version, anchors, relationship rows, and source identity; add PDF page/warning, extraction metadata, relationship fields, and bookmark tables|Reopen and re-index approved roots|
-|Schema version 2 with the expected shape|Run the reviewed v2→v9 transaction|Preserve hashes, extractor identity/version, anchors, relationship rows, and source identity; add `index_jobs`, extraction/relationship metadata, and bookmark tables with safe defaults|Reopen and re-index approved roots|
+|No database or empty SQLite file|Create schema version 10 transactionally|Creates canonical tables, consent generations, FTS5/vocabulary projections, extraction metadata, graph bounds/compaction, bookmark import history, triggers, and `schema_meta` marker|Index or import explicitly selected sources|
+|Schema version 10 with the expected shape|Open without changing canonical rows|Validate required tables/columns; deterministically rebuild derived FTS5 from canonical passages|Reopen, then re-index approved roots or imports|
+|Schema version 9 with the expected shape|Run the reviewed v9→v10 transaction|Preserve all canonical rows; add `source_roots.scope_generation` with a nonnegative zero default|Reopen; revocation and re-selection invalidate older consent generations|
+|Schema version 8 with the expected shape|Run the reviewed v8→v10 transaction|Preserve all canonical rows; add graph indexes, envelope checks, compaction table, and consent generations|Reopen; run `compact-relationships` if the graph has redundant inferred edges|
+|Schema version 7 with the expected shape|Run the reviewed v7→v10 transaction|Preserve all canonical rows and import IDs; add connector metadata with safe defaults, import failures, graph bounds, and consent generations|Reopen and replay or re-select bookmark exports|
+|Schema version 6 with the expected shape|Run the reviewed v6→v10 transaction|Preserve all canonical rows; add bookmark history, graph bounds, and consent generations|Reopen and re-index approved roots or imports|
+|Schema version 5 with the expected shape|Run the reviewed v5→v10 transaction|Preserve hashes, extractor identity, anchors, relationships, and source identity; add relationship envelope defaults and later additive fields|Reopen and re-index approved roots|
+|Schema version 4 with the expected shape|Run the reviewed v4→v10 transaction|Preserve canonical evidence; add extraction metadata and later additive fields with safe defaults|Reopen and re-index approved roots|
+|Schema version 3 with the expected shape|Run the reviewed v3→v10 transaction|Preserve canonical evidence; add PDF page/warning metadata and later additive fields|Reopen and re-index approved roots|
+|Schema version 2 with the expected shape|Run the reviewed v2→v10 transaction|Preserve canonical evidence; add `index_jobs`, extraction metadata, and later additive fields with safe defaults|Reopen and re-index approved roots|
 |Schema version 1|Reject before migration|The marker is not overwritten because its content-version uniqueness contract is incompatible|Rebuild from the original source files or export outside LOOM|
 |Missing marker on a non-empty database|Reject before migration|No tables or marker are created|Recover from a known LOOM export or rebuild from source files|
 |Malformed known version or unknown future version|Reject before migration with a named `UnsupportedSchemaVersion` reason|The existing marker and canonical rows are left untouched|Use a compatible LOOM release or rebuild from source files|
@@ -27,8 +28,8 @@ derived or diagnostic and may be rebuilt.
   It contains populated source, version, passage, and relationship rows rather than only an empty
   marker.
 - Opening a version-2 fixture creates `index_jobs`, PDF/image metadata defaults, relationship
-  envelope defaults, bookmark tables, and records version 9 in one transaction. The migration never
-  recomputes or
+  envelope defaults, bookmark tables, consent generations, and records version 10 in one transaction.
+  The migration never recomputes or
   replaces canonical hashes, extractor identity, anchors, or relationships.
 - The FTS5 table and its vocabulary projections are disposable. On open, LOOM deterministically
   issues the FTS5 `rebuild` command from canonical passages. `fts-health` compares a fresh scratch
@@ -53,12 +54,15 @@ derived or diagnostic and may be rebuilt.
   `relationships_envelope_insert`/`_update` check triggers, and the empty
   `relationship_compactions` table. Existing relationship rows are not rewritten; the triggers only
   check new and updated rows.
+- Version-9 databases receive `source_roots.scope_generation` with a zero default and nonnegative
+  constraint. Root IDs, enabled states, hashes, passage IDs, anchors, and checkpoints are unchanged.
+  A version-10 database missing this column is refused before any migration writes occur.
 - The compatibility tests cover create/open, populated v2 migration, derived-index rebuild,
   malformed-v2 refusal, unknown-version refusal, and canonical-row preservation on reopen.
 
 ## Support policy
 
-Schema version 9 is the supported local format. Versions 2, 3, 4, 5, 6, 7, and 8 are supported by reviewed
+Schema version 10 is the supported local format. Versions 2 through 9 are supported by reviewed
 transactional migrations. Version 1 and unknown/future versions are intentionally rejected; LOOM
 does not promise to infer or rewrite an unrecognized format. Users with a rejected database keep
 the original file and must either use a compatible release, restore a known export, or rebuild from

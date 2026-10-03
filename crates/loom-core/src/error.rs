@@ -40,6 +40,9 @@ pub enum LoomError {
     #[error("source changed while it was being read: {0}")]
     SourceChanged(String),
 
+    #[error("source authorization was revoked or superseded: {0}")]
+    SourceRevoked(String),
+
     #[error("invalid query: {0}")]
     InvalidQuery(String),
 
@@ -63,6 +66,9 @@ pub enum LoomError {
 
     #[error("index job interrupted: {0}")]
     IndexInterrupted(String),
+
+    #[error("index job is not writable under this source authorization: {0}")]
+    IndexJobStale(String),
 
     #[error("library lock is unavailable")]
     LockPoisoned,

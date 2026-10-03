@@ -1,6 +1,6 @@
 # Data model
 
-This document describes the schema currently created by LOOM schema version 7. The supported
+This document describes the schema currently created by LOOM schema version 10. The supported
 version matrix and migration policy are maintained in [SCHEMA_COMPATIBILITY.md](SCHEMA_COMPATIBILITY.md).
 
 ## Identity and source records
@@ -8,7 +8,7 @@ version matrix and migration policy are maintained in [SCHEMA_COMPATIBILITY.md](
 |Table|Purpose|Important fields|
 |---|---|---|
 |schema_meta|Records the schema version|key, value|
-|source_roots|An explicitly selected file or directory|kind, unique locator, enabled, timestamps|
+|source_roots|An explicitly selected file or directory|kind, unique locator, enabled, scope_generation, timestamps|
 |artifacts|A logical source under a root|title, media_type, state, active_version_id|
 |artifact_locators|Resolves an artifact to a source location|kind, locator, active, first/last seen timestamps|
 |artifact_versions|Immutable content observations|content_hash, byte_size, mtime, extractor/version, page_count, parse_warnings_json, extraction_metadata_json, status|
@@ -29,6 +29,11 @@ means disabled. It is deliberately a policy value, not an implicit delete trigge
 File ingestion creates file locators. The bookmark connector creates URL locators only for URLs
 present in an explicitly selected Netscape HTML export; it stores metadata and never resolves the
 URL. Managed-copy locators remain future work.
+
+Bookmark URL/folder identities are global in the current schema. Imports refuse a collision owned
+by another source root instead of silently sharing that root's permission or reviving revoked
+evidence. Same-scope repeats and metadata merges remain supported; cross-scope URL duplicates
+require explicit removal/re-selection until root-scoped identity is implemented.
 
 An artifact is the logical identity of a source locator. A new content hash creates a new artifact
 version and can become the active version. Re-indexing unchanged bytes with the same extractor
@@ -274,13 +279,38 @@ the content-hash scan remains the correctness boundary.
 ## Persisted source scopes
 
 `source_roots` stores the exact canonical locator selected by the user, its file/directory kind,
-enabled state, and timestamps. The desktop exposes a derived availability status without storing a
-write capability: available, missing, denied, wrong type, unsafe symlink, unavailable, or revoked.
+enabled state, consent generation, and timestamps. The desktop exposes a derived availability status
+without storing a write capability: available, missing, denied, wrong type, unsafe symlink,
+unavailable, or revoked.
 The current direct-distribution build uses explicit re-selection through the native picker rather
 than claiming a macOS security-scoped bookmark. Revocation disables future reconciliation and marks
 the root's active artifacts missing so they are not searchable or openable; canonical historical
 rows remain for a future retention/export policy. Re-selection is the only path that re-enables a
 revoked locator.
+
+Revocation atomically advances `scope_generation`, hides active artifacts, and invalidates an
+interrupted scan's checkpoint. Explicit re-selection advances the disabled root's generation again
+and starts a full scan. Each ingestion, cleanup, and checkpoint write checks the captured root ID
+and generation inside its own transaction. An old extraction cannot reactivate revoked evidence,
+replace a new selection's version, or hide its sources, even through another SQLite connection.
+Authorization binds the selected file/directory kind and rejects missing, denied, symlink, or wrong-kind
+roots before a write. A path replaced by the opposite kind requires explicit removal of the old
+scope before selecting the replacement; ordinary selection or bookmark retry cannot reuse it.
+Checkpoint and terminal updates require one running job belonging to that same root; a mismatched
+job ID or a late write to a completed job rolls back the entire canonical transaction.
+Startup and event reconciliation carry the already-approved generation instead of calling the
+explicit selection path; they never re-enable a revoked root.
+
+Authorizations also carry the library's operational `authorization_incarnation` setting. Portable
+restore clears diagnostic checkpoints and rotates this value atomically with its import. Restoring
+the same canonical root IDs and generations cannot revive a pre-restore worker; the incarnation is
+not part of the portable archive or a source identity.
+
+Bookmark retries also carry existing consent rather than re-selecting an export. They require an
+enabled root even when an older import status says `complete`. Explicit re-selection restores
+unchanged entries after either identical or changed export bytes. Import/replay/portable restore
+reject scope-inconsistent bookmark import, record, item, or failure-resolution ownership even if
+its foreign keys are valid.
 
 ## References
 

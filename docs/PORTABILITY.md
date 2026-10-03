@@ -14,7 +14,7 @@ A portable export is one JSON document:
 {
   "format": "loom.portable-export",
   "format_version": 1,
-  "library_schema_version": 9,
+  "library_schema_version": 10,
   "exported_at": "2026-09-28T12:00:00.000Z",
   "settings": {"ocr_enabled": "1", "retention_days": "90"},
   "tables": {"passages": {"columns": ["id", "..."], "rows": [["...", "..."]]}},
@@ -26,7 +26,7 @@ A portable export is one JSON document:
 
 | Table | Contents |
 | --- | --- |
-| `source_roots` | Selected files and folders, and whether they are enabled |
+| `source_roots` | Selected files and folders, enabled state, and consent generation |
 | `artifacts`, `artifact_locators`, `artifact_versions` | Source identity, locators, content hashes, extractor identity, warnings, and extraction metadata |
 | `passages` | Passage text, text hashes, and exact character, line, page, or pixel anchors |
 | `relationships`, `relationship_compactions` | Typed provenance links with origin, method, evidence passage, confidence, and metadata, plus digest-linked records of compacted edges |
@@ -49,10 +49,16 @@ is unencrypted at rest; use an encrypted backup for anything that leaves the mac
 - An import checks the format, format version, schema version, and digest, and it only goes into
   a library with no canonical rows.
 - `format_version` 1 is the only format. A future format bump will keep reading version 1.
-- This build imports exports made at library schema 6 through 9 (`IMPORTABLE_SCHEMA_VERSIONS`).
+- This build imports exports made at library schema 6 through 10 (`IMPORTABLE_SCHEMA_VERSIONS`).
   Schema 6 exports have no bookmark tables; schema 7 exports have no connector metadata columns or
   per-record import failures, which take their documented defaults; schema 8 exports have no
-  relationship compaction summaries. Each new schema release keeps
+  relationship compaction summaries. Schema 9 exports have no consent generation, which defaults
+  to zero; schema 10 exports preserve it and the enabled state without re-authorizing revoked roots.
+  Import clears runtime checkpoints and rotates the local authorization incarnation, so an old
+  worker cannot inherit restored root IDs/generations. Neither runtime value is exported.
+  Foreign-key-valid bookmark rows must also agree on source-root ownership and export locator;
+  cross-scope imports, records, items, and failure-resolution links are refused with full rollback.
+  Each new schema release keeps
   at least the previous schema's exports importable.
 - Every exported table and column must exist in the live schema, and every required column must
   be present. Unknown tables or columns, such as those from a newer LOOM, are refused rather than

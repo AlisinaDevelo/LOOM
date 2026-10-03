@@ -49,9 +49,11 @@ type BookmarkRecordProjection = (
     Option<String>,
     Option<String>,
     String,
+    String,
 );
 
-const SCHEMA_VERSION: i64 = 9;
+const SCHEMA_VERSION: i64 = 10;
+const GRAPH_BOUNDS_SCHEMA_VERSION: i64 = 9;
 const CONNECTOR_SCHEMA_VERSION: i64 = 8;
 const BOOKMARK_SCHEMA_VERSION: i64 = 7;
 /// Upper bound on relationships touching one artifact. With the source/target indexes this bounds
@@ -220,7 +222,7 @@ impl Library {
     /// Indexes one explicitly selected regular file or directory.
     pub fn index_path(&self, selected_path: impl AsRef<Path>) -> Result<IndexReport> {
         let cancellation = IndexCancellationToken::new();
-        self.index_path_with_options(selected_path, &cancellation, None, None, None)
+        self.index_path_with_options(selected_path, &cancellation, None, None, None, None)
     }
 
     /// Imports a Netscape HTML bookmark export as metadata-only, source-faithful records.
@@ -230,6 +232,14 @@ impl Library {
     pub fn import_bookmarks(
         &self,
         selected_path: impl AsRef<Path>,
+    ) -> Result<BookmarkImportReport> {
+        self.import_bookmarks_with_authorization(selected_path, None)
+    }
+
+    fn import_bookmarks_with_authorization(
+        &self,
+        selected_path: impl AsRef<Path>,
+        approved_authorization: Option<SourceAuthorization>,
     ) -> Result<BookmarkImportReport> {
         let requested_path = selected_path.as_ref();
         let metadata = fs::symlink_metadata(requested_path)
@@ -244,6 +254,9 @@ impl Library {
             .canonicalize()
             .map_err(|source| io_error(requested_path, source))?;
         let source_uri = utf8_path(&path)?;
+        if let Some(authorization) = approved_authorization.as_ref() {
+            authorization.verify_locator(&*self.lock()?, &source_uri)?;
+        }
         let bytes = ingest::read_stable_selected_file(&path, self.limits.max_file_bytes)?;
         let content_hash = format!("blake3:{}", blake3::hash(&bytes).to_hex());
         let text = String::from_utf8(bytes).map_err(|_| {
@@ -256,19 +269,26 @@ impl Library {
             ));
         }
         let export = detailed.export.clone();
-        let root_id = {
+        let authorization = {
             let mut connection = self.lock()?;
-            ensure_source_root(&mut connection, &source_uri, false)?
+            match approved_authorization {
+                Some(authorization) => authorization,
+                None => ensure_source_root(&mut connection, &source_uri, false)?,
+            }
         };
+        let root_id = &authorization.root_id;
         let now = Utc::now().to_rfc3339();
         let mut connection = self.lock()?;
         let transaction = connection.transaction()?;
+        authorization.verify(&transaction)?;
+        validate_bookmark_scope_consistency(&transaction)?;
         let existing: Option<(String, i64)> = transaction
             .query_row(
                 "SELECT id, (SELECT COUNT(*) FROM bookmark_import_items WHERE import_id = i.id)
                  FROM bookmark_imports i
-                 WHERE source_locator = ?1 AND format = ?2 AND content_hash = ?3",
-                params![source_uri, export.format, content_hash],
+                 WHERE source_locator = ?1 AND format = ?2 AND content_hash = ?3
+                     AND source_root_id = ?4",
+                params![source_uri, export.format, content_hash, root_id],
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .optional()?;
@@ -281,17 +301,17 @@ impl Library {
                         SELECT 1 FROM bookmark_import_failures
                         WHERE import_id = ?1 AND state = 'pending'
                      ) THEN 'partial' ELSE 'complete' END
-                 WHERE id = ?1 AND status = 'revoked'",
-                [&import_id],
+                 WHERE id = ?1 AND status = 'revoked' AND source_root_id = ?2",
+                params![import_id, root_id],
             )?;
             transaction.execute(
                 "UPDATE artifacts SET state = 'active', last_seen_at = ?2
-                 WHERE state = 'missing' AND id IN (
+                 WHERE state = 'missing' AND source_root_id = ?3 AND id IN (
                     SELECT r.artifact_id FROM bookmark_records r
                     JOIN bookmark_import_items item ON item.bookmark_id = r.id
                     WHERE item.import_id = ?1
                  )",
-                params![import_id, now],
+                params![import_id, now, root_id],
             )?;
             let failures = pending_import_failures(&transaction, &import_id)?;
             transaction.commit()?;
@@ -372,8 +392,10 @@ impl Library {
             let entry_hash = bookmark_entry_hash(entry);
             let existing_record: Option<BookmarkRecordProjection> = transaction
                 .query_row(
-                    "SELECT id, title, entry_hash, added_at, modified_at, artifact_id
-                     FROM bookmark_records WHERE url = ?1 AND folder_path = ?2",
+                    "SELECT b.id, b.title, b.entry_hash, b.added_at, b.modified_at,
+                         b.artifact_id, a.source_root_id
+                     FROM bookmark_records b JOIN artifacts a ON a.id = b.artifact_id
+                     WHERE b.url = ?1 AND b.folder_path = ?2",
                     params![entry.url, entry.folder_path],
                     |row| {
                         Ok((
@@ -383,6 +405,7 @@ impl Library {
                             row.get(3)?,
                             row.get(4)?,
                             row.get(5)?,
+                            row.get(6)?,
                         ))
                     },
                 )
@@ -399,19 +422,32 @@ impl Library {
                 old_added_at,
                 old_modified_at,
                 artifact_id,
+                existing_root_id,
             )) = existing_record
             {
+                if existing_root_id != *root_id {
+                    return Err(bookmark_scope_conflict());
+                }
                 let unchanged = old_hash == entry_hash
                     && old_title == entry.title
                     && old_added_at == entry.added_at
                     && old_modified_at == entry.modified_at;
                 if unchanged {
+                    upsert_bookmark_artifact(
+                        &transaction,
+                        root_id,
+                        &source_uri,
+                        &artifact_id,
+                        entry,
+                        &entry_hash,
+                        &now,
+                    )?;
                     report.unchanged += 1;
                     (bookmark_id, artifact_id, "unchanged")
                 } else {
                     upsert_bookmark_artifact(
                         &transaction,
-                        &root_id,
+                        root_id,
                         &source_uri,
                         &artifact_id,
                         entry,
@@ -438,7 +474,7 @@ impl Library {
             } else {
                 let artifact_id = ensure_bookmark_artifact(
                     &transaction,
-                    &root_id,
+                    root_id,
                     &source_uri,
                     entry,
                     &entry_hash,
@@ -568,25 +604,26 @@ impl Library {
     /// Re-reads the original export of a recorded import. A revoked export must be re-selected
     /// explicitly instead; retry never re-grants access that was withdrawn.
     pub fn retry_bookmark_import(&self, import_id: &str) -> Result<BookmarkImportReport> {
-        let (locator, status): (String, String) = {
+        let (locator, authorization) = {
             let connection = self.lock()?;
             connection
                 .query_row(
-                    "SELECT source_locator, status FROM bookmark_imports WHERE id = ?1",
+                    "SELECT i.source_locator, r.id, r.scope_generation,
+                        (SELECT value FROM schema_meta WHERE key = 'authorization_incarnation'), r.kind
+                     FROM bookmark_imports i JOIN source_roots r ON r.id = i.source_root_id
+                     WHERE i.id = ?1 AND i.status <> 'revoked' AND r.enabled = 1
+                        AND r.locator = i.source_locator AND r.kind = 'file'",
                     [import_id],
-                    |row| Ok((row.get(0)?, row.get(1)?)),
+                    |row| Ok((row.get::<_, String>(0)?, SourceAuthorization {
+                        root_id: row.get(1)?, generation: row.get(2)?, incarnation: row.get(3)?, kind: row.get(4)?,
+                    })),
                 )
                 .optional()?
                 .ok_or_else(|| {
-                    LoomError::InvalidPath(format!("unknown bookmark import: {import_id}"))
+                    LoomError::InvalidPath("bookmark import is unknown or its source is not enabled; explicitly re-select a revoked export".into())
                 })?
         };
-        if status == "revoked" {
-            return Err(LoomError::InvalidPath(
-                "this bookmark export was revoked; select it again to import it".into(),
-            ));
-        }
-        self.import_bookmarks(locator)
+        self.import_bookmarks_with_authorization(locator, Some(authorization))
     }
 
     /// Lists bounded current bookmark records with their original export provenance.
@@ -632,7 +669,7 @@ impl Library {
         selected_path: impl AsRef<Path>,
         cancellation: &IndexCancellationToken,
     ) -> Result<IndexReport> {
-        self.index_path_with_options(selected_path, cancellation, None, None, None)
+        self.index_path_with_options(selected_path, cancellation, None, None, None, None)
     }
 
     /// Indexes one atomically written intentional screenshot and stores its capture provenance
@@ -650,7 +687,7 @@ impl Library {
         }
         let cancellation = IndexCancellationToken::new();
         let metadata = serde_json::to_value(context)?;
-        self.index_path_with_options(path, &cancellation, None, None, Some(metadata))
+        self.index_path_with_options(path, &cancellation, None, None, Some(metadata), None)
     }
 
     /// Reconciles an in-scope event batch against the approved root's current bytes.
@@ -665,16 +702,19 @@ impl Library {
     ) -> Result<ObservationReport> {
         let selected_path = canonical_selected_root(selected_root.as_ref())?;
         let selected_uri = utf8_path(&selected_path)?;
-        if !self.is_approved_root(&selected_uri)? {
-            return Err(LoomError::InvalidPath(format!(
-                "root is not an enabled approved source: {selected_uri}"
-            )));
-        }
+        let authorization = self.approved_root_authorization(&selected_uri)?;
         let plan = observe::coalesce_events(&selected_path, events, max_events)?;
         if plan.events_received == 0 {
             return Ok(ObservationReport::default());
         }
-        let index = self.index_path(&selected_path)?;
+        let index = self.index_path_with_options(
+            &selected_path,
+            &IndexCancellationToken::new(),
+            None,
+            None,
+            None,
+            Some(authorization),
+        )?;
         Ok(observation_from_index(
             &index,
             plan.events_received,
@@ -690,7 +730,7 @@ impl Library {
     pub fn reconcile_approved_roots(&self) -> Result<ObservationReport> {
         let roots = self.approved_root_specs()?;
         let mut report = ObservationReport::default();
-        for (root, kind) in roots {
+        for (root, kind, authorization) in roots {
             report.roots_scanned += 1;
             let status = source_root_status(&root, &kind, true);
             if status != SourceRootStatus::Available {
@@ -702,7 +742,14 @@ impl Library {
                 });
                 continue;
             }
-            match self.index_path(&root) {
+            match self.index_path_with_options(
+                &root,
+                &IndexCancellationToken::new(),
+                None,
+                None,
+                None,
+                Some(authorization),
+            ) {
                 Ok(index) => merge_observation_index(&mut report, &index),
                 Err(error) => {
                     report.roots_failed += 1;
@@ -760,7 +807,8 @@ impl Library {
             )));
         }
         transaction.execute(
-            "UPDATE source_roots SET enabled = 0, last_seen_at = ?1 WHERE locator = ?2",
+            "UPDATE source_roots SET enabled = 0, scope_generation = scope_generation + 1,
+                last_seen_at = ?1 WHERE locator = ?2",
             params![Utc::now().to_rfc3339(), locator],
         )?;
         transaction.execute(
@@ -773,6 +821,13 @@ impl Library {
             "UPDATE bookmark_imports SET status = 'revoked'
              WHERE source_root_id = (SELECT id FROM source_roots WHERE locator = ?1)",
             [locator],
+        )?;
+        transaction.execute(
+            "UPDATE index_jobs SET state = 'failed', last_error = 'source authorization revoked',
+                updated_at = ?1 WHERE source_root_id = (
+                    SELECT id FROM source_roots WHERE locator = ?2
+                ) AND state IN ('running', 'interrupted')",
+            params![Utc::now().to_rfc3339(), locator],
         )?;
         transaction.commit()?;
         drop(connection);
@@ -1190,6 +1245,7 @@ impl Library {
             interrupt_after_units,
             None,
             None,
+            None,
         )
     }
 
@@ -1207,6 +1263,7 @@ impl Library {
             None,
             Some(cancel_after_units),
             None,
+            None,
         )
     }
 
@@ -1217,6 +1274,7 @@ impl Library {
         interrupt_after_units: Option<usize>,
         cancel_after_units: Option<usize>,
         capture_metadata: Option<serde_json::Value>,
+        approved_authorization: Option<SourceAuthorization>,
     ) -> Result<IndexReport> {
         let requested_path = selected_path.as_ref();
         let requested_metadata = fs::symlink_metadata(requested_path)
@@ -1231,15 +1289,21 @@ impl Library {
             .canonicalize()
             .map_err(|source| io_error(requested_path, source))?;
         let selected_uri = utf8_path(&selected_path)?;
+        let authorization = {
+            let mut connection = self.lock()?;
+            match approved_authorization {
+                Some(authorization) => {
+                    authorization.verify_locator(&connection, &selected_uri)?;
+                    authorization
+                }
+                None => ensure_source_root(&mut connection, &selected_uri, selected_path.is_dir())?,
+            }
+        };
         let discovered = ingest::discover(&selected_path, self.limits.max_files_per_request)?;
 
         let discovery_fingerprint = discovery_fingerprint(&discovered);
-        let root_id = {
-            let mut connection = self.lock()?;
-            ensure_source_root(&mut connection, &selected_uri, selected_path.is_dir())?
-        };
         let job = self.start_index_job(
-            &root_id,
+            &authorization,
             &selected_uri,
             &discovery_fingerprint,
             discovered.len(),
@@ -1264,6 +1328,7 @@ impl Library {
             .enumerate()
             .skip(job.next_unit as usize)
         {
+            authorization.verify(&*self.lock()?)?;
             if cancel_after_units.is_some_and(|limit| units_processed_this_run >= limit) {
                 cancellation.cancel();
             }
@@ -1271,13 +1336,13 @@ impl Library {
                 report.cancelled = report
                     .discovered
                     .saturating_sub(job.next_unit.saturating_add(report.attempted));
-                self.interrupt_index_job(&job.job_id, "cancelled by request")?;
+                self.interrupt_index_job(&authorization, &job.job_id, "cancelled by request")?;
                 return Ok(report);
             }
             if interrupt_after_units.is_some_and(|limit| units_processed_this_run >= limit) {
                 let message =
                     format!("fault injection after {units_processed_this_run} completed unit(s)");
-                self.interrupt_index_job(&job.job_id, &message)?;
+                self.interrupt_index_job(&authorization, &job.job_id, &message)?;
                 return Err(LoomError::IndexInterrupted(job.job_id));
             }
             report.attempted += 1;
@@ -1289,7 +1354,7 @@ impl Library {
                         source: path.display().to_string(),
                         reason: error.to_string(),
                     });
-                    self.advance_index_job(&job.job_id, unit as u64 + 1)?;
+                    self.advance_index_job(&authorization, &job.job_id, unit as u64 + 1)?;
                     units_processed_this_run += 1;
                     continue;
                 }
@@ -1297,7 +1362,7 @@ impl Library {
             if ingest::supported_media_type(&path).is_none() {
                 report.skipped += 1;
                 if let Err(error) = self.mark_locator_missing_and_advance(
-                    &root_id,
+                    &authorization,
                     &locator,
                     &job.job_id,
                     unit as u64 + 1,
@@ -1323,7 +1388,7 @@ impl Library {
                     let bytes = document.byte_size;
                     report.bytes_read += bytes;
                     match self.index_document_with_checkpoint(
-                        &root_id,
+                        &authorization,
                         &path,
                         document,
                         &job.job_id,
@@ -1336,8 +1401,11 @@ impl Library {
                             report.unchanged += 1;
                         }
                         Err(error) => {
+                            if matches!(error, LoomError::SourceRevoked(_)) {
+                                return Err(error);
+                            }
                             let reason = match self.mark_locator_missing_and_advance(
-                                &root_id,
+                                &authorization,
                                 &locator,
                                 &job.job_id,
                                 unit as u64 + 1,
@@ -1359,7 +1427,7 @@ impl Library {
                     if matches!(error, LoomError::OcrDisabled) {
                         report.skipped += 1;
                         if let Err(checkpoint_error) =
-                            self.advance_index_job(&job.job_id, unit as u64 + 1)
+                            self.advance_index_job(&authorization, &job.job_id, unit as u64 + 1)
                         {
                             report.failed += 1;
                             report.failures.push(IndexFailure {
@@ -1373,7 +1441,7 @@ impl Library {
                         continue;
                     }
                     let reason = match self.mark_locator_missing_and_advance(
-                        &root_id,
+                        &authorization,
                         &locator,
                         &job.job_id,
                         unit as u64 + 1,
@@ -1396,16 +1464,20 @@ impl Library {
             report.cancelled = report
                 .discovered
                 .saturating_sub(job.next_unit.saturating_add(report.attempted));
-            self.interrupt_index_job(&job.job_id, "cancelled by request")?;
+            self.interrupt_index_job(&authorization, &job.job_id, "cancelled by request")?;
             return Ok(report);
         }
         if selected_path.is_dir() {
-            if let Err(error) = self.reconcile_directory(&root_id, &seen) {
-                self.fail_index_job(&job.job_id, &error.to_string())?;
+            if let Err(error) = self.reconcile_directory(&authorization, &seen) {
+                // Revoked workers must not update even diagnostic state after losing consent.
+                if !matches!(error, LoomError::SourceRevoked(_)) {
+                    self.fail_index_job(&authorization, &job.job_id, &error.to_string())?;
+                }
                 return Err(error);
             }
         }
         self.complete_index_job(
+            &authorization,
             &job.job_id,
             report
                 .failures
@@ -1417,7 +1489,7 @@ impl Library {
 
     fn index_document_with_checkpoint(
         &self,
-        root_id: &str,
+        authorization: &SourceAuthorization,
         path: &Path,
         document: StableDocument,
         job_id: &str,
@@ -1432,7 +1504,7 @@ impl Library {
             _ => (EXTRACTOR_ID, EXTRACTOR_VERSION),
         };
         self.index_document_with_extractor_and_checkpoint(
-            root_id,
+            authorization,
             path,
             document,
             extractor_id,
@@ -1444,14 +1516,14 @@ impl Library {
     #[cfg(test)]
     fn index_document_with_extractor(
         &self,
-        root_id: &str,
+        authorization: &SourceAuthorization,
         path: &Path,
         document: StableDocument,
         extractor_id: &str,
         extractor_version: &str,
     ) -> Result<bool> {
         self.index_document_with_extractor_and_checkpoint(
-            root_id,
+            authorization,
             path,
             document,
             extractor_id,
@@ -1462,7 +1534,7 @@ impl Library {
 
     fn index_document_with_extractor_and_checkpoint(
         &self,
-        root_id: &str,
+        authorization: &SourceAuthorization,
         path: &Path,
         document: StableDocument,
         extractor_id: &str,
@@ -1496,6 +1568,8 @@ impl Library {
         let now = Utc::now().to_rfc3339();
         let mut connection = self.lock()?;
         let transaction = connection.transaction()?;
+        authorization.verify(&transaction)?;
+        let root_id = &authorization.root_id;
 
         let artifact_id: String = transaction
             .query_row(
@@ -1535,7 +1609,7 @@ impl Library {
                 && projection.2 == extractor_version
         }) {
             if let Some((job_id, next_unit)) = checkpoint {
-                update_index_job_checkpoint(&transaction, job_id, next_unit, &now)?;
+                update_index_job_checkpoint(&transaction, authorization, job_id, next_unit, &now)?;
             }
             transaction.commit()?;
             return Ok(false);
@@ -1584,7 +1658,7 @@ impl Library {
             params![version_id, now, artifact_id],
         )?;
         if let Some((job_id, next_unit)) = checkpoint {
-            update_index_job_checkpoint(&transaction, job_id, next_unit, &now)?;
+            update_index_job_checkpoint(&transaction, authorization, job_id, next_unit, &now)?;
         }
         transaction.commit()?;
         Ok(true)
@@ -1605,6 +1679,7 @@ impl Library {
                  JOIN passages p ON p.rowid = passages_fts.rowid
                  JOIN artifact_versions v ON v.id = p.artifact_version_id
                  JOIN artifacts a ON a.id = v.artifact_id AND a.active_version_id = v.id
+                 JOIN source_roots r ON r.id = a.source_root_id AND r.enabled = 1
                  JOIN artifact_locators l ON l.artifact_id = a.id AND l.active = 1
                  WHERE passages_fts MATCH ?1 AND a.state = 'active'",
             )?;
@@ -1842,7 +1917,7 @@ impl Library {
                 "SELECT l.locator, r.locator, v.id, v.content_hash, v.byte_size FROM artifacts a
                  JOIN artifact_versions v ON v.id = a.active_version_id
                  JOIN artifact_locators l ON l.artifact_id = a.id AND l.active = 1
-                 JOIN source_roots r ON r.id = a.source_root_id
+                 JOIN source_roots r ON r.id = a.source_root_id AND r.enabled = 1
                  WHERE a.id = ?1 AND a.state = 'active' AND l.kind = 'file'",
                 [artifact_id],
                 |row| {
@@ -1883,7 +1958,7 @@ impl Library {
                 "SELECT l.locator, r.locator, v.id, v.content_hash FROM artifacts a
                  JOIN artifact_versions v ON v.id = a.active_version_id
                  JOIN artifact_locators l ON l.artifact_id = a.id AND l.active = 1
-                 JOIN source_roots r ON r.id = a.source_root_id
+                 JOIN source_roots r ON r.id = a.source_root_id AND r.enabled = 1
                  WHERE a.id = ?1 AND a.state = 'active' AND l.kind = 'file'",
                 [artifact_id],
                 |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
@@ -1930,6 +2005,7 @@ impl Library {
                  FROM artifacts a
                  JOIN artifact_versions v ON v.id = a.active_version_id
                  JOIN passages p ON p.artifact_version_id = v.id
+                 JOIN source_roots r ON r.id = a.source_root_id AND r.enabled = 1
                  JOIN artifact_locators l ON l.artifact_id = a.id AND l.active = 1
                  WHERE a.id = ?1 AND v.id = ?2 AND p.id = ?3
                    AND v.content_hash = ?4 AND a.state = 'active' AND l.kind = 'file'",
@@ -1982,7 +2058,7 @@ impl Library {
 
     fn start_index_job(
         &self,
-        root_id: &str,
+        authorization: &SourceAuthorization,
         selection_locator: &str,
         discovery_fingerprint: &str,
         total_units: usize,
@@ -1991,6 +2067,8 @@ impl Library {
         let now = Utc::now().to_rfc3339();
         let mut connection = self.lock()?;
         let transaction = connection.transaction()?;
+        authorization.verify(&transaction)?;
+        let root_id = &authorization.root_id;
         let existing: Option<(String, String, i64, i64, String)> = transaction
             .query_row(
                 "SELECT id, state, next_unit, total_units, discovery_fingerprint
@@ -2057,31 +2135,55 @@ impl Library {
         Ok(IndexJobProgress { job_id, next_unit })
     }
 
-    fn is_approved_root(&self, locator: &str) -> Result<bool> {
+    fn approved_root_authorization(&self, locator: &str) -> Result<SourceAuthorization> {
         let connection = self.lock()?;
         connection
             .query_row(
-                "SELECT EXISTS(
-                    SELECT 1 FROM source_roots WHERE locator = ?1 AND enabled = 1
-                )",
+                "SELECT id, scope_generation,
+                    (SELECT value FROM schema_meta WHERE key = 'authorization_incarnation'), kind
+                 FROM source_roots WHERE locator = ?1 AND enabled = 1",
                 [locator],
-                |row| row.get(0),
+                |row| {
+                    Ok(SourceAuthorization {
+                        root_id: row.get(0)?,
+                        generation: row.get(1)?,
+                        incarnation: row.get(2)?,
+                        kind: row.get(3)?,
+                    })
+                },
             )
-            .map_err(Into::into)
+            .optional()?
+            .ok_or_else(|| {
+                LoomError::InvalidPath(format!("root is not an enabled approved source: {locator}"))
+            })
     }
 
-    fn approved_root_specs(&self) -> Result<Vec<(String, String)>> {
+    fn approved_root_specs(&self) -> Result<Vec<(String, String, SourceAuthorization)>> {
         let connection = self.lock()?;
-        let mut statement = connection
-            .prepare("SELECT locator, kind FROM source_roots WHERE enabled = 1 ORDER BY locator")?;
-        let rows = statement.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
+        let mut statement = connection.prepare(
+            "SELECT locator, kind, id, scope_generation,
+                (SELECT value FROM schema_meta WHERE key = 'authorization_incarnation') FROM source_roots
+                WHERE enabled = 1 ORDER BY locator",
+        )?;
+        let rows = statement.query_map([], |row| {
+            Ok((
+                row.get(0)?,
+                row.get(1)?,
+                SourceAuthorization {
+                    root_id: row.get(2)?,
+                    generation: row.get(3)?,
+                    incarnation: row.get(4)?,
+                    kind: row.get(1)?,
+                },
+            ))
+        })?;
         rows.collect::<rusqlite::Result<Vec<_>>>()
             .map_err(Into::into)
     }
 
     fn mark_locator_missing_and_advance(
         &self,
-        root_id: &str,
+        authorization: &SourceAuthorization,
         locator: &str,
         job_id: &str,
         next_unit: u64,
@@ -2089,63 +2191,125 @@ impl Library {
         let now = Utc::now().to_rfc3339();
         let mut connection = self.lock()?;
         let transaction = connection.transaction()?;
+        authorization.verify(&transaction)?;
         transaction.execute(
             "UPDATE artifacts SET state = 'missing'
              WHERE source_root_id = ?1 AND state = 'active' AND id IN (
                  SELECT artifact_id FROM artifact_locators
                  WHERE artifact_id = artifacts.id AND kind = 'file' AND active = 1 AND locator = ?2
              )",
-            params![root_id, locator],
+            params![authorization.root_id, locator],
         )?;
-        update_index_job_checkpoint(&transaction, job_id, next_unit, &now)?;
+        update_index_job_checkpoint(&transaction, authorization, job_id, next_unit, &now)?;
         transaction.commit()?;
         Ok(())
     }
 
-    fn interrupt_index_job(&self, job_id: &str, message: &str) -> Result<()> {
+    fn interrupt_index_job(
+        &self,
+        authorization: &SourceAuthorization,
+        job_id: &str,
+        message: &str,
+    ) -> Result<()> {
         let connection = self.lock()?;
-        connection.execute(
+        let transaction = connection.unchecked_transaction()?;
+        authorization.verify(&transaction)?;
+        let updated = transaction.execute(
             "UPDATE index_jobs SET state = 'interrupted', last_error = ?1, updated_at = ?2
-             WHERE id = ?3",
-            params![message, Utc::now().to_rfc3339(), job_id],
+             WHERE id = ?3 AND source_root_id = ?4 AND state = 'running'",
+            params![
+                message,
+                Utc::now().to_rfc3339(),
+                job_id,
+                authorization.root_id
+            ],
         )?;
+        require_job_update(updated, job_id)?;
+        transaction.commit()?;
         Ok(())
     }
 
-    fn fail_index_job(&self, job_id: &str, message: &str) -> Result<()> {
+    fn fail_index_job(
+        &self,
+        authorization: &SourceAuthorization,
+        job_id: &str,
+        message: &str,
+    ) -> Result<()> {
         let connection = self.lock()?;
-        connection.execute(
+        let transaction = connection.unchecked_transaction()?;
+        authorization.verify(&transaction)?;
+        let updated = transaction.execute(
             "UPDATE index_jobs SET state = 'failed', last_error = ?1, updated_at = ?2
-             WHERE id = ?3",
-            params![message, Utc::now().to_rfc3339(), job_id],
+             WHERE id = ?3 AND source_root_id = ?4 AND state = 'running'",
+            params![
+                message,
+                Utc::now().to_rfc3339(),
+                job_id,
+                authorization.root_id
+            ],
         )?;
+        require_job_update(updated, job_id)?;
+        transaction.commit()?;
         Ok(())
     }
 
-    fn complete_index_job(&self, job_id: &str, last_error: Option<&str>) -> Result<()> {
+    fn complete_index_job(
+        &self,
+        authorization: &SourceAuthorization,
+        job_id: &str,
+        last_error: Option<&str>,
+    ) -> Result<()> {
         let connection = self.lock()?;
-        connection.execute(
+        let transaction = connection.unchecked_transaction()?;
+        authorization.verify(&transaction)?;
+        let updated = transaction.execute(
             "UPDATE index_jobs
              SET state = 'completed', next_unit = total_units, last_error = ?1,
                  updated_at = ?2, completed_at = ?2
-             WHERE id = ?3",
-            params![last_error, Utc::now().to_rfc3339(), job_id],
+             WHERE id = ?3 AND source_root_id = ?4 AND state = 'running'",
+            params![
+                last_error,
+                Utc::now().to_rfc3339(),
+                job_id,
+                authorization.root_id
+            ],
         )?;
-        Ok(())
-    }
-
-    fn advance_index_job(&self, job_id: &str, next_unit: u64) -> Result<()> {
-        let connection = self.lock()?;
-        let transaction = connection.unchecked_transaction()?;
-        update_index_job_checkpoint(&transaction, job_id, next_unit, &Utc::now().to_rfc3339())?;
+        require_job_update(updated, job_id)?;
         transaction.commit()?;
         Ok(())
     }
 
-    fn reconcile_directory(&self, root_id: &str, seen: &HashSet<String>) -> Result<()> {
+    fn advance_index_job(
+        &self,
+        authorization: &SourceAuthorization,
+        job_id: &str,
+        next_unit: u64,
+    ) -> Result<()> {
+        let connection = self.lock()?;
+        let transaction = connection.unchecked_transaction()?;
+        authorization.verify(&transaction)?;
+        update_index_job_checkpoint(
+            &transaction,
+            authorization,
+            job_id,
+            next_unit,
+            &Utc::now().to_rfc3339(),
+        )?;
+        transaction.commit()?;
+        Ok(())
+    }
+
+    fn reconcile_directory(
+        &self,
+        authorization: &SourceAuthorization,
+        seen: &HashSet<String>,
+    ) -> Result<()> {
         let mut connection = self.lock()?;
+        let transaction = connection.transaction()?;
+        authorization.verify(&transaction)?;
+        let root_id = &authorization.root_id;
         let candidates: Vec<(String, String)> = {
-            let mut statement = connection.prepare(
+            let mut statement = transaction.prepare(
                 "SELECT a.id, l.locator
                  FROM artifacts a
                  JOIN artifact_locators l ON l.artifact_id = a.id
@@ -2155,7 +2319,6 @@ impl Library {
             let rows = statement.query_map([root_id], |row| Ok((row.get(0)?, row.get(1)?)))?;
             rows.collect::<rusqlite::Result<Vec<_>>>()?
         };
-        let transaction = connection.transaction()?;
         for (artifact_id, locator) in candidates {
             if !seen.contains(&locator) {
                 transaction.execute(
@@ -2191,6 +2354,7 @@ impl Library {
                         v.page_count, v.parse_warnings_json, v.extraction_metadata_json
                  FROM artifact_locators l
                  JOIN artifacts a ON a.id = l.artifact_id
+                 JOIN source_roots r ON r.id = a.source_root_id AND r.enabled = 1
                  JOIN artifact_versions v ON v.id = a.active_version_id
                 WHERE l.kind = 'file' AND l.locator = ?1 AND l.active = 1
                    AND a.state = 'active'",
@@ -2693,6 +2857,7 @@ impl Library {
                  FROM passages p
                  JOIN artifact_versions v ON v.id = p.artifact_version_id
                  JOIN artifacts a ON a.id = v.artifact_id AND a.active_version_id = v.id
+                 JOIN source_roots r ON r.id = a.source_root_id AND r.enabled = 1
                  WHERE a.state = 'active'
                  ORDER BY p.id",
             )?;
@@ -2793,6 +2958,7 @@ impl Library {
              FROM passages p
              JOIN artifact_versions v ON v.id = p.artifact_version_id
              JOIN artifacts a ON a.id = v.artifact_id AND a.active_version_id = v.id
+             JOIN source_roots r ON r.id = a.source_root_id AND r.enabled = 1
              WHERE a.state = 'active'
              ORDER BY p.id",
         )?;
@@ -2987,6 +3153,7 @@ impl Library {
              JOIN passages p ON p.id = e.passage_id
              JOIN artifact_versions v ON v.id = p.artifact_version_id
              JOIN artifacts a ON a.id = v.artifact_id AND a.active_version_id = v.id
+             JOIN source_roots r ON r.id = a.source_root_id AND r.enabled = 1
              JOIN artifact_locators l ON l.artifact_id = a.id AND l.active = 1 AND l.kind = 'file'
              WHERE a.state = 'active'
              ORDER BY e.passage_id",
@@ -3187,18 +3354,108 @@ struct IndexJobProgress {
     next_unit: u64,
 }
 
+/// Consent belongs to one generation of one exact selected root, not to a locator forever.
+/// Verify inside the same SQLite transaction as every resulting write; a process-local mutex
+/// cannot fence a different desktop/CLI connection.
+#[derive(Clone, Debug)]
+struct SourceAuthorization {
+    root_id: String,
+    generation: i64,
+    incarnation: String,
+    kind: String,
+}
+
+impl SourceAuthorization {
+    fn verify(&self, connection: &Connection) -> Result<()> {
+        let locator: Option<String> = connection.query_row(
+            "SELECT locator FROM source_roots
+                WHERE id = ?1 AND enabled = 1 AND scope_generation = ?2 AND kind = ?4
+                    AND (SELECT value FROM schema_meta WHERE key = 'authorization_incarnation') = ?3",
+            params![self.root_id, self.generation, self.incarnation, self.kind],
+            |row| row.get(0),
+        ).optional()?;
+        let locator = locator.ok_or_else(|| LoomError::SourceRevoked(self.root_id.clone()))?;
+        // Source shape is part of the selected capability. A replacement directory/file or
+        // symlink is not the same scope, even before a controller updates its persisted row.
+        if source_root_status(&locator, &self.kind, true) != SourceRootStatus::Available {
+            return Err(LoomError::SourceRevoked(self.root_id.clone()));
+        }
+        Ok(())
+    }
+
+    fn verify_locator(&self, connection: &Connection, locator: &str) -> Result<()> {
+        self.verify(connection)?;
+        let same_locator: bool = connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM source_roots WHERE id = ?1 AND locator = ?2)",
+            params![self.root_id, locator],
+            |row| row.get(0),
+        )?;
+        if !same_locator {
+            return Err(LoomError::SourceRevoked(self.root_id.clone()));
+        }
+        Ok(())
+    }
+}
+
 fn update_index_job_checkpoint(
     transaction: &Transaction<'_>,
+    authorization: &SourceAuthorization,
     job_id: &str,
     next_unit: u64,
     now: &str,
 ) -> Result<()> {
-    transaction.execute(
+    let updated = transaction.execute(
         "UPDATE index_jobs
          SET next_unit = ?1, updated_at = ?2
-         WHERE id = ?3 AND state = 'running'",
-        params![sql_i64(next_unit, "index job progress")?, now, job_id],
+         WHERE id = ?3 AND source_root_id = ?4 AND state = 'running'",
+        params![
+            sql_i64(next_unit, "index job progress")?,
+            now,
+            job_id,
+            authorization.root_id
+        ],
     )?;
+    require_job_update(updated, job_id)
+}
+
+fn require_job_update(updated: usize, job_id: &str) -> Result<()> {
+    if updated != 1 {
+        return Err(LoomError::IndexJobStale(job_id.to_owned()));
+    }
+    Ok(())
+}
+
+/// A foreign-key-valid archive can still cross-link bookmark consent between different roots.
+pub(crate) fn validate_bookmark_scope_consistency(connection: &Connection) -> Result<()> {
+    let inconsistent: bool = connection.query_row(
+        "SELECT EXISTS(
+            SELECT 1 FROM bookmark_imports i JOIN source_roots r ON r.id = i.source_root_id
+            WHERE i.source_locator <> r.locator OR r.kind <> 'file'
+         ) OR EXISTS(
+            SELECT 1 FROM bookmark_records b
+            JOIN bookmark_imports i ON i.id = b.first_import_id
+            JOIN artifacts a ON a.id = b.artifact_id
+            WHERE i.source_root_id <> a.source_root_id
+         ) OR EXISTS(
+            SELECT 1 FROM bookmark_import_items item
+            JOIN bookmark_imports i ON i.id = item.import_id
+            JOIN bookmark_records b ON b.id = item.bookmark_id
+            JOIN artifacts a ON a.id = b.artifact_id
+            WHERE i.source_root_id <> a.source_root_id
+         ) OR EXISTS(
+            SELECT 1 FROM bookmark_import_failures f
+            JOIN bookmark_imports i ON i.id = f.import_id
+            JOIN bookmark_imports resolved ON resolved.id = f.resolved_by_import_id
+            WHERE i.source_root_id <> resolved.source_root_id
+         )",
+        [],
+        |row| row.get(0),
+    )?;
+    if inconsistent {
+        return Err(LoomError::PortableExport(
+            "bookmark scope ownership mismatch".into(),
+        ));
+    }
     Ok(())
 }
 
@@ -3484,6 +3741,7 @@ fn canonical_semantic_source(connection: &Connection) -> Result<(u64, String)> {
          FROM passages p
          JOIN artifact_versions v ON v.id = p.artifact_version_id
          JOIN artifacts a ON a.id = v.artifact_id AND a.active_version_id = v.id
+         JOIN source_roots r ON r.id = a.source_root_id AND r.enabled = 1
          WHERE a.state = 'active'
          ORDER BY p.id",
     )?;
@@ -3513,6 +3771,7 @@ fn migrate(connection: &mut Connection) -> Result<()> {
         if !matches!(
             version,
             SCHEMA_VERSION
+                | GRAPH_BOUNDS_SCHEMA_VERSION
                 | CONNECTOR_SCHEMA_VERSION
                 | BOOKMARK_SCHEMA_VERSION
                 | RELATIONSHIP_SCHEMA_VERSION
@@ -3537,6 +3796,7 @@ fn migrate(connection: &mut Connection) -> Result<()> {
             kind TEXT NOT NULL CHECK(kind IN ('file', 'directory')),
             locator TEXT NOT NULL UNIQUE,
             enabled INTEGER NOT NULL DEFAULT 1 CHECK(enabled IN (0, 1)),
+            scope_generation INTEGER NOT NULL DEFAULT 0 CHECK(scope_generation >= 0),
             created_at TEXT NOT NULL,
             last_seen_at TEXT NOT NULL
          ) STRICT;
@@ -3712,6 +3972,14 @@ fn migrate(connection: &mut Connection) -> Result<()> {
             INSERT INTO passages_fts(rowid, text) VALUES (new.rowid, new.text);
          END;",
     )?;
+    if existing_version.is_some_and(|version| version < SCHEMA_VERSION) {
+        ensure_column(
+            &transaction,
+            "source_roots",
+            "scope_generation",
+            "INTEGER NOT NULL DEFAULT 0 CHECK(scope_generation >= 0)",
+        )?;
+    }
     if existing_version
         .is_some_and(|version| version == V3_SCHEMA_VERSION || version == LEGACY_SCHEMA_VERSION)
     {
@@ -3804,6 +4072,11 @@ fn migrate(connection: &mut Connection) -> Result<()> {
         "INSERT INTO schema_meta(key, value) VALUES ('ocr_enabled', '1')
          ON CONFLICT(key) DO NOTHING",
         [],
+    )?;
+    transaction.execute(
+        "INSERT INTO schema_meta(key, value) VALUES ('authorization_incarnation', ?1)
+         ON CONFLICT(key) DO NOTHING",
+        [Uuid::new_v4().to_string()],
     )?;
     transaction.commit()?;
     connection.execute_batch("PRAGMA trusted_schema = OFF;")?;
@@ -3904,9 +4177,12 @@ fn validate_schema_shape(connection: &Connection, version: i64) -> Result<()> {
     )
     .chain((version >= RELATIONSHIP_SCHEMA_VERSION).then_some(("relationships", "origin")))
     .chain((version >= RELATIONSHIP_SCHEMA_VERSION).then_some(("relationships", "metadata_json")))
-    .chain((version >= SCHEMA_VERSION).then_some(("bookmark_imports", "id")))
-    .chain((version >= SCHEMA_VERSION).then_some(("bookmark_records", "id")))
-    .chain((version >= SCHEMA_VERSION).then_some(("bookmark_import_items", "import_id")))
+    .chain((version >= GRAPH_BOUNDS_SCHEMA_VERSION).then_some(("bookmark_imports", "id")))
+    .chain((version >= GRAPH_BOUNDS_SCHEMA_VERSION).then_some(("bookmark_records", "id")))
+    .chain(
+        (version >= GRAPH_BOUNDS_SCHEMA_VERSION).then_some(("bookmark_import_items", "import_id")),
+    )
+    .chain((version >= SCHEMA_VERSION).then_some(("source_roots", "scope_generation")))
     .chain((version != LEGACY_SCHEMA_VERSION).then_some(("index_jobs", "id")))
     .chain((version != LEGACY_SCHEMA_VERSION).then_some(("index_jobs", "source_root_id")))
     .chain((version != LEGACY_SCHEMA_VERSION).then_some(("index_jobs", "selection_locator")))
@@ -4079,28 +4355,33 @@ fn ensure_source_root(
     connection: &mut Connection,
     locator: &str,
     directory: bool,
-) -> Result<String> {
+) -> Result<SourceAuthorization> {
+    let kind = if directory { "directory" } else { "file" };
+    if source_root_status(locator, kind, true) != SourceRootStatus::Available {
+        return Err(LoomError::InvalidPath(
+            "selected source is not currently available".into(),
+        ));
+    }
     let now = Utc::now().to_rfc3339();
-    let existing: Option<String> = connection
-        .query_row(
-            "SELECT id FROM source_roots WHERE locator = ?1",
-            [locator],
-            |row| row.get(0),
-        )
-        .optional()?;
-    let id = existing.unwrap_or_else(|| Uuid::new_v4().to_string());
-    connection.execute(
+    // RETURNING observes the same atomic upsert. There is no check-then-re-enable window.
+    let authorization = connection.query_row(
         "INSERT INTO source_roots(id, kind, locator, enabled, created_at, last_seen_at)
          VALUES (?1, ?2, ?3, 1, ?4, ?4)
-         ON CONFLICT(locator) DO UPDATE SET enabled = 1, last_seen_at = excluded.last_seen_at",
+         ON CONFLICT(locator) DO UPDATE SET
+            scope_generation = source_roots.scope_generation + CASE WHEN source_roots.enabled = 0 THEN 1 ELSE 0 END,
+            enabled = 1, last_seen_at = excluded.last_seen_at
+         WHERE source_roots.kind = excluded.kind
+         RETURNING id, scope_generation,
+            (SELECT value FROM schema_meta WHERE key = 'authorization_incarnation'), kind",
         params![
-            id,
-            if directory { "directory" } else { "file" },
+            Uuid::new_v4().to_string(),
+            kind,
             locator,
             now
         ],
-    )?;
-    Ok(id)
+        |row| Ok(SourceAuthorization { root_id: row.get(0)?, generation: row.get(1)?, incarnation: row.get(2)?, kind: row.get(3)? }),
+    ).optional()?.ok_or_else(|| LoomError::InvalidPath("selected source changed file/directory kind; explicitly purge its old scope before selecting the replacement".into()))?;
+    Ok(authorization)
 }
 
 fn pending_import_failures(
@@ -4159,12 +4440,20 @@ fn ensure_bookmark_artifact(
         )
         .optional()?
         .unwrap_or_else(|| Uuid::new_v4().to_string());
-    let exists: bool = transaction.query_row(
-        "SELECT EXISTS(SELECT 1 FROM artifacts WHERE id = ?1)",
-        [&artifact_id],
-        |row| row.get(0),
-    )?;
-    if !exists {
+    let existing_root: Option<String> = transaction
+        .query_row(
+            "SELECT source_root_id FROM artifacts WHERE id = ?1",
+            [&artifact_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if existing_root
+        .as_ref()
+        .is_some_and(|existing| existing != root_id)
+    {
+        return Err(bookmark_scope_conflict());
+    }
+    if existing_root.is_none() {
         transaction.execute(
             "INSERT INTO artifacts(
                 id, source_root_id, title, media_type, state, created_at, last_seen_at
@@ -4199,13 +4488,23 @@ fn ensure_bookmark_artifact(
 
 fn upsert_bookmark_artifact(
     transaction: &Transaction<'_>,
-    _root_id: &str,
+    root_id: &str,
     source_uri: &str,
     artifact_id: &str,
     entry: &BookmarkEntry,
     entry_hash: &str,
     now: &str,
 ) -> Result<()> {
+    let same_root: bool = transaction.query_row(
+        "SELECT EXISTS(SELECT 1 FROM artifacts a
+            JOIN source_roots r ON r.id = a.source_root_id AND r.enabled = 1
+            WHERE a.id = ?1 AND a.source_root_id = ?2)",
+        params![artifact_id, root_id],
+        |row| row.get(0),
+    )?;
+    if !same_root {
+        return Err(bookmark_scope_conflict());
+    }
     let passage_text = bookmark_passage(entry);
     let content_hash = entry_hash;
     let extraction_metadata = serde_json::json!({
@@ -4230,8 +4529,9 @@ fn upsert_bookmark_artifact(
         hash == content_hash && version == BOOKMARK_EXTRACTOR_VERSION
     }) {
         transaction.execute(
-            "UPDATE artifacts SET title = ?1, last_seen_at = ?2 WHERE id = ?3",
-            params![entry.title, now, artifact_id],
+            "UPDATE artifacts SET title = ?1, state = 'active', last_seen_at = ?2
+             WHERE id = ?3 AND source_root_id = ?4",
+            params![entry.title, now, artifact_id, root_id],
         )?;
         return Ok(());
     }
@@ -4307,6 +4607,10 @@ fn upsert_bookmark_artifact(
         params![version_id, entry.title, now, artifact_id],
     )?;
     Ok(())
+}
+
+fn bookmark_scope_conflict() -> LoomError {
+    LoomError::InvalidPath("bookmark URL identity belongs to another selected export; re-select that export or explicitly purge its scope before importing the same URL from a different export".into())
 }
 
 fn insert_passages(
@@ -4733,7 +5037,7 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(schema_version, "9");
+        assert_eq!(schema_version, "10");
 
         let foreign_keys: i64 = connection
             .query_row("PRAGMA foreign_keys", [], |row| row.get(0))
@@ -4837,7 +5141,7 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(schema_version, "9");
+        assert_eq!(schema_version, "10");
         let checkpoint_table: bool = connection
             .query_row(
                 "SELECT EXISTS(
@@ -5133,17 +5437,15 @@ mod tests {
         let library = Library::open_in_memory().unwrap();
         assert_eq!(library.index_path(&source).unwrap().indexed, 1);
         let canonical_source = source.canonicalize().unwrap();
-        let root_id: String = library
-            .lock()
-            .unwrap()
-            .query_row("SELECT id FROM source_roots", [], |row| row.get(0))
+        let authorization = library
+            .approved_root_authorization(canonical_source.to_str().unwrap())
             .unwrap();
         let document =
             ingest::read_stable(&canonical_source, &canonical_source, 8 * 1024 * 1024).unwrap();
 
         assert!(library
             .index_document_with_extractor(
-                &root_id,
+                &authorization,
                 &canonical_source,
                 document,
                 "loom.text",
@@ -5169,6 +5471,531 @@ mod tests {
             ),
             "versioned"
         );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_denied_single_file_root_cannot_commit_prepared_work_or_checkpoint_updates() {
+        use std::os::unix::fs::PermissionsExt;
+        let directory = tempdir().unwrap();
+        let source = directory.path().join("denied.md");
+        fs::write(&source, "deniedrootmarker").unwrap();
+        let library = Library::open_in_memory().unwrap();
+        library.index_path(&source).unwrap();
+        let source = source.canonicalize().unwrap();
+        let authorization = library
+            .approved_root_authorization(source.to_str().unwrap())
+            .unwrap();
+        let job = library
+            .start_index_job(&authorization, source.to_str().unwrap(), "denied", 1)
+            .unwrap();
+        let prepared = ingest::read_stable(&source, &source, 8 * 1024 * 1024).unwrap();
+        let before = library.export_portable().unwrap().tables;
+        let checkpoint = library.index_checkpoint(&source).unwrap();
+        fs::set_permissions(&source, fs::Permissions::from_mode(0o0)).unwrap();
+        assert_eq!(
+            library.source_roots().unwrap()[0].status,
+            crate::SourceRootStatus::Denied
+        );
+        assert!(matches!(
+            library.index_document_with_extractor(
+                &authorization,
+                &source,
+                prepared,
+                "loom.text",
+                "changed"
+            ),
+            Err(LoomError::SourceRevoked(_))
+        ));
+        for operation in [
+            library.advance_index_job(&authorization, &job.job_id, 1),
+            library.mark_locator_missing_and_advance(
+                &authorization,
+                source.to_str().unwrap(),
+                &job.job_id,
+                1,
+            ),
+            library.interrupt_index_job(&authorization, &job.job_id, "denied"),
+            library.fail_index_job(&authorization, &job.job_id, "denied"),
+            library.complete_index_job(&authorization, &job.job_id, None),
+        ] {
+            assert!(matches!(operation, Err(LoomError::SourceRevoked(_))));
+        }
+        assert!(library.index_path(&source).is_err());
+        assert_eq!(library.export_portable().unwrap().tables, before);
+        assert_eq!(library.index_checkpoint(&source).unwrap(), checkpoint);
+        fs::set_permissions(&source, fs::Permissions::from_mode(0o600)).unwrap();
+        assert_eq!(library.index_path(&source).unwrap().unchanged, 1);
+    }
+
+    #[test]
+    fn file_directory_replacements_cannot_reuse_selected_consent() {
+        for was_directory in [false, true] {
+            let directory = tempdir().unwrap();
+            let root = directory.path().join("selected.md");
+            let source = if was_directory {
+                fs::create_dir(&root).unwrap();
+                root.join("original.md")
+            } else {
+                root.clone()
+            };
+            fs::write(&source, "oldshapemarker").unwrap();
+            let library = Library::open_in_memory().unwrap();
+            library.index_path(&root).unwrap();
+            let root = root.canonicalize().unwrap();
+            let source = source.canonicalize().unwrap();
+            let authorization = library
+                .approved_root_authorization(root.to_str().unwrap())
+                .unwrap();
+            let prepared = ingest::read_stable(&source, &root, 8 * 1024 * 1024).unwrap();
+            let before = library.export_portable().unwrap().tables;
+            fs::remove_file(&source).unwrap();
+            if was_directory {
+                fs::remove_dir(&root).unwrap();
+                fs::write(&root, "replacementshapemarker").unwrap();
+            } else {
+                fs::create_dir(&root).unwrap();
+                fs::write(root.join("replacement.md"), "replacementshapemarker").unwrap();
+            }
+            assert!(matches!(
+                library.index_document_with_extractor(
+                    &authorization,
+                    &source,
+                    prepared,
+                    "loom.text",
+                    "changed"
+                ),
+                Err(LoomError::SourceRevoked(_))
+            ));
+            assert!(library.index_path(&root).is_err());
+            assert!(matches!(
+                library.index_path_with_options(
+                    &root,
+                    &Default::default(),
+                    None,
+                    None,
+                    None,
+                    Some(authorization)
+                ),
+                Err(LoomError::SourceRevoked(_))
+            ));
+            assert_eq!(library.export_portable().unwrap().tables, before);
+            library.purge_root(root.to_str().unwrap()).unwrap();
+            let replacement = library.index_path(&root).unwrap();
+            assert_eq!(replacement.indexed, 1);
+            assert_eq!(
+                library.source_roots().unwrap()[0].kind,
+                if was_directory { "file" } else { "directory" }
+            );
+        }
+    }
+
+    #[test]
+    fn bookmark_import_refuses_a_replaced_directory_scope_until_explicit_reset() {
+        let directory = tempdir().unwrap();
+        let root = directory.path().join("selected.html");
+        fs::create_dir(&root).unwrap();
+        let old = root.join("old.md");
+        fs::write(&old, "oldbookmarkscope").unwrap();
+        let library = Library::open_in_memory().unwrap();
+        library.index_path(&root).unwrap();
+        let root = root.canonicalize().unwrap();
+        let before = library.export_portable().unwrap().tables;
+        fs::remove_file(old).unwrap();
+        fs::remove_dir(&root).unwrap();
+        fs::write(
+            &root,
+            include_str!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/tests/fixtures/bookmarks/chrome.html"
+            )),
+        )
+        .unwrap();
+        assert!(library.import_bookmarks(&root).is_err());
+        assert_eq!(library.export_portable().unwrap().tables, before);
+        library.purge_root(root.to_str().unwrap()).unwrap();
+        let imported = library.import_bookmarks(&root).unwrap();
+        assert_eq!(imported.imported, 1);
+        assert!(library.retry_bookmark_import(&imported.import_id).is_ok());
+        super::validate_bookmark_scope_consistency(&library.lock().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn a_pending_bookmark_retry_cannot_inherit_later_source_consent() {
+        for reselected in [false, true] {
+            let directory = tempdir().unwrap();
+            let source = directory.path().join("bookmarks.html");
+            let database = directory.path().join("library.sqlite3");
+            fs::write(
+                &source,
+                include_str!(concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/tests/fixtures/bookmarks/chrome.html"
+                )),
+            )
+            .unwrap();
+            let worker = Library::open(&database).unwrap();
+            let import = worker.import_bookmarks(&source).unwrap();
+            let authorization = worker
+                .approved_root_authorization(&import.source_uri)
+                .unwrap();
+            let controller = Library::open(&database).unwrap();
+            controller.revoke_source_root(&import.source_uri).unwrap();
+            if reselected {
+                controller.import_bookmarks(&source).unwrap();
+            }
+            assert!(matches!(
+                worker.import_bookmarks_with_authorization(&source, Some(authorization)),
+                Err(LoomError::SourceRevoked(_))
+            ));
+            assert_eq!(controller.source_roots().unwrap()[0].enabled, reselected);
+        }
+    }
+
+    #[test]
+    fn completed_jobs_refuse_late_checkpoint_and_terminal_updates() {
+        let directory = tempdir().unwrap();
+        let source = directory.path().join("completed.md");
+        fs::write(&source, "completedcheckpointcontent").unwrap();
+        let library = Library::open_in_memory().unwrap();
+        library.index_path(&source).unwrap();
+        let source = source.canonicalize().unwrap();
+        let authorization = library
+            .approved_root_authorization(source.to_str().unwrap())
+            .unwrap();
+        let before = library.index_checkpoint(&source).unwrap().unwrap();
+        for operation in [
+            library.advance_index_job(&authorization, &before.job_id, 0),
+            library.interrupt_index_job(&authorization, &before.job_id, "late"),
+            library.fail_index_job(&authorization, &before.job_id, "late"),
+            library.complete_index_job(&authorization, &before.job_id, None),
+        ] {
+            assert!(matches!(operation, Err(LoomError::IndexJobStale(_))));
+        }
+        assert_eq!(library.index_checkpoint(&source).unwrap().unwrap(), before);
+    }
+
+    #[test]
+    fn source_authorization_cannot_mutate_another_roots_job_or_artifact() {
+        let directory = tempdir().unwrap();
+        let first = directory.path().join("first.md");
+        let second = directory.path().join("second.md");
+        fs::write(&first, "firstcheckpointcontent").unwrap();
+        fs::write(&second, "secondcheckpointcontent").unwrap();
+        let library = Library::open_in_memory().unwrap();
+        library.index_path(&first).unwrap();
+        library.index_path(&second).unwrap();
+        let first = first.canonicalize().unwrap();
+        let second = second.canonicalize().unwrap();
+        let authorization = library
+            .approved_root_authorization(first.to_str().unwrap())
+            .unwrap();
+        let other = library
+            .approved_root_authorization(second.to_str().unwrap())
+            .unwrap();
+        let job = library
+            .start_index_job(&other, second.to_str().unwrap(), "other", 1)
+            .unwrap();
+        let before = library.index_checkpoint(&second).unwrap().unwrap();
+        let operations = [
+            library.advance_index_job(&authorization, &job.job_id, 1),
+            library.interrupt_index_job(&authorization, &job.job_id, "wrong-root"),
+            library.fail_index_job(&authorization, &job.job_id, "wrong-root"),
+            library.complete_index_job(&authorization, &job.job_id, None),
+            library.mark_locator_missing_and_advance(
+                &authorization,
+                first.to_str().unwrap(),
+                &job.job_id,
+                1,
+            ),
+        ];
+        for operation in operations {
+            assert!(operation.is_err());
+        }
+        assert_eq!(library.index_checkpoint(&second).unwrap().unwrap(), before);
+        let prepared = ingest::read_stable(&first, &first, 8 * 1024 * 1024).unwrap();
+        assert!(library
+            .index_document_with_extractor_and_checkpoint(
+                &authorization,
+                &first,
+                prepared,
+                "loom.text",
+                "new-version",
+                Some((&job.job_id, 1))
+            )
+            .is_err());
+        assert_eq!(
+            library.inspect_source(&first).unwrap().extractor_version,
+            "0.1.0"
+        );
+        assert_eq!(
+            library
+                .search(&SearchRequest {
+                    text: "firstcheckpointcontent".into(),
+                    limit: 10
+                })
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn extracted_document_cannot_reactivate_a_revoked_root_from_another_connection() {
+        let directory = tempdir().unwrap();
+        let source = directory.path().join("private.md");
+        let database = directory.path().join("loom.sqlite3");
+        fs::write(&source, "revokedprivatecontent must stay hidden").unwrap();
+        let worker = Library::open(&database).unwrap();
+        worker.index_path(&source).unwrap();
+        let source = source.canonicalize().unwrap();
+        let authorization = worker
+            .approved_root_authorization(source.to_str().unwrap())
+            .unwrap();
+        let prepared = ingest::read_stable(&source, &source, 8 * 1024 * 1024).unwrap();
+        let controller = Library::open(&database).unwrap();
+        controller
+            .revoke_source_root(source.to_str().unwrap())
+            .unwrap();
+
+        let result = worker.index_document_with_extractor(
+            &authorization,
+            &source,
+            prepared,
+            "loom.text",
+            "0.2.0",
+        );
+        assert!(
+            matches!(result, Err(LoomError::SourceRevoked(_))),
+            "a revoked extraction must not commit"
+        );
+        assert!(controller
+            .search(&SearchRequest {
+                text: "revokedprivatecontent".into(),
+                limit: 10
+            })
+            .unwrap()
+            .is_empty());
+        assert!(!controller.source_roots().unwrap()[0].enabled);
+    }
+
+    #[test]
+    fn old_extraction_cannot_replace_a_reselected_sources_new_version() {
+        let directory = tempdir().unwrap();
+        let source = directory.path().join("private.md");
+        let database = directory.path().join("loom.sqlite3");
+        fs::write(&source, "oldprivatecontent before revocation").unwrap();
+        let worker = Library::open(&database).unwrap();
+        worker.index_path(&source).unwrap();
+        let source = source.canonicalize().unwrap();
+        let authorization = worker
+            .approved_root_authorization(source.to_str().unwrap())
+            .unwrap();
+        let prepared = ingest::read_stable(&source, &source, 8 * 1024 * 1024).unwrap();
+        let controller = Library::open(&database).unwrap();
+        controller
+            .revoke_source_root(source.to_str().unwrap())
+            .unwrap();
+        fs::write(&source, "newprivatecontent after explicit re-selection").unwrap();
+        controller.index_path(&source).unwrap();
+        let current = controller.inspect_source(&source).unwrap();
+
+        let result = worker.index_document_with_extractor(
+            &authorization,
+            &source,
+            prepared,
+            "loom.text",
+            "0.1.0",
+        );
+        assert!(
+            matches!(result, Err(LoomError::SourceRevoked(_))),
+            "old consent must not authorize a new selection"
+        );
+        assert_eq!(
+            controller.inspect_source(&source).unwrap().content_hash,
+            current.content_hash
+        );
+        assert!(controller
+            .search(&SearchRequest {
+                text: "oldprivatecontent".into(),
+                limit: 10
+            })
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn stale_workers_cannot_hide_reselected_evidence_or_mutate_its_checkpoint() {
+        let directory = tempdir().unwrap();
+        let root = directory.path().join("selected");
+        fs::create_dir(&root).unwrap();
+        let source = root.join("private.md");
+        fs::write(&source, "freshprivatecontent after re-selection").unwrap();
+        let database = directory.path().join("loom.sqlite3");
+        let worker = Library::open(&database).unwrap();
+        worker.index_path(&root).unwrap();
+        let root = root.canonicalize().unwrap();
+        let source = source.canonicalize().unwrap();
+        let authorization = worker
+            .approved_root_authorization(root.to_str().unwrap())
+            .unwrap();
+        let checkpoint = worker.index_checkpoint(&root).unwrap().unwrap();
+        let controller = Library::open(&database).unwrap();
+        controller
+            .revoke_source_root(root.to_str().unwrap())
+            .unwrap();
+        controller.index_path(&root).unwrap();
+        let fresh = controller.index_checkpoint(&root).unwrap().unwrap();
+
+        let operations = [
+            worker.mark_locator_missing_and_advance(
+                &authorization,
+                source.to_str().unwrap(),
+                &checkpoint.job_id,
+                0,
+            ),
+            worker.reconcile_directory(&authorization, &Default::default()),
+            worker.advance_index_job(&authorization, &checkpoint.job_id, 0),
+            worker.interrupt_index_job(&authorization, &checkpoint.job_id, "stale cancellation"),
+            worker.fail_index_job(&authorization, &checkpoint.job_id, "stale failure"),
+            worker.complete_index_job(&authorization, &checkpoint.job_id, Some("stale completion")),
+        ];
+        for operation in operations {
+            assert!(matches!(operation, Err(LoomError::SourceRevoked(_))));
+        }
+        assert!(matches!(
+            worker.start_index_job(&authorization, root.to_str().unwrap(), "stale", 1),
+            Err(LoomError::SourceRevoked(_))
+        ));
+        assert_eq!(controller.index_checkpoint(&root).unwrap().unwrap(), fresh);
+        assert_eq!(
+            controller
+                .search(&SearchRequest {
+                    text: "freshprivatecontent".into(),
+                    limit: 10
+                })
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn pending_observer_scan_cannot_reenable_a_revoked_root() {
+        let directory = tempdir().unwrap();
+        let root = directory.path().join("selected");
+        fs::create_dir(&root).unwrap();
+        fs::write(root.join("private.md"), "observerprivatecontent").unwrap();
+        let database = directory.path().join("loom.sqlite3");
+        let observer = Library::open(&database).unwrap();
+        observer.index_path(&root).unwrap();
+        let root = root.canonicalize().unwrap();
+        let authorization = observer
+            .approved_root_authorization(root.to_str().unwrap())
+            .unwrap();
+        let controller = Library::open(&database).unwrap();
+        controller
+            .revoke_source_root(root.to_str().unwrap())
+            .unwrap();
+        let result = observer.index_path_with_options(
+            &root,
+            &Default::default(),
+            None,
+            None,
+            None,
+            Some(authorization.clone()),
+        );
+        assert!(matches!(result, Err(LoomError::SourceRevoked(_))));
+        assert!(!controller.source_roots().unwrap()[0].enabled);
+        controller.index_path(&root).unwrap();
+        let result = observer.index_path_with_options(
+            &root,
+            &Default::default(),
+            None,
+            None,
+            None,
+            Some(authorization),
+        );
+        assert!(matches!(result, Err(LoomError::SourceRevoked(_))));
+        assert!(controller.source_roots().unwrap()[0].enabled);
+    }
+
+    #[test]
+    fn disabled_roots_are_excluded_even_if_artifact_state_is_stale() {
+        let directory = tempdir().unwrap();
+        let source = directory.path().join("private.md");
+        let database = directory.path().join("loom.sqlite3");
+        fs::write(&source, "disabledprivatecontent").unwrap();
+        let library = Library::open(&database).unwrap();
+        library.index_path(&source).unwrap();
+        let query = SearchRequest {
+            text: "disabledprivatecontent".into(),
+            limit: 10,
+        };
+        let hit = library.search(&query).unwrap().remove(0);
+        library.semantic_rebuild().unwrap();
+        let connection = rusqlite::Connection::open(&database).unwrap();
+        // Model an older/unfenced writer or inconsistent artifact projection. Enabled consent
+        // is authoritative even when the artifact's diagnostic state has not been reconciled.
+        connection
+            .execute("UPDATE source_roots SET enabled = 0", [])
+            .unwrap();
+        assert!(library.search(&query).unwrap().is_empty());
+        assert!(library.inspect_source(&source).is_err());
+        assert!(library
+            .resolve_verified_artifact_path(&hit.artifact_id, &hit.version_id, &hit.content_hash)
+            .is_err());
+        assert!(library
+            .resolve_verified_evidence(&crate::ResolveEvidenceRequest {
+                artifact_id: hit.artifact_id,
+                version_id: hit.version_id,
+                passage_id: hit.passage_id,
+                content_hash: hit.content_hash,
+            })
+            .is_err());
+        assert!(!library.semantic_status().unwrap().healthy);
+        assert!(library
+            .semantic_search("disabledprivatecontent", 10)
+            .is_err());
+        assert_eq!(library.semantic_rebuild().unwrap().rebuilt_passages, 0);
+        assert!(library.semantic_status().unwrap().healthy);
+        assert!(library
+            .semantic_search("disabledprivatecontent", 10)
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn restore_of_the_same_root_ids_does_not_reauthorize_pre_restore_workers() {
+        let directory = tempdir().unwrap();
+        let source = directory.path().join("private.md");
+        let database = directory.path().join("loom.sqlite3");
+        fs::write(&source, "restoredprivatecontent").unwrap();
+        let worker = Library::open(&database).unwrap();
+        worker.index_path(&source).unwrap();
+        let source = source.canonicalize().unwrap();
+        let authorization = worker
+            .approved_root_authorization(source.to_str().unwrap())
+            .unwrap();
+        let prepared = ingest::read_stable(&source, &source, 8 * 1024 * 1024).unwrap();
+        let controller = Library::open(&database).unwrap();
+        let export = controller.export_portable().unwrap();
+        controller.purge_root(source.to_str().unwrap()).unwrap();
+        controller.import_portable(&export).unwrap();
+
+        let result = worker.index_document_with_extractor(
+            &authorization,
+            &source,
+            prepared,
+            "loom.text",
+            "0.2.0",
+        );
+        assert!(
+            matches!(result, Err(LoomError::SourceRevoked(_))),
+            "restoring identical root IDs/generations must not revive an old worker"
+        );
+        assert_eq!(controller.export_portable().unwrap().tables, export.tables);
+        assert_eq!(controller.index_path(&source).unwrap().unchanged, 1);
     }
 
     #[test]
