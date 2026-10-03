@@ -850,7 +850,7 @@ describe("desktop truth path", () => {
     expect(await screen.findByRole("status")).toHaveTextContent("Removed 3 disposable files");
   });
 
-  it("keeps intentional capture explicit, pausable, excluded, and purgeable", async () => {
+  it.each([0, 1])("keeps capture purge truthful for %i indexed records", async (artifactsDeleted) => {
     const captureStatus = { paused: false, excluded_apps: [], capture_root: "/Users/test/Library/Application Support/LOOM/captures", policy_error: null };
     invokeMock.mockImplementation(async (command, args) => {
       if (command === "reconcile_approved_roots") return {};
@@ -881,7 +881,7 @@ describe("desktop truth path", () => {
           source: "macOS screencapture",
         },
       };
-      if (command === "purge_captures") return { artifacts_deleted: 1, versions_deleted: 1, passages_deleted: 2 };
+      if (command === "purge_captures") return { artifacts_deleted: artifactsDeleted, versions_deleted: artifactsDeleted, passages_deleted: artifactsDeleted * 2 };
       throw new Error(`unexpected command: ${command}`);
     });
 
@@ -894,7 +894,7 @@ describe("desktop truth path", () => {
     expect(await screen.findByRole("button", { name: "Resume capture" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Capture region" })).toBeDisabled();
     fireEvent.click(screen.getByRole("button", { name: "Purge captures" }));
-    expect(await screen.findByRole("status")).toHaveTextContent("Purged 1 capture");
+    expect(await screen.findByRole("status")).toHaveTextContent(`Removed committed capture PNGs and ${artifactsDeleted} indexed capture record`);
   });
 
   it.each([

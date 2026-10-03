@@ -740,7 +740,7 @@ function App() {
     setNotice("Purging captured pixels and their indexed evidence…");
     try {
       const report = await invoke<CapturePurgeReport>("purge_captures");
-      setNotice(`Purged ${report.artifacts_deleted} capture${report.artifacts_deleted === 1 ? "" : "s"}; originals and evidence rows are gone.`);
+      setNotice(`Removed committed capture PNGs and ${report.artifacts_deleted} indexed capture record${report.artifacts_deleted === 1 ? "" : "s"}; originals and evidence rows are gone.`);
       await refreshLibrary();
     } catch (caught) {
       setError(errorMessage(caught));
