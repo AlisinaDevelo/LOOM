@@ -73,6 +73,15 @@ pub enum LoomError {
     #[error("index job is not writable under this source authorization: {0}")]
     IndexJobStale(String),
 
+    #[error("background job queue: {0}")]
+    JobQueue(String),
+
+    #[error("background worker is already active")]
+    JobWorkerBusy,
+
+    #[error("background job claim is stale or cancelled: {0}")]
+    JobClaimStale(String),
+
     #[error("library lock is unavailable")]
     LockPoisoned,
 

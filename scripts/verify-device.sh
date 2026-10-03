@@ -140,6 +140,7 @@ run_step rust-msrv-tests cargo +1.88.0 test -p loom-core --lib --tests -- --noca
 run_step clear-msrv-test-target clear_rust_outputs
 run_step performance-build cargo build --locked -q -p loom-cli
 run_step stage-cli-binary stage_cli_binary
+run_step background-jobs python3 scripts/test-background-jobs.py --loom "$EVIDENCE_DIR/loom"
 run_step clear-rust-target clear_rust_outputs
 run_step retrieval-benchmark "$EVIDENCE_DIR/loom" benchmark --corpus benchmarks/retrieval/v0/corpus --queries benchmarks/retrieval/v0/queries.jsonl
 run_step retrieval-benchmark-v1 "$EVIDENCE_DIR/loom" benchmark --corpus benchmarks/retrieval/v1/corpus --queries benchmarks/retrieval/v1/queries.jsonl

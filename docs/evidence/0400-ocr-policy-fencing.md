@@ -110,4 +110,23 @@ lint and purge-copy changes were separately inspected and locally tested.
 This is not the durable queue/worker epoch, fairness, resource-budget, cancellation, or
 crash-recovery implementation required by #36. It adds no ambient capture, new source scope,
 cloud transport, human study, external security audit, signing credentials, or automatic purge.
-The issue remains open. After merge, record exact tree identity and reproduce on clean main.
+The issue remains open.
+
+## Merged-main reproduction
+
+[PR #315](https://github.com/AlisinaDevelo/LOOM/pull/315) merged normally at
+`7d67bf54715fd2c4cb0a7be74232568d6e029b4f` on 2026-10-03 at 01:52:28 UTC.
+The tested PR and merged-main trees both equal `fd4a65ba3fc4442d4c3b0f15c16c84bed83ab01b`;
+their complete diff is empty. No administrative/required-check bypass was used.
+
+On clean main, all 218 workspace tests passed again, as did 39 UI / 12 extension / 6 tooling
+tests, lint/typecheck/build, the v0 retrieval fixture, native-host acceptance/refusal/recovery,
+secret scan, npm audit, and locked metadata. No issue was closed.
+
+| Merged-main log | SHA-256 |
+| --- | --- |
+| `ocr-merged-workspace.log` | `d2e580390cbec44fbb7bb2b85075963bf9fb8f4d4bf755ca4954470ab3c7ddc4` |
+| `ocr-merged-v0.log` | `142bb8b29983cdefa224e5166abcea2127a9f5936e501f5af183998bc95041b5` |
+| `ocr-merged-native-host.log` | `babf157dc05792fdd7a07e6332690413dfceacc492c315157fa903dab97e59e5` |
+| `ocr-merged-frontend.log` | `4d0da48b86475467f29ead5e726f53ea9908f9fb400b8c6a444816fbeb38e662` |
+| `ocr-merged-security.log` | `0c55b600941f7cc5a4be829754f5d996748ba68567ba8b1fa69cea7886c89da3` |

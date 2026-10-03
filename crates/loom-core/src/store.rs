@@ -202,6 +202,7 @@ impl Library {
         configure(&connection)?;
         migrate(&mut connection)?;
         ensure_semantic_schema(&connection)?;
+        crate::jobs::ensure_schema(&connection)?;
         Ok(Self {
             connection: Mutex::new(connection),
             limits,
@@ -3288,6 +3289,54 @@ impl Library {
 
     pub(crate) fn lock(&self) -> Result<MutexGuard<'_, Connection>> {
         self.connection.lock().map_err(|_| LoomError::LockPoisoned)
+    }
+
+    pub(crate) fn job_database_path(&self) -> Result<PathBuf> {
+        let path = self
+            .database_path
+            .as_ref()
+            .ok_or_else(|| LoomError::JobQueue("a persistent library is required".into()))?;
+        path.canonicalize().map_err(|error| io_error(path, error))
+    }
+
+    /// The worker gets a separate SQLite connection without migration or implicit FTS rebuild.
+    /// It must only be created from an already-open, initialized library.
+    pub(crate) fn job_worker_library(&self) -> Result<Self> {
+        let path = self.job_database_path()?;
+        let connection =
+            Connection::open_with_flags(&path, rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE)?;
+        if stored_schema_version(&connection)? != Some(SCHEMA_VERSION) {
+            return Err(LoomError::JobQueue(
+                "worker requires the current validated library schema".into(),
+            ));
+        }
+        validate_schema_shape(&connection, SCHEMA_VERSION)?;
+        configure(&connection)?;
+        connection.execute_batch("PRAGMA trusted_schema = OFF;")?;
+        Ok(Self {
+            connection: Mutex::new(connection),
+            limits: self.limits,
+            database_path: Some(path),
+        })
+    }
+
+    pub(crate) fn job_repair_fts(&self, claim: &crate::jobs::JobClaim) -> Result<()> {
+        let mut connection = self.lock()?;
+        let transaction =
+            connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        claim.verify(&transaction)?;
+        let before = fts_health(&transaction)?;
+        rebuild_fts(&transaction)?;
+        let after = fts_health(&transaction)?;
+        if !after.healthy {
+            return Err(LoomError::JobQueue(
+                "FTS repair did not produce a healthy projection".into(),
+            ));
+        }
+        let report = serde_json::to_string(&FtsRepairReport { before, after })?;
+        claim.complete(&transaction, &report)?;
+        transaction.commit()?;
+        Ok(())
     }
 
     fn finish_deletion(&self, report: DeletionReport) -> Result<DeletionReport> {
