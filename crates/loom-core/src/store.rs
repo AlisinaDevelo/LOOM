@@ -6,7 +6,7 @@ use std::{
 };
 
 use chrono::{DateTime, Duration, Utc};
-use rusqlite::{params, Connection, OptionalExtension, Transaction};
+use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBehavior};
 use uuid::Uuid;
 
 use crate::{
@@ -4138,6 +4138,10 @@ impl SourceAuthorization {
     }
 }
 
+fn source_write_transaction(connection: &mut Connection) -> rusqlite::Result<Transaction<'_>> {
+    connection.transaction_with_behavior(TransactionBehavior::Immediate)
+}
+
 fn update_index_job_checkpoint(
     transaction: &Transaction<'_>,
     authorization: &SourceAuthorization,
@@ -6571,6 +6575,97 @@ mod tests {
         assert_eq!(updated.len(), 1);
         assert_eq!(updated[0].artifact_id, hit.artifact_id);
         assert_ne!(updated[0].version_id, hit.version_id);
+    }
+
+    #[test]
+    fn canonical_write_failure_does_not_hide_active_evidence_or_advance_checkpoint() {
+        let directory = tempdir().unwrap();
+        let first = directory.path().join("a.md");
+        let second = directory.path().join("b.md");
+        fs::write(&first, "first stable marker").unwrap();
+        fs::write(&second, "second old marker").unwrap();
+        let library = Library::open_in_memory().unwrap();
+        library.index_path(directory.path()).unwrap();
+
+        let second = second.canonicalize().unwrap();
+        let before = library.inspect_source(&second).unwrap();
+        let before_stats = library.stats().unwrap();
+        fs::write(&second, "second changed marker").unwrap();
+        library
+            .lock()
+            .unwrap()
+            .execute_batch(
+                "CREATE TRIGGER reject_canonical_version_insert
+                 BEFORE INSERT ON artifact_versions
+                 BEGIN SELECT RAISE(ABORT, 'reject canonical write'); END;",
+            )
+            .unwrap();
+
+        let result = library.index_path(directory.path());
+        assert!(matches!(result, Err(LoomError::Database(_))), "{result:?}");
+
+        assert_eq!(library.inspect_source(&second).unwrap(), before);
+        assert_eq!(library.stats().unwrap(), before_stats);
+        assert_eq!(
+            library
+                .search(&SearchRequest {
+                    text: "second old marker".into(),
+                    limit: 10,
+                })
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(library
+            .search(&SearchRequest {
+                text: "second changed marker".into(),
+                limit: 10,
+            })
+            .unwrap()
+            .is_empty());
+
+        let checkpoint = library
+            .index_checkpoint(directory.path())
+            .unwrap()
+            .unwrap();
+        assert_eq!(checkpoint.state, "running");
+        assert_eq!(checkpoint.next_unit, 1);
+        assert_eq!(checkpoint.total_units, 2);
+    }
+
+    #[test]
+    fn source_write_transaction_reserves_writer_before_authorization_reads() {
+        use std::time::Duration;
+
+        let directory = tempdir().unwrap();
+        let database = directory.path().join("writer-reservation.sqlite3");
+        let writer = Library::open(&database).unwrap();
+        let contender = Library::open(&database).unwrap();
+        let mut writer_connection = writer.lock().unwrap();
+        let transaction = super::source_write_transaction(&mut writer_connection).unwrap();
+        let schema_version: String = transaction
+            .query_row(
+                "SELECT value FROM schema_meta WHERE key = 'schema_version'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(schema_version, "10");
+
+        let mut contender_connection = contender.lock().unwrap();
+        contender_connection.busy_timeout(Duration::ZERO).unwrap();
+        let result = contender_connection
+            .transaction_with_behavior(TransactionBehavior::Immediate);
+        assert!(matches!(
+            result,
+            Err(rusqlite::Error::SqliteFailure(error, _))
+                if matches!(
+                    error.code,
+                    rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked
+                )
+        ));
+        drop(contender_connection);
+        transaction.commit().unwrap();
     }
 
     #[test]
