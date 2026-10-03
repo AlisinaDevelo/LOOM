@@ -42,7 +42,7 @@ export default tseslint.config(
     },
   },
   {
-    files: ["browser-extension/test/**/*.js"],
+    files: ["browser-extension/test/**/*.js", "scripts/lint-markdown*.mjs"],
     languageOptions: {
       ecmaVersion: "latest",
       globals: globals.node,

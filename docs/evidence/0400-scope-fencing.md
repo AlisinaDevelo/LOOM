@@ -96,4 +96,20 @@ retrieval fixtures are not evidence of pilot success or real-world product quali
 - No human TCC/browser-permission sessions, user study, encryption audit, signing or
   notarization were fabricated. The evidence viewer shows passage text and anchor geometry,
   not a rasterized original PDF/image.
-- After merging, record tree identity and rerun the scope-sensitive suite against main.
+
+## Merged-main reproduction
+
+[PR #314](https://github.com/AlisinaDevelo/LOOM/pull/314) merged normally at
+`4ee54e6ae0c678fad6bbf9467f5b92f7dce27eda` on 2026-10-03 at 00:57:12 UTC. No
+required-check bypass or administrative merge was used. The tested PR tree and merged-main
+tree both equal `f567fe68479b21e437d6f37b0753943ff36b219f`; their complete diff is empty.
+
+On that clean main tree, `cargo test --workspace --locked` again passed all 204 tests;
+the staged, tree-identical CLI again passed the 3-query v0 fixture, and the native-host
+contract again passed its accepted/refused/recovery cases. No new issue was closed.
+
+| Merged-main log | SHA-256 |
+| --- | --- |
+| `scope-merged-workspace.log` | `34a720cfc088520cc25e002793fe2444210428fda2b13daa602a8b83f49d8d96` |
+| `scope-merged-v0.log` | `ee6a5f46f3035b0381999f64076a6c05f4c1b9413332249200bda05105d643bd` |
+| `scope-merged-native-host.log` | `babf157dc05792fdd7a07e6332690413dfceacc492c315157fa903dab97e59e5` |

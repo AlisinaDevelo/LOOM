@@ -77,6 +77,17 @@ or content to the selected external application.
 - Disabling OCR or invoking the OCR purge removes derived `loom.ocr` versions/passages but retains
   the original image locator and source bytes. Re-indexing after re-enabling recreates the derived
   records.
+- OCR policy lives in SQLite, not a connection-local cache. Every explicit enable/disable, purge,
+  or portable restore rotates its operational revision transactionally. Image-containing scans
+  carry that revision through extraction, canonical writes, cleanup and checkpoints; stale work
+  cannot recreate purged OCR or inherit a later enable. Interrupted scans restart when it changes.
+  Malformed policy fails closed for images without blocking text/PDF-only indexing.
+- Intentional native captures require enabled local image OCR. Disabled or invalid policy is
+  rejected before starting the picker. After pixels are committed, an indexing failure retains
+  the original and reports its path instead of purging rows or deleting bytes that may belong to
+  a newer attempt. Use the explicit **Purge captures** control to remove retained captures.
+  Unindexed pixels are never reported as a successful capture. Ordinary selected image files
+  are retained and skipped while OCR is disabled.
 - The storage inspector reports approximate canonical/source, derived, SQLite-sidecar, and known
   disposable bytes by source/path. `purge-artifact`, `purge-root`, and `purge-before` delete
   canonical and derived rows transactionally, rebuild FTS5, checkpoint/vacuum SQLite, and verify

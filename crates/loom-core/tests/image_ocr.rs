@@ -10,6 +10,23 @@ const FIXTURE: &[u8] = include_bytes!(concat!(
 ));
 
 #[test]
+fn an_open_worker_honors_another_connections_disable_before_ocr() {
+    let directory = tempdir().unwrap();
+    let source = directory.path().join("policy.png");
+    fs::write(&source, FIXTURE).unwrap();
+    let database = directory.path().join("policy.sqlite3");
+    let worker = Library::open(&database).unwrap();
+    let controller = Library::open(&database).unwrap();
+    controller.set_ocr_enabled(false).unwrap();
+    let report = worker.index_path(&source).unwrap();
+    assert_eq!(report.skipped, 1);
+    assert_eq!(report.indexed, 0);
+    assert_eq!(report.failed, 0);
+    assert_eq!(worker.ocr_status().unwrap().derived_versions, 0);
+    assert_eq!(fs::read(&source).unwrap(), FIXTURE);
+}
+
+#[test]
 fn native_vision_ocr_records_provider_metadata_and_pixel_evidence() {
     if !cfg!(target_os = "macos") {
         return;

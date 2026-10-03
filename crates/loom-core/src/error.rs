@@ -34,6 +34,9 @@ pub enum LoomError {
     #[error("image OCR is disabled")]
     OcrDisabled,
 
+    #[error("OCR policy changed while work was pending; retry under the current policy")]
+    OcrPolicyChanged,
+
     #[error("OCR is unavailable: {0}")]
     OcrUnavailable(String),
 

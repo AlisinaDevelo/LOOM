@@ -2,10 +2,7 @@ use std::{
     collections::{BTreeMap, HashSet},
     fs,
     path::{Path, PathBuf},
-    sync::{
-        atomic::{AtomicBool, Ordering},
-        Mutex, MutexGuard,
-    },
+    sync::{Mutex, MutexGuard},
 };
 
 use chrono::{DateTime, Duration, Utc};
@@ -146,7 +143,6 @@ impl Default for LibraryLimits {
 pub struct Library {
     connection: Mutex<Connection>,
     limits: LibraryLimits,
-    ocr_enabled: AtomicBool,
     database_path: Option<PathBuf>,
 }
 
@@ -198,10 +194,6 @@ impl Library {
         Ok(())
     }
 
-    pub(crate) fn set_ocr_enabled_cache(&self, enabled: bool) {
-        self.ocr_enabled.store(enabled, Ordering::SeqCst);
-    }
-
     fn from_connection(
         mut connection: Connection,
         limits: LibraryLimits,
@@ -210,11 +202,9 @@ impl Library {
         configure(&connection)?;
         migrate(&mut connection)?;
         ensure_semantic_schema(&connection)?;
-        let ocr_enabled = load_ocr_enabled(&connection)?;
         Ok(Self {
             connection: Mutex::new(connection),
             limits,
-            ocr_enabled: AtomicBool::new(ocr_enabled),
             database_path,
         })
     }
@@ -615,7 +605,7 @@ impl Library {
                         AND r.locator = i.source_locator AND r.kind = 'file'",
                     [import_id],
                     |row| Ok((row.get::<_, String>(0)?, SourceAuthorization {
-                        root_id: row.get(1)?, generation: row.get(2)?, incarnation: row.get(3)?, kind: row.get(4)?,
+                        root_id: row.get(1)?, generation: row.get(2)?, incarnation: row.get(3)?, kind: row.get(4)?, ocr_policy: None,
                     })),
                 )
                 .optional()?
@@ -672,8 +662,8 @@ impl Library {
         self.index_path_with_options(selected_path, cancellation, None, None, None, None)
     }
 
-    /// Indexes one atomically written intentional screenshot and stores its capture provenance
-    /// before the image OCR extractor runs.
+    /// Indexes one atomically written intentional screenshot. Capture context is attached to
+    /// extractor input before OCR; provenance and evidence commit together under the current policy.
     pub fn index_captured_image(
         &self,
         selected_path: impl AsRef<Path>,
@@ -684,6 +674,9 @@ impl Library {
             || !matches!(ingest::supported_media_type(path), Some(media) if media.starts_with("image/"))
         {
             return Err(LoomError::UnsupportedSource(path.display().to_string()));
+        }
+        if !OcrPolicy::load(&*self.lock()?)?.enabled {
+            return Err(LoomError::OcrDisabled);
         }
         let cancellation = IndexCancellationToken::new();
         let metadata = serde_json::to_value(context)?;
@@ -1289,7 +1282,7 @@ impl Library {
             .canonicalize()
             .map_err(|source| io_error(requested_path, source))?;
         let selected_uri = utf8_path(&selected_path)?;
-        let authorization = {
+        let mut authorization = {
             let mut connection = self.lock()?;
             match approved_authorization {
                 Some(authorization) => {
@@ -1300,8 +1293,23 @@ impl Library {
             }
         };
         let discovered = ingest::discover(&selected_path, self.limits.max_files_per_request)?;
-
-        let discovery_fingerprint = discovery_fingerprint(&discovered);
+        if authorization.ocr_policy.is_none()
+            && discovered.iter().any(|path| {
+                ingest::supported_media_type(path).is_some_and(|media| media.starts_with("image/"))
+            })
+        {
+            authorization.ocr_policy = Some(OcrPolicy::load(&*self.lock()?)?);
+        }
+        if capture_metadata.is_some()
+            && !authorization
+                .ocr_policy
+                .as_ref()
+                .is_some_and(|policy| policy.enabled)
+        {
+            return Err(LoomError::OcrDisabled);
+        }
+        let discovery_fingerprint =
+            discovery_fingerprint(&discovered, authorization.ocr_policy.as_ref());
         let job = self.start_index_job(
             &authorization,
             &selected_uri,
@@ -1381,7 +1389,10 @@ impl Library {
                 &selected_path,
                 self.limits.max_file_bytes,
                 self.limits.max_pdf_pages,
-                self.ocr_enabled.load(Ordering::Acquire),
+                authorization
+                    .ocr_policy
+                    .as_ref()
+                    .is_some_and(|policy| policy.enabled),
                 capture_metadata.as_ref(),
             ) {
                 Ok(document) => {
@@ -1401,7 +1412,12 @@ impl Library {
                             report.unchanged += 1;
                         }
                         Err(error) => {
-                            if matches!(error, LoomError::SourceRevoked(_)) {
+                            if matches!(
+                                error,
+                                LoomError::SourceRevoked(_)
+                                    | LoomError::OcrPolicyChanged
+                                    | LoomError::OcrUnavailable(_)
+                            ) {
                                 return Err(error);
                             }
                             let reason = match self.mark_locator_missing_and_advance(
@@ -1470,7 +1486,12 @@ impl Library {
         if selected_path.is_dir() {
             if let Err(error) = self.reconcile_directory(&authorization, &seen) {
                 // Revoked workers must not update even diagnostic state after losing consent.
-                if !matches!(error, LoomError::SourceRevoked(_)) {
+                if !matches!(
+                    error,
+                    LoomError::SourceRevoked(_)
+                        | LoomError::OcrPolicyChanged
+                        | LoomError::OcrUnavailable(_)
+                ) {
                     self.fail_index_job(&authorization, &job.job_id, &error.to_string())?;
                 }
                 return Err(error);
@@ -1569,6 +1590,9 @@ impl Library {
         let mut connection = self.lock()?;
         let transaction = connection.transaction()?;
         authorization.verify(&transaction)?;
+        if extractor_id == IMAGE_OCR_EXTRACTOR_ID {
+            authorization.verify_ocr_result(&transaction)?;
+        }
         let root_id = &authorization.root_id;
 
         let artifact_id: String = transaction
@@ -2149,6 +2173,7 @@ impl Library {
                         generation: row.get(1)?,
                         incarnation: row.get(2)?,
                         kind: row.get(3)?,
+                        ocr_policy: None,
                     })
                 },
             )
@@ -2174,6 +2199,7 @@ impl Library {
                     generation: row.get(3)?,
                     incarnation: row.get(4)?,
                     kind: row.get(1)?,
+                    ocr_policy: None,
                 },
             ))
         })?;
@@ -2771,19 +2797,22 @@ impl Library {
 
     /// Returns the persisted local OCR policy and the number of derived OCR records.
     pub fn ocr_status(&self) -> Result<OcrStatus> {
-        let connection = self.lock()?;
+        let mut connection = self.lock()?;
+        let transaction = connection.transaction()?;
+        let policy = OcrPolicy::load(&transaction)?;
         let derived_versions = count_where(
-            &connection,
+            &transaction,
             "artifact_versions",
             "extractor_id = 'loom.ocr'",
         )?;
         let derived_passages = count_where(
-            &connection,
+            &transaction,
             "passages",
             "artifact_version_id IN (SELECT id FROM artifact_versions WHERE extractor_id = 'loom.ocr')",
         )?;
+        transaction.commit()?;
         Ok(OcrStatus {
-            enabled: self.ocr_enabled.load(Ordering::Acquire),
+            enabled: policy.enabled,
             derived_versions,
             derived_passages,
         })
@@ -2799,13 +2828,13 @@ impl Library {
              ON CONFLICT(key) DO UPDATE SET value = excluded.value",
             [if enabled { "1" } else { "0" }],
         )?;
+        rotate_ocr_policy_revision(&transaction)?;
         let report = if enabled {
             OcrPurgeReport::default()
         } else {
             purge_ocr_records_transaction(&transaction)?
         };
         transaction.commit()?;
-        self.ocr_enabled.store(enabled, Ordering::Release);
         Ok(report)
     }
 
@@ -2813,6 +2842,7 @@ impl Library {
     pub fn purge_ocr_records(&self) -> Result<OcrPurgeReport> {
         let mut connection = self.lock()?;
         let transaction = connection.transaction()?;
+        rotate_ocr_policy_revision(&transaction)?;
         let report = purge_ocr_records_transaction(&transaction)?;
         transaction.commit()?;
         Ok(report)
@@ -3363,6 +3393,9 @@ struct SourceAuthorization {
     generation: i64,
     incarnation: String,
     kind: String,
+    // Only scans containing images depend on OCR policy. This also fences their cleanup,
+    // diagnostic progress, and failure writes, not just a successful provider result.
+    ocr_policy: Option<OcrPolicy>,
 }
 
 impl SourceAuthorization {
@@ -3379,6 +3412,20 @@ impl SourceAuthorization {
         // symlink is not the same scope, even before a controller updates its persisted row.
         if source_root_status(&locator, &self.kind, true) != SourceRootStatus::Available {
             return Err(LoomError::SourceRevoked(self.root_id.clone()));
+        }
+        if let Some(policy) = &self.ocr_policy {
+            policy.verify_current(connection)?;
+        }
+        Ok(())
+    }
+
+    fn verify_ocr_result(&self, connection: &Connection) -> Result<()> {
+        let policy = self.ocr_policy.as_ref().ok_or_else(|| {
+            LoomError::OcrUnavailable("prepared OCR result has no captured policy".into())
+        })?;
+        policy.verify_current(connection)?;
+        if !policy.enabled {
+            return Err(LoomError::OcrDisabled);
         }
         Ok(())
     }
@@ -3459,11 +3506,16 @@ pub(crate) fn validate_bookmark_scope_consistency(connection: &Connection) -> Re
     Ok(())
 }
 
-fn discovery_fingerprint(paths: &[PathBuf]) -> String {
+fn discovery_fingerprint(paths: &[PathBuf], ocr_policy: Option<&OcrPolicy>) -> String {
     let mut hasher = blake3::Hasher::new();
     for path in paths {
         hasher.update(path.to_string_lossy().as_bytes());
         hasher.update(&[0]);
+    }
+    if let Some(policy) = ocr_policy {
+        hasher.update(b"\0ocr-policy\0");
+        hasher.update(if policy.enabled { b"1" } else { b"0" });
+        hasher.update(policy.revision.as_bytes());
     }
     format!("blake3:{}", hasher.finalize().to_hex())
 }
@@ -4078,6 +4130,11 @@ fn migrate(connection: &mut Connection) -> Result<()> {
          ON CONFLICT(key) DO NOTHING",
         [Uuid::new_v4().to_string()],
     )?;
+    transaction.execute(
+        "INSERT INTO schema_meta(key, value) VALUES ('ocr_policy_revision', ?1)
+         ON CONFLICT(key) DO NOTHING",
+        [Uuid::new_v4().to_string()],
+    )?;
     transaction.commit()?;
     connection.execute_batch("PRAGMA trusted_schema = OFF;")?;
     rebuild_fts(connection)?;
@@ -4379,7 +4436,7 @@ fn ensure_source_root(
             locator,
             now
         ],
-        |row| Ok(SourceAuthorization { root_id: row.get(0)?, generation: row.get(1)?, incarnation: row.get(2)?, kind: row.get(3)? }),
+        |row| Ok(SourceAuthorization { root_id: row.get(0)?, generation: row.get(1)?, incarnation: row.get(2)?, kind: row.get(3)?, ocr_policy: None }),
     ).optional()?.ok_or_else(|| LoomError::InvalidPath("selected source changed file/directory kind; explicitly purge its old scope before selecting the replacement".into()))?;
     Ok(authorization)
 }
@@ -4897,15 +4954,49 @@ fn purge_ocr_records_transaction(transaction: &Transaction<'_>) -> Result<OcrPur
     })
 }
 
-fn load_ocr_enabled(connection: &Connection) -> Result<bool> {
-    let value: Option<String> = connection
-        .query_row(
-            "SELECT value FROM schema_meta WHERE key = 'ocr_enabled'",
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct OcrPolicy {
+    enabled: bool,
+    revision: String,
+}
+
+impl OcrPolicy {
+    fn load(connection: &Connection) -> Result<Self> {
+        let (enabled, revision): (Option<String>, Option<String>) = connection.query_row(
+            "SELECT (SELECT value FROM schema_meta WHERE key = 'ocr_enabled'),
+                (SELECT value FROM schema_meta WHERE key = 'ocr_policy_revision')",
             [],
-            |row| row.get(0),
-        )
-        .optional()?;
-    Ok(value.as_deref() != Some("0"))
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        let invalid =
+            || LoomError::OcrUnavailable("persisted OCR policy is missing or invalid".into());
+        let enabled = match enabled.as_deref() {
+            Some("1") => true,
+            Some("0") => false,
+            _ => return Err(invalid()),
+        };
+        let revision = revision
+            .filter(|value| Uuid::parse_str(value).is_ok())
+            .ok_or_else(invalid)?;
+        Ok(Self { enabled, revision })
+    }
+
+    fn verify_current(&self, connection: &Connection) -> Result<()> {
+        let current = Self::load(connection)?;
+        if self.enabled != current.enabled || self.revision != current.revision {
+            return Err(LoomError::OcrPolicyChanged);
+        }
+        Ok(())
+    }
+}
+
+pub(crate) fn rotate_ocr_policy_revision(connection: &Connection) -> Result<()> {
+    connection.execute(
+        "INSERT INTO schema_meta(key, value) VALUES ('ocr_policy_revision', ?1)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        [Uuid::new_v4().to_string()],
+    )?;
+    Ok(())
 }
 
 fn sql_i64(value: u64, field: &str) -> Result<i64> {
@@ -4927,6 +5018,398 @@ mod tests {
 
     use super::{Library, LibraryLimits};
     use crate::{ingest, EvidenceAnchor, LoomError, SearchRequest};
+
+    // Deterministic prepared-provider boundary fixture. Native Vision quality is covered by
+    // tests/image_ocr.rs; these tests control exactly when a prepared result reaches SQLite.
+    fn prepared_ocr_document(source: &std::path::Path) -> ingest::StableDocument {
+        let bytes = fs::read(source).unwrap();
+        let raw_hash = format!("blake3:{}", blake3::hash(&bytes));
+        let properties = crate::ocr::inspect_image(&bytes).unwrap();
+        let text = "syntheticocrpolicy marker".to_owned();
+        ingest::StableDocument {
+            raw_hash: raw_hash.clone(),
+            byte_size: bytes.len() as u64,
+            modified_ns: None,
+            normalized_text: text.clone(),
+            media_type: "image/png",
+            pdf_pages: None,
+            page_count: None,
+            parse_warnings: vec![],
+            image_regions: Some(vec![crate::ocr::ImageOcrRegion {
+                text: text.clone(),
+                confidence_milli: 900,
+                bounds: crate::ocr::ImagePixelBounds {
+                    x: 0,
+                    y: 0,
+                    width: 10,
+                    height: 10,
+                },
+                char_start: 0,
+                char_end: text.chars().count() as u64,
+                line_start: 1,
+                line_end: 1,
+                image_width: properties.width,
+                image_height: properties.height,
+                orientation: 1,
+                scale_milli: 1_000,
+            }]),
+            extraction_metadata: serde_json::json!({
+                "provider_id": "deterministic.test", "image_hash": raw_hash,
+                "image_width": properties.width, "image_height": properties.height,
+            }),
+        }
+    }
+
+    fn prepared_ocr_must_not_undo_policy(action: &str) {
+        let directory = tempdir().unwrap();
+        let source = directory.path().join("policy.png");
+        let original = include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../tests/fixtures/ocr-golden.png"
+        ));
+        fs::write(&source, original).unwrap();
+        let database = directory.path().join("policy.sqlite3");
+        let worker = Library::open(&database).unwrap();
+        let controller = Library::open(&database).unwrap();
+        let source = source.canonicalize().unwrap();
+        let mut authorization =
+            super::ensure_source_root(&mut worker.lock().unwrap(), source.to_str().unwrap(), false)
+                .unwrap();
+        authorization.ocr_policy = Some(super::OcrPolicy::load(&worker.lock().unwrap()).unwrap());
+        worker
+            .index_document_with_extractor(
+                &authorization,
+                &source,
+                prepared_ocr_document(&source),
+                crate::ocr::IMAGE_OCR_EXTRACTOR_ID,
+                crate::ocr::IMAGE_OCR_EXTRACTOR_VERSION,
+            )
+            .unwrap();
+        let job = worker
+            .start_index_job(&authorization, source.to_str().unwrap(), "preparedocr", 1)
+            .unwrap();
+        let prepared = prepared_ocr_document(&source);
+        match action {
+            "disable" => {
+                controller.set_ocr_enabled(false).unwrap();
+            }
+            "disable_reenable" => {
+                controller.set_ocr_enabled(false).unwrap();
+                controller.set_ocr_enabled(true).unwrap();
+            }
+            "purge" => {
+                controller.purge_ocr_records().unwrap();
+            }
+            "reassert_enabled" => {
+                controller.set_ocr_enabled(true).unwrap();
+            }
+            _ => panic!("unknown fixture action"),
+        }
+        let before = controller.export_portable().unwrap().tables;
+        let checkpoint = controller.index_checkpoint(&source).unwrap();
+        let health = serde_json::to_value(controller.fts_health().unwrap()).unwrap();
+        let result = worker.index_document_with_extractor_and_checkpoint(
+            &authorization,
+            &source,
+            prepared,
+            crate::ocr::IMAGE_OCR_EXTRACTOR_ID,
+            crate::ocr::IMAGE_OCR_EXTRACTOR_VERSION,
+            Some((&job.job_id, 1)),
+        );
+        assert!(
+            result.is_err(),
+            "old prepared OCR was accepted after {action}: {result:?}"
+        );
+        assert_eq!(controller.export_portable().unwrap().tables, before);
+        assert_eq!(controller.index_checkpoint(&source).unwrap(), checkpoint);
+        for operation in [
+            worker.advance_index_job(&authorization, &job.job_id, 1),
+            worker.mark_locator_missing_and_advance(
+                &authorization,
+                source.to_str().unwrap(),
+                &job.job_id,
+                1,
+            ),
+            worker.interrupt_index_job(&authorization, &job.job_id, "stale OCR"),
+            worker.fail_index_job(&authorization, &job.job_id, "stale OCR"),
+            worker.complete_index_job(&authorization, &job.job_id, None),
+        ] {
+            assert!(matches!(operation, Err(LoomError::OcrPolicyChanged)));
+        }
+        assert_eq!(controller.export_portable().unwrap().tables, before);
+        assert_eq!(controller.index_checkpoint(&source).unwrap(), checkpoint);
+        assert_eq!(
+            serde_json::to_value(controller.fts_health().unwrap()).unwrap(),
+            health
+        );
+        assert_eq!(fs::read(&source).unwrap(), original);
+        controller.set_ocr_enabled(true).unwrap();
+        let mut fresh = worker
+            .approved_root_authorization(source.to_str().unwrap())
+            .unwrap();
+        fresh.ocr_policy = Some(super::OcrPolicy::load(&worker.lock().unwrap()).unwrap());
+        let recovered = worker
+            .index_document_with_extractor(
+                &fresh,
+                &source,
+                prepared_ocr_document(&source),
+                crate::ocr::IMAGE_OCR_EXTRACTOR_ID,
+                crate::ocr::IMAGE_OCR_EXTRACTOR_VERSION,
+            )
+            .unwrap();
+        assert_eq!(recovered, action != "reassert_enabled");
+        assert_eq!(worker.ocr_status().unwrap().derived_versions, 1);
+    }
+
+    #[test]
+    fn prepared_ocr_cannot_undo_disable_from_another_connection() {
+        prepared_ocr_must_not_undo_policy("disable");
+    }
+
+    #[test]
+    fn prepared_ocr_cannot_inherit_a_later_reenable() {
+        prepared_ocr_must_not_undo_policy("disable_reenable");
+    }
+
+    #[test]
+    fn prepared_ocr_cannot_undo_a_purge_while_enabled() {
+        prepared_ocr_must_not_undo_policy("purge");
+    }
+
+    #[test]
+    fn prepared_ocr_cannot_inherit_an_explicit_policy_reassertion() {
+        prepared_ocr_must_not_undo_policy("reassert_enabled");
+    }
+
+    #[test]
+    fn ocr_results_require_a_captured_enabled_policy_before_canonical_writes() {
+        let directory = tempdir().unwrap();
+        let source = directory.path().join("policy.png");
+        fs::write(
+            &source,
+            include_bytes!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../tests/fixtures/ocr-golden.png"
+            )),
+        )
+        .unwrap();
+        let library = Library::open_in_memory().unwrap();
+        let mut authorization = super::ensure_source_root(
+            &mut library.lock().unwrap(),
+            source.to_str().unwrap(),
+            false,
+        )
+        .unwrap();
+        let before = library.export_portable().unwrap().tables;
+        let result = library.index_document_with_extractor(
+            &authorization,
+            &source,
+            prepared_ocr_document(&source),
+            crate::ocr::IMAGE_OCR_EXTRACTOR_ID,
+            crate::ocr::IMAGE_OCR_EXTRACTOR_VERSION,
+        );
+        assert!(matches!(result, Err(LoomError::OcrUnavailable(_))));
+        assert_eq!(library.export_portable().unwrap().tables, before);
+        library.set_ocr_enabled(false).unwrap();
+        authorization.ocr_policy = Some(super::OcrPolicy::load(&library.lock().unwrap()).unwrap());
+        let result = library.index_document_with_extractor(
+            &authorization,
+            &source,
+            prepared_ocr_document(&source),
+            crate::ocr::IMAGE_OCR_EXTRACTOR_ID,
+            crate::ocr::IMAGE_OCR_EXTRACTOR_VERSION,
+        );
+        assert!(matches!(result, Err(LoomError::OcrDisabled)));
+        assert_eq!(library.export_portable().unwrap().tables, before);
+    }
+
+    #[test]
+    fn changed_ocr_policy_restarts_a_scan_instead_of_resuming_past_disabled_images() {
+        for change in ["reenable", "purge"] {
+            let directory = tempdir().unwrap();
+            let root = directory.path().join("selected");
+            fs::create_dir(&root).unwrap();
+            fs::write(
+                root.join("a.png"),
+                include_bytes!(concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/../../tests/fixtures/ocr-golden.png"
+                )),
+            )
+            .unwrap();
+            fs::write(root.join("z.md"), "pending text").unwrap();
+            let database = directory.path().join("policy.sqlite3");
+            let worker = Library::open(&database).unwrap();
+            let controller = Library::open(&database).unwrap();
+            controller.set_ocr_enabled(false).unwrap();
+            assert!(matches!(
+                worker.index_path_with_fault(&root, Some(1)),
+                Err(LoomError::IndexInterrupted(_))
+            ));
+            let previous = worker.index_checkpoint(&root).unwrap().unwrap();
+            assert_eq!(previous.next_unit, 1);
+            if change == "reenable" {
+                controller.set_ocr_enabled(true).unwrap();
+            } else {
+                controller.purge_ocr_records().unwrap();
+            }
+            assert!(matches!(
+                worker.index_path_with_fault(&root, Some(0)),
+                Err(LoomError::IndexInterrupted(_))
+            ));
+            let restarted = worker.index_checkpoint(&root).unwrap().unwrap();
+            assert_eq!(restarted.next_unit, 0);
+            assert_eq!(worker.stats().unwrap().versions, 0);
+        }
+    }
+
+    #[test]
+    fn ocr_policy_restore_is_transactional_and_visible_to_other_open_handles() {
+        let exported = Library::open_in_memory().unwrap();
+        exported.set_ocr_enabled(false).unwrap();
+        let mut archive = exported.export_portable().unwrap();
+        assert!(!archive.settings.contains_key("ocr_policy_revision"));
+        let directory = tempdir().unwrap();
+        let database = directory.path().join("restored.sqlite3");
+        let library = Library::open(&database).unwrap();
+        let observer = Library::open(&database).unwrap();
+        let before = super::OcrPolicy::load(&observer.lock().unwrap()).unwrap();
+        archive
+            .tables
+            .get_mut("passages")
+            .unwrap()
+            .columns
+            .push("unsupported_column".into());
+        archive.seal().unwrap();
+        assert!(matches!(
+            library.import_portable(&archive),
+            Err(LoomError::PortableExport(_))
+        ));
+        assert_eq!(
+            super::OcrPolicy::load(&observer.lock().unwrap()).unwrap(),
+            before
+        );
+        archive.tables.get_mut("passages").unwrap().columns.pop();
+        archive.seal().unwrap();
+        library.import_portable(&archive).unwrap();
+        let restored = super::OcrPolicy::load(&observer.lock().unwrap()).unwrap();
+        assert_ne!(restored.revision, before.revision);
+        assert!(!observer.ocr_status().unwrap().enabled);
+        library.purge_ocr_records().unwrap();
+        assert_ne!(
+            super::OcrPolicy::load(&observer.lock().unwrap())
+                .unwrap()
+                .revision,
+            restored.revision
+        );
+    }
+
+    #[test]
+    fn existing_schema_ten_initializes_only_the_operational_ocr_revision() {
+        let directory = tempdir().unwrap();
+        let database = directory.path().join("old-ten.sqlite3");
+        let source = directory.path().join("selected.md");
+        fs::write(&source, "preserved migration text").unwrap();
+        let library = Library::open(&database).unwrap();
+        library.index_path(&source).unwrap();
+        library.set_ocr_enabled(false).unwrap();
+        let before = library.export_portable().unwrap();
+        library
+            .lock()
+            .unwrap()
+            .execute(
+                "DELETE FROM schema_meta WHERE key = 'ocr_policy_revision'",
+                [],
+            )
+            .unwrap();
+        drop(library);
+        let reopened = Library::open(&database).unwrap();
+        let after = reopened.export_portable().unwrap();
+        assert_eq!(after.library_schema_version, 10);
+        assert_eq!(after.tables, before.tables);
+        assert_eq!(after.settings, before.settings);
+        assert_eq!(after.digest, before.digest);
+        assert!(!reopened.ocr_status().unwrap().enabled);
+    }
+
+    #[test]
+    fn ocr_status_observes_policy_changes_from_another_connection() {
+        let directory = tempdir().unwrap();
+        let database = directory.path().join("policy.sqlite3");
+        let worker = Library::open(&database).unwrap();
+        let controller = Library::open(&database).unwrap();
+        controller.set_ocr_enabled(false).unwrap();
+        assert!(!worker.ocr_status().unwrap().enabled);
+        controller.set_ocr_enabled(true).unwrap();
+        assert!(worker.ocr_status().unwrap().enabled);
+    }
+
+    #[test]
+    fn malformed_ocr_policy_fails_closed_without_blocking_text() {
+        let directory = tempdir().unwrap();
+        let source = directory.path().join("policy.md");
+        fs::write(&source, "textdoesnotneedocr").unwrap();
+        let library = Library::open_in_memory().unwrap();
+        library
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE schema_meta SET value = 'yes' WHERE key = 'ocr_enabled'",
+                [],
+            )
+            .unwrap();
+        assert!(library.ocr_status().is_err());
+        assert_eq!(library.index_path(&source).unwrap().indexed, 1);
+    }
+
+    #[test]
+    fn malformed_or_missing_ocr_revision_refuses_images_but_not_text() {
+        for revision in [Some("not-a-revision"), Some(""), None] {
+            let directory = tempdir().unwrap();
+            let source = directory.path().join("policy.png");
+            let text = directory.path().join("policy.md");
+            fs::write(
+                &source,
+                include_bytes!(concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/../../tests/fixtures/ocr-golden.png"
+                )),
+            )
+            .unwrap();
+            fs::write(&text, "plaintextindependent").unwrap();
+            let library = Library::open_in_memory().unwrap();
+            let connection = library.lock().unwrap();
+            match revision {
+                Some(value) => {
+                    connection
+                        .execute(
+                            "UPDATE schema_meta SET value = ?1 WHERE key = 'ocr_policy_revision'",
+                            [value],
+                        )
+                        .unwrap();
+                }
+                None => {
+                    connection
+                        .execute(
+                            "DELETE FROM schema_meta WHERE key = 'ocr_policy_revision'",
+                            [],
+                        )
+                        .unwrap();
+                }
+            }
+            drop(connection);
+            assert!(matches!(
+                library.ocr_status(),
+                Err(LoomError::OcrUnavailable(_))
+            ));
+            assert!(matches!(
+                library.index_path(&source),
+                Err(LoomError::OcrUnavailable(_))
+            ));
+            assert_eq!(library.stats().unwrap().versions, 0);
+            assert_eq!(library.index_path(&text).unwrap().indexed, 1);
+        }
+    }
 
     #[test]
     fn indexes_searches_versions_and_verifies_original() {
