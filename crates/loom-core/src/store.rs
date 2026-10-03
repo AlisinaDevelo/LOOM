@@ -1374,6 +1374,9 @@ impl Library {
                     &job.job_id,
                     unit as u64 + 1,
                 ) {
+                    if preserves_active_evidence(&error) {
+                        return Err(error);
+                    }
                     report.failures.push(IndexFailure {
                         source: path.display().to_string(),
                         reason: format!("could not reconcile source state: {error}"),
@@ -1411,12 +1414,7 @@ impl Library {
                             report.unchanged += 1;
                         }
                         Err(error) => {
-                            if matches!(
-                                error,
-                                LoomError::SourceRevoked(_)
-                                    | LoomError::OcrPolicyChanged
-                                    | LoomError::OcrUnavailable(_)
-                            ) {
+                            if preserves_active_evidence(&error) {
                                 return Err(error);
                             }
                             let reason = match self.mark_locator_missing_and_advance(
@@ -1426,9 +1424,14 @@ impl Library {
                                 unit as u64 + 1,
                             ) {
                                 Ok(()) => error.to_string(),
-                                Err(reconcile_error) => format!(
-                                    "{error}; could not reconcile source state: {reconcile_error}"
-                                ),
+                                Err(reconcile_error) => {
+                                    if preserves_active_evidence(&reconcile_error) {
+                                        return Err(reconcile_error);
+                                    }
+                                    format!(
+                                        "{error}; could not reconcile source state: {reconcile_error}"
+                                    )
+                                }
                             };
                             report.failures.push(IndexFailure {
                                 source: path.display().to_string(),
@@ -1444,6 +1447,9 @@ impl Library {
                         if let Err(checkpoint_error) =
                             self.advance_index_job(&authorization, &job.job_id, unit as u64 + 1)
                         {
+                            if preserves_active_evidence(&checkpoint_error) {
+                                return Err(checkpoint_error);
+                            }
                             report.failed += 1;
                             report.failures.push(IndexFailure {
                                 source: path.display().to_string(),
@@ -1455,6 +1461,9 @@ impl Library {
                         units_processed_this_run += 1;
                         continue;
                     }
+                    if preserves_active_evidence(&error) {
+                        return Err(error);
+                    }
                     let reason = match self.mark_locator_missing_and_advance(
                         &authorization,
                         &locator,
@@ -1463,6 +1472,9 @@ impl Library {
                     ) {
                         Ok(()) => error.to_string(),
                         Err(reconcile_error) => {
+                            if preserves_active_evidence(&reconcile_error) {
+                                return Err(reconcile_error);
+                            }
                             format!("{error}; could not reconcile source state: {reconcile_error}")
                         }
                     };
@@ -1485,12 +1497,7 @@ impl Library {
         if selected_path.is_dir() {
             if let Err(error) = self.reconcile_directory(&authorization, &seen) {
                 // Revoked workers must not update even diagnostic state after losing consent.
-                if !matches!(
-                    error,
-                    LoomError::SourceRevoked(_)
-                        | LoomError::OcrPolicyChanged
-                        | LoomError::OcrUnavailable(_)
-                ) {
+                if !preserves_active_evidence(&error) {
                     self.fail_index_job(&authorization, &job.job_id, &error.to_string())?;
                 }
                 return Err(error);
@@ -1569,7 +1576,7 @@ impl Library {
             extractor_version,
         )?;
         let mut connection = self.lock()?;
-        let transaction = connection.transaction()?;
+        let transaction = source_write_transaction(&mut connection)?;
         let indexed =
             Self::commit_index_document(&transaction, authorization, &prepared, checkpoint)?;
         transaction.commit()?;
@@ -2095,7 +2102,7 @@ impl Library {
         let total_units = sql_i64(total_units as u64, "index job unit count")?;
         let now = Utc::now().to_rfc3339();
         let mut connection = self.lock()?;
-        let transaction = connection.transaction()?;
+        let transaction = source_write_transaction(&mut connection)?;
         authorization.verify(&transaction)?;
         let root_id = &authorization.root_id;
         let existing: Option<(String, String, i64, i64, String)> = transaction
@@ -2221,7 +2228,7 @@ impl Library {
     ) -> Result<()> {
         let now = Utc::now().to_rfc3339();
         let mut connection = self.lock()?;
-        let transaction = connection.transaction()?;
+        let transaction = source_write_transaction(&mut connection)?;
         authorization.verify(&transaction)?;
         transaction.execute(
             "UPDATE artifacts SET state = 'missing'
@@ -2242,8 +2249,8 @@ impl Library {
         job_id: &str,
         message: &str,
     ) -> Result<()> {
-        let connection = self.lock()?;
-        let transaction = connection.unchecked_transaction()?;
+        let mut connection = self.lock()?;
+        let transaction = source_write_transaction(&mut connection)?;
         authorization.verify(&transaction)?;
         let updated = transaction.execute(
             "UPDATE index_jobs SET state = 'interrupted', last_error = ?1, updated_at = ?2
@@ -2266,8 +2273,8 @@ impl Library {
         job_id: &str,
         message: &str,
     ) -> Result<()> {
-        let connection = self.lock()?;
-        let transaction = connection.unchecked_transaction()?;
+        let mut connection = self.lock()?;
+        let transaction = source_write_transaction(&mut connection)?;
         authorization.verify(&transaction)?;
         let updated = transaction.execute(
             "UPDATE index_jobs SET state = 'failed', last_error = ?1, updated_at = ?2
@@ -2290,8 +2297,8 @@ impl Library {
         job_id: &str,
         last_error: Option<&str>,
     ) -> Result<()> {
-        let connection = self.lock()?;
-        let transaction = connection.unchecked_transaction()?;
+        let mut connection = self.lock()?;
+        let transaction = source_write_transaction(&mut connection)?;
         authorization.verify(&transaction)?;
         let updated = transaction.execute(
             "UPDATE index_jobs
@@ -2316,8 +2323,8 @@ impl Library {
         job_id: &str,
         next_unit: u64,
     ) -> Result<()> {
-        let connection = self.lock()?;
-        let transaction = connection.unchecked_transaction()?;
+        let mut connection = self.lock()?;
+        let transaction = source_write_transaction(&mut connection)?;
         authorization.verify(&transaction)?;
         update_index_job_checkpoint(
             &transaction,
@@ -2336,7 +2343,7 @@ impl Library {
         seen: &HashSet<String>,
     ) -> Result<()> {
         let mut connection = self.lock()?;
-        let transaction = connection.transaction()?;
+        let transaction = source_write_transaction(&mut connection)?;
         authorization.verify(&transaction)?;
         let root_id = &authorization.root_id;
         let candidates: Vec<(String, String)> = {
@@ -4138,8 +4145,26 @@ impl SourceAuthorization {
     }
 }
 
+/// Reserve the SQLite writer slot before reading source authorization or job state.
+///
+/// These transactions verify a capability and then mutate canonical evidence or its durable
+/// checkpoint. A deferred read transaction can otherwise retain an obsolete WAL snapshot and
+/// fail with SQLITE_BUSY_SNAPSHOT when it upgrades to a writer.
 fn source_write_transaction(connection: &mut Connection) -> rusqlite::Result<Transaction<'_>> {
     connection.transaction_with_behavior(TransactionBehavior::Immediate)
+}
+
+/// Errors for which a source failure must not be converted into missing evidence or progress.
+fn preserves_active_evidence(error: &LoomError) -> bool {
+    matches!(
+        error,
+        LoomError::Database(_)
+            | LoomError::SourceChanged(_)
+            | LoomError::SourceRevoked(_)
+            | LoomError::OcrDisabled
+            | LoomError::OcrPolicyChanged
+            | LoomError::OcrUnavailable(_)
+    )
 }
 
 fn update_index_job_checkpoint(
