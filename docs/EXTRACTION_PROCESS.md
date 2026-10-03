@@ -45,6 +45,12 @@ publication limits remain 2 MiB text, 2,048 pages, 8,192 regions/passages, 128 w
 16 KiB serialized JSON, and 64 KiB metadata. Provider failure responses contain typed codes,
 not raw parser/source diagnostics.
 
+A helper may reject before consuming the request, closing the parent's input pipe early.
+A typed failure is reported only after a complete, EOF-checked response and successful child
+exit; the resulting broken request pipe does not replace its rejection code. A success still
+requires the whole request to be written. Nonzero exits, malformed/trailing output, resource
+limits and cancellation retain their fail-closed checks; no rejection publishes source output.
+
 Foreground ingestion now applies the same normalized-output checks before canonical conversion:
 UTF-8 text is capped at 2 MiB and rejects controls except newline/tab; PDF/image evidence must
 have valid page/region geometry and bounded warnings. The shared validator does not grant a

@@ -132,6 +132,65 @@ fn allocation_crash_and_invalid_output_are_distinct_and_every_child_is_reaped() 
 
 #[cfg(unix)]
 #[test]
+fn early_rejection_preserves_the_provider_error_when_the_request_pipe_closes() {
+    let (_directory, executable, pid_file) = fault("unavailable");
+    let supervisor = ExtractionSupervisor::new(executable).unwrap();
+    // A helper may decline before reading input (for example, unavailable guards).
+    // This request cannot fit in the unread pipe, so its writer sees a broken pipe.
+    let error = supervisor
+        .extract(
+            &vec![b'p'; loom_extraction::MAX_INPUT_BYTES],
+            MediaKind::Text,
+            ExtractionBudget::for_media(MediaKind::Text),
+            || Ok::<(), ()>(()),
+        )
+        .unwrap_err();
+    assert!(
+        matches!(error, RunError::Extraction(ExtractionError::OcrUnavailable(ref reason)) if reason == "local provider is unavailable"),
+        "{error:?}"
+    );
+    assert_reaped(pid_file);
+}
+
+#[cfg(unix)]
+#[test]
+fn early_responses_cannot_bypass_exit_framing_or_request_completion_checks() {
+    for (mode, expected) in [
+        ("unavailable-crash", ExtractionError::ChildCrashed),
+        ("unavailable-hang", ExtractionError::WallTime),
+        (
+            "unavailable-trailing",
+            ExtractionError::Protocol("extra frame or trailing bytes".into()),
+        ),
+        (
+            "early-success",
+            ExtractionError::Protocol("truncated or unavailable transport".into()),
+        ),
+    ] {
+        let (_directory, executable, pid_file) = fault(mode);
+        let supervisor = ExtractionSupervisor::new(executable).unwrap();
+        let mut budget = ExtractionBudget::for_media(MediaKind::Text);
+        if mode == "unavailable-hang" {
+            budget.wall_ms = 1500;
+        }
+        let error = supervisor
+            .extract(
+                &vec![b'p'; loom_extraction::MAX_INPUT_BYTES],
+                MediaKind::Text,
+                budget,
+                || Ok::<(), ()>(()),
+            )
+            .unwrap_err();
+        assert!(
+            matches!(error, RunError::Extraction(ref error) if *error == expected),
+            "{mode}: {error:?}"
+        );
+        assert_reaped(pid_file);
+    }
+}
+
+#[cfg(unix)]
+#[test]
 fn success_framing_does_not_authorize_forged_metrics_or_wrong_media() {
     for (mode, expected) in [
         ("metrics-wall", ExtractionError::WallTime),
