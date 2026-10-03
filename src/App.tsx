@@ -941,7 +941,8 @@ function App() {
     setEvidenceState(null);
     setRelationshipState(null);
     setSourceHistoryState(null);
-    setBusy(null);
+    // Only end the evidence lookup; an unrelated operation (indexing, purge) keeps its busy state.
+    setBusy((current) => (current === "evidence" ? null : current));
     const trigger = evidenceTriggerRef.current;
     evidenceTriggerRef.current = null;
     // Wait for the viewer to unmount, then return focus if the trigger is still in the document.
