@@ -95,8 +95,9 @@ or content to the selected external application.
   disposable bytes by source/path. `purge-artifact`, `purge-root`, and `purge-before` delete
   canonical and derived rows transactionally, rebuild FTS5, checkpoint/vacuum SQLite, and verify
   clean state after restart in the device test suite. If the durable job runtime is unsupported or
-  malformed, artifact/root/OCR deletion fails before canonical changes and reports that no data
-  was deleted; use a compatible LOOM release or the owned runtime migration. Future-compatible
+  malformed (including a missing or invalid structural runtime row), artifact/root/OCR deletion
+  fails before canonical changes and reports that no data was deleted; use a compatible LOOM
+  release or the owned runtime migration. Future-compatible
   erasure across an unrecognized queue format remains an unresolved design gate, not a claimed
   availability or secure-erasure capability.
 - Retention is disabled by default. A user may configure 1–36,500 days and explicitly apply it;

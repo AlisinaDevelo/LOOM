@@ -167,6 +167,12 @@ fn validate_warnings(warnings: &[String]) -> Result<()> {
     if warnings.len() > 128 || warnings.iter().map(String::len).sum::<usize>() > 16_384 {
         return Err(ExtractionError::OutputLimit);
     }
+    // The raw bound above also bounds this allocation, including JSON escaping.
+    let serialized = serde_json::to_vec(warnings)
+        .map_err(|_| ExtractionError::Protocol("invalid warning serialization".into()))?;
+    if serialized.len() > 16_384 {
+        return Err(ExtractionError::OutputLimit);
+    }
     Ok(())
 }
 
@@ -527,6 +533,37 @@ mod tests {
         assert!(accepted
             .validate(MediaKind::Text, invalid_worker_budget)
             .is_err());
+    }
+
+    #[test]
+    fn warning_limits_include_serialized_json_escaping_and_overhead() {
+        let budget = ExtractionBudget::for_media(MediaKind::Pdf);
+        for warning in ["ordinary warning".to_string(), "x".repeat(16_380)] {
+            let output = SourceOutput::Pdf {
+                page_count: 1,
+                pages: vec![(1, "evidence".into())],
+                warnings: vec![warning],
+            };
+            output.validate(MediaKind::Pdf, budget).unwrap();
+            output
+                .validate_with_limits(MediaKind::Pdf, 2_048, 100_000_000)
+                .unwrap();
+        }
+        for warning in ["x".repeat(16_381), "\u{0}".repeat(3_000)] {
+            let output = SourceOutput::Pdf {
+                page_count: 1,
+                pages: vec![(1, "evidence".into())],
+                warnings: vec![warning],
+            };
+            assert_eq!(
+                output.validate(MediaKind::Pdf, budget),
+                Err(ExtractionError::OutputLimit)
+            );
+            assert_eq!(
+                output.validate_with_limits(MediaKind::Pdf, 2_048, 100_000_000),
+                Err(ExtractionError::OutputLimit)
+            );
+        }
     }
 
     #[test]

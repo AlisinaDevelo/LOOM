@@ -345,6 +345,26 @@ fn purge_runtime_recovery_error() -> LoomError {
     )
 }
 
+fn validate_purge_runtime_row(connection: &Connection) -> Result<()> {
+    // Validate structural state, not scheduling policy: corrupt policy must not block deletion.
+    let state: Option<(i64, i64, i64)> = connection
+        .query_row(
+            "SELECT epoch, next_sequence, priority_streak FROM background_job_runtime
+             WHERE slot=1 AND (SELECT COUNT(*) FROM
+                (SELECT slot FROM background_job_runtime LIMIT 2))=1",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .optional()?;
+    if state.is_some_and(|(epoch, sequence, streak)| {
+        epoch >= 0 && sequence >= 1 && (0..=8).contains(&streak)
+    }) {
+        Ok(())
+    } else {
+        Err(purge_runtime_recovery_error())
+    }
+}
+
 /// Purge must also remove bounded operational locators/diagnostics and invalidate running claims.
 /// Known older runtimes contain no file targets; never silently migrate them during deletion.
 pub(crate) fn purge_file_targets(
@@ -378,6 +398,7 @@ pub(crate) fn purge_file_targets(
         return Ok(());
     }
     validate_runtime_layout(connection).map_err(|_| purge_runtime_recovery_error())?;
+    validate_purge_runtime_row(connection).map_err(|_| purge_runtime_recovery_error())?;
     connection.execute(
         "DELETE FROM background_jobs WHERE operation='index_file' AND (
             (?1 IS NOT NULL AND (
@@ -2259,6 +2280,31 @@ mod tests {
         assert_eq!(retained, 0);
     }
 
+    #[test]
+    fn exhausted_runtime_counters_do_not_block_known_layout_deletion() {
+        let (_directory, library, source) = file_fixture();
+        library
+            .enqueue_index_file(&source, "delete-exhausted-runtime", JobPriority::Normal)
+            .unwrap();
+        let artifact = file_identity(&library, &source).0;
+        library
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE background_job_runtime SET epoch=?1, next_sequence=?1, priority_streak=8 WHERE slot=1",
+                [i64::MAX],
+            )
+            .unwrap();
+        library.purge_artifact(&artifact).unwrap();
+        assert_eq!(library.stats().unwrap().artifacts, 0);
+        let retained: i64 = library
+            .lock()
+            .unwrap()
+            .query_row("SELECT COUNT(*) FROM background_jobs", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(retained, 0);
+    }
+
     fn assert_purge_runtime_recovery(error: LoomError, raw_fixture_marker: &str) {
         let reason = match error {
             LoomError::JobQueue(reason) => reason,
@@ -2278,9 +2324,58 @@ mod tests {
         get_job(&connection, id).unwrap()
     }
 
+    fn corrupt_runtime_row(library: &Library, fixture: &str) {
+        let sql = match fixture {
+            "missing-row" => "DELETE FROM background_job_runtime",
+            "invalid-epoch" => "UPDATE background_job_runtime SET epoch=-1",
+            "invalid-sequence" => "UPDATE background_job_runtime SET next_sequence=0",
+            "invalid-streak" => "UPDATE background_job_runtime SET priority_streak=9",
+            "extra-row" => "INSERT INTO background_job_runtime SELECT 2, epoch, next_sequence, priority_streak, policy_json FROM background_job_runtime WHERE slot=1",
+            _ => unreachable!(),
+        };
+        let connection = library.lock().unwrap();
+        // Fixture-only corruption keeps the exact STRICT schema definition intact.
+        connection
+            .execute_batch("PRAGMA ignore_check_constraints=ON")
+            .unwrap();
+        connection.execute(sql, []).unwrap();
+        connection
+            .execute_batch("PRAGMA ignore_check_constraints=OFF")
+            .unwrap();
+    }
+
+    fn raw_runtime_rows(library: &Library) -> Vec<(i64, i64, i64, i64, String)> {
+        let connection = library.lock().unwrap();
+        let mut statement = connection
+            .prepare("SELECT slot, epoch, next_sequence, priority_streak, policy_json FROM background_job_runtime ORDER BY slot")
+            .unwrap();
+        statement
+            .query_map([], |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                ))
+            })
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap()
+    }
+
     #[test]
     fn unsupported_or_malformed_runtime_blocks_purge_without_partial_deletion() {
-        for fixture in ["future", "v3", "malformed"] {
+        for fixture in [
+            "future",
+            "v3",
+            "malformed",
+            "missing-row",
+            "invalid-epoch",
+            "invalid-sequence",
+            "invalid-streak",
+            "extra-row",
+        ] {
             let (_directory, library, source) = file_fixture();
             let job = library
                 .enqueue_index_file(&source, "retain-runtime-fixture", JobPriority::Normal)
@@ -2333,8 +2428,12 @@ mod tests {
                         .unwrap();
                     "unexpected_fixture"
                 }
-                _ => unreachable!(),
+                _ => {
+                    corrupt_runtime_row(&library, fixture);
+                    fixture
+                }
             };
+            let before_runtime = raw_runtime_rows(&library);
 
             assert_purge_runtime_recovery(
                 library.purge_artifact(&artifact).unwrap_err(),
@@ -2343,6 +2442,7 @@ mod tests {
             assert_eq!(library.export_portable().unwrap().digest, before_digest);
             assert_eq!(library.source_roots().unwrap(), before_roots);
             assert_eq!(raw_job(&library, &job.id), before_job);
+            assert_eq!(raw_runtime_rows(&library), before_runtime);
             assert_eq!(
                 library
                     .lock()
@@ -2363,6 +2463,7 @@ mod tests {
             assert_eq!(library.export_portable().unwrap().digest, before_digest);
             assert_eq!(library.source_roots().unwrap(), before_roots);
             assert_eq!(raw_job(&library, &job.id), before_job);
+            assert_eq!(raw_runtime_rows(&library), before_runtime);
         }
     }
 
@@ -2420,7 +2521,16 @@ mod tests {
 
     #[test]
     fn unsupported_runtime_blocks_ocr_policy_and_derived_purges_without_changes() {
-        for fixture in ["future", "v3", "malformed"] {
+        for fixture in [
+            "future",
+            "v3",
+            "malformed",
+            "missing-row",
+            "invalid-epoch",
+            "invalid-sequence",
+            "invalid-streak",
+            "extra-row",
+        ] {
             for disable in [false, true] {
                 let (_directory, library, source) = file_fixture();
                 insert_synthetic_ocr_derivative(&library, &source);
@@ -2485,8 +2595,12 @@ mod tests {
                             .unwrap();
                         "unexpected_ocr_fixture"
                     }
-                    _ => unreachable!(),
+                    _ => {
+                        corrupt_runtime_row(&library, fixture);
+                        fixture
+                    }
                 };
+                let before_runtime = raw_runtime_rows(&library);
 
                 let result = if disable {
                     library.set_ocr_enabled(false).map(|_| ())
@@ -2511,6 +2625,7 @@ mod tests {
                     before_ocr_revision
                 );
                 assert_eq!(raw_job(&library, &job.id), before_job);
+                assert_eq!(raw_runtime_rows(&library), before_runtime);
                 assert_eq!(
                     library
                         .lock()

@@ -41,8 +41,9 @@ bytes (8 MiB). One response contains bounded strict-schema JSON (16 MiB). Header
 version, kind and length; oversize lengths are rejected before allocation/body reads. Unknown
 fields, unsupported media/version, truncation, trailing frames and invalid output geometry fail
 closed. PDF/image text has one wire representation, not a second normalized copy. Canonical
-publication limits remain 2 MiB text, 2,048 pages, 8,192 regions/passages, 128/16 KiB warnings and
-64 KiB metadata. Provider failure responses contain typed codes, not raw parser/source diagnostics.
+publication limits remain 2 MiB text, 2,048 pages, 8,192 regions/passages, 128 warnings with
+16 KiB serialized JSON, and 64 KiB metadata. Provider failure responses contain typed codes,
+not raw parser/source diagnostics.
 
 Foreground ingestion now applies the same normalized-output checks before canonical conversion:
 UTF-8 text is capped at 2 MiB and rejects controls except newline/tab; PDF/image evidence must
