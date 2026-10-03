@@ -690,12 +690,14 @@ function App() {
       } else if (report.status === "duplicate") {
         setNotice("Duplicate pixels detected; the existing capture was kept and no second copy was added.");
       } else {
-        setNotice(`Captured ${mode}; original pixels and provenance are indexed locally before OCR.`);
+        setNotice(`Captured ${mode}; original pixels, provenance and OCR evidence are stored locally.`);
         await refreshLibrary();
       }
     } catch (caught) {
       setError(errorMessage(caught));
-      setNotice("Capture stopped safely. Check Screen Recording permission or cancel the picker, then retry.");
+      setNotice(/\bOCR\b/i.test(errorMessage(caught))
+        ? "Capture requires local image OCR; review OCR settings and retry. No new capture was kept."
+        : "Capture stopped safely. Check Screen Recording permission or cancel the picker, then retry.");
     } finally {
       setCaptureBusy(null);
     }

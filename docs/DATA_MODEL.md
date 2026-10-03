@@ -306,6 +306,20 @@ restore clears diagnostic checkpoints and rotates this value atomically with its
 the same canonical root IDs and generations cannot revive a pre-restore worker; the incarnation is
 not part of the portable archive or a source identity.
 
+Image-containing scans additionally capture `ocr_enabled` and an opaque `ocr_policy_revision`
+from one SQLite snapshot. Each successful OCR commit requires that captured enabled policy;
+all request writes, including cleanup and checkpoints, compare its revision transactionally.
+Enable/disable, explicit OCR purge, and portable restore rotate the revision even if the boolean
+is unchanged or no OCR rows exist. An interrupted scan's discovery fingerprint includes the
+enabled state and revision, forcing a full restart after a policy change. A pure text/PDF scan
+does not depend on OCR policy. Status reads policy and derived counts in one read transaction.
+
+The operational revision is initialized additively when opening supported schema 2–10 databases,
+including prior schema-10 builds. It is not canonical, exported, embedded in source hashes, or
+part of provider/extractor identity; the local schema version remains 10. Present malformed
+policy/revision values are not silently repaired. Explicit policy controls can establish a new
+valid revision; image processing otherwise fails closed.
+
 Bookmark retries also carry existing consent rather than re-selecting an export. They require an
 enabled root even when an older import status says `complete`. Explicit re-selection restores
 unchanged entries after either identical or changed export bytes. Import/replay/portable restore

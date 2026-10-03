@@ -326,6 +326,7 @@ impl Library {
             "UPDATE schema_meta SET value = ?1 WHERE key = 'authorization_incarnation'",
             [uuid::Uuid::new_v4().to_string()],
         )?;
+        crate::store::rotate_ocr_policy_revision(&transaction)?;
         for name in export.tables.keys() {
             if !TABLES.iter().any(|(table, _)| table == name) {
                 return Err(LoomError::PortableExport(format!("unknown table {name}")));
@@ -420,9 +421,6 @@ impl Library {
         transaction.commit()?;
         drop(connection);
 
-        if let Some(value) = export.settings.get("ocr_enabled") {
-            self.set_ocr_enabled_cache(value == "1");
-        }
         let health = self.fts_health()?;
         report.fts_healthy = health.healthy;
         if !health.healthy {

@@ -894,6 +894,28 @@ describe("desktop truth path", () => {
     fireEvent.click(screen.getByRole("button", { name: "Purge captures" }));
     expect(await screen.findByRole("status")).toHaveTextContent("Purged 1 capture");
   });
+
+  it.each([
+    "image OCR is disabled",
+    "OCR policy changed while work was pending; retry under the current policy",
+    "OCR is unavailable: persisted OCR policy is missing or invalid",
+  ])("reports OCR capture rejection without a success notice: %s", async (reason) => {
+    invokeMock.mockImplementation(async (command) => {
+      if (command === "reconcile_approved_roots") return {};
+      if (command === "list_source_roots") return [];
+      if (command === "library_stats") return emptyStats;
+      if (command === "capture_status") return { paused: false, excluded_apps: [], capture_root: "/tmp/loom-capture-fixture", policy_error: null };
+      if (command === "capture_intentional") throw new Error(reason);
+      throw new Error(`unexpected command: ${command}`);
+    });
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "Capture region" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent(reason);
+    expect(screen.getByRole("status")).toHaveTextContent("Capture requires local image OCR");
+    expect(screen.getByRole("status")).toHaveTextContent("No new capture was kept.");
+    expect(screen.getByRole("status")).not.toHaveTextContent("Captured region");
+    expect(screen.getByRole("status")).not.toHaveTextContent("Screen Recording permission");
+  });
   it("keeps capture paused and explains why when the saved policy was rejected", async () => {
     invokeMock.mockImplementation(async (command) => {
       if (command === "reconcile_approved_roots") return {};

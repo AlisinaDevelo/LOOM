@@ -55,7 +55,10 @@ is unencrypted at rest; use an encrypted backup for anything that leaves the mac
   relationship compaction summaries. Schema 9 exports have no consent generation, which defaults
   to zero; schema 10 exports preserve it and the enabled state without re-authorizing revoked roots.
   Import clears runtime checkpoints and rotates the local authorization incarnation, so an old
-  worker cannot inherit restored root IDs/generations. Neither runtime value is exported.
+  worker cannot inherit restored root IDs/generations. It also rotates the local OCR policy
+  revision; other open connections observe the imported enabled state directly from SQLite.
+  Failed imports roll back these rotations with canonical rows and settings. Runtime checkpoints,
+  the authorization incarnation, and the OCR revision are not exported.
   Foreign-key-valid bookmark rows must also agree on source-root ownership and export locator;
   cross-scope imports, records, items, and failure-resolution links are refused with full rollback.
   Each new schema release keeps

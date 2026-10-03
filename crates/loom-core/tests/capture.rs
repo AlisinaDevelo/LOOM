@@ -9,6 +9,38 @@ const FIXTURE: &[u8] = include_bytes!(concat!(
 ));
 
 #[test]
+fn intentional_capture_refuses_disabled_ocr_without_admitting_unindexed_pixels() {
+    let directory = tempdir().unwrap();
+    let source = directory.path().join("capture.png");
+    fs::write(&source, FIXTURE).unwrap();
+    let library = Library::open_in_memory().unwrap();
+    library.set_ocr_enabled(false).unwrap();
+    let before = library.export_portable().unwrap().tables;
+    let context = CaptureContext {
+        mode: CaptureMode::Region,
+        captured_at: "2026-10-03T01:00:00Z".into(),
+        display_scale_milli: 1_000,
+        bounds: CaptureBounds {
+            x: 0,
+            y: 0,
+            width: 1200,
+            height: 600,
+        },
+        app_name: None,
+        window_title: None,
+        source: "synthetic fixture".into(),
+    };
+    assert!(matches!(
+        library.index_captured_image(&source, &context),
+        Err(loom_core::LoomError::OcrDisabled)
+    ));
+    assert_eq!(library.export_portable().unwrap().tables, before);
+    assert!(library.source_roots().unwrap().is_empty());
+    assert!(library.index_checkpoint(&source).unwrap().is_none());
+    assert_eq!(fs::read(&source).unwrap(), FIXTURE);
+}
+
+#[test]
 fn intentional_capture_metadata_is_recorded_before_ocr_and_duplicates_are_stable() {
     if !cfg!(target_os = "macos") {
         return;
