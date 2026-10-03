@@ -40,6 +40,9 @@ pub enum LoomError {
     #[error("source changed while it was being read: {0}")]
     SourceChanged(String),
 
+    #[error("source authorization was revoked or superseded: {0}")]
+    SourceRevoked(String),
+
     #[error("invalid query: {0}")]
     InvalidQuery(String),
 

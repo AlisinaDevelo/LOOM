@@ -35,7 +35,8 @@ path, content hash, excerpt, and exact text or pixel-region anchor with every re
   character/line or image-region pixel anchor. Literal source characters cannot become highlight
   instructions.
 - `View evidence` re-verifies the active artifact/version/hash/passage tuple, then shows the
-  canonical PDF page, text passage, or OCR region in an in-app evidence panel. Image regions can
+  canonical passage text with its PDF page label or OCR-region geometry in an in-app evidence
+  panel. The panel does not rasterize PDF pages or copy original image pixels. Region geometry can
   be rotated and zoomed; a stale or unavailable source is disclosed and never replaced silently.
 - A complete rescan hides deleted or unreadable sources. Opening a result verifies its artifact,
   version, and current BLAKE3 hash before handing the path to another application.

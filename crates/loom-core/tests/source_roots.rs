@@ -129,6 +129,53 @@ fn moved_root_reports_missing_and_requires_explicit_reselection() {
     assert_eq!(search(&library, "moved root marker"), 1);
 }
 
+#[test]
+fn reselection_after_revocation_does_not_resume_an_old_partial_scan() {
+    let root = tempdir().unwrap();
+    let database = tempdir().unwrap();
+    for name in ["a", "b", "c"] {
+        fs::write(
+            root.path().join(format!("{name}.md")),
+            "reselectioncheckpoint marker",
+        )
+        .unwrap();
+    }
+    let library = Library::open(database.path().join("library.sqlite3")).unwrap();
+    assert!(matches!(
+        library.index_path_with_fault(root.path(), Some(1)),
+        Err(loom_core::LoomError::IndexInterrupted(_))
+    ));
+    assert_eq!(
+        library
+            .index_checkpoint(root.path())
+            .unwrap()
+            .unwrap()
+            .next_unit,
+        1
+    );
+    let locator = root
+        .path()
+        .canonicalize()
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+    library.revoke_source_root(&locator).unwrap();
+    assert_eq!(
+        library
+            .index_checkpoint(root.path())
+            .unwrap()
+            .unwrap()
+            .state,
+        "failed"
+    );
+    let report = library.index_path(root.path()).unwrap();
+    assert_eq!(
+        report.attempted, 3,
+        "a new consent generation must scan every source"
+    );
+    assert_eq!(search(&library, "reselectioncheckpoint"), 3);
+}
+
 #[cfg(unix)]
 #[test]
 fn denied_root_is_visible_and_reconcile_fails_without_fallback() {

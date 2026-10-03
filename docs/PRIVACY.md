@@ -59,7 +59,10 @@ or content to the selected external application.
   deleting canonical source records.
 - Revoking a saved scope disables future reconciliation and hides its active artifacts from search;
   canonical historical rows remain until the user explicitly deletes the indexed data or applies a
-  retention policy.
+  retention policy. Transactional consent-generation checks reject in-flight ingestion, cleanup,
+  and checkpoint writes after revocation, including writes from another local connection. A pending
+  watcher/startup scan cannot re-enable the root; old workers also cannot inherit a later explicit
+  re-selection's consent.
 - The desktop stop control requests cooperative cancellation at a bounded indexing-unit boundary;
   it does not upload, discard, or roll back a complete source version already committed locally.
 - A complete rescan hides removed or unreadable sources from search, but does not erase their stored
@@ -67,7 +70,10 @@ or content to the selected external application.
 - Bookmark import reads only the selected regular export file, rejects symlinks and executable URL
   schemes, preserves source/export hashes and entry outcomes, and reports `remote_fetches: 0`.
   Repeating the same export is idempotent; changed exports create a new import record and report
-  merges or duplicate-URL conflicts. No network client is part of this path.
+  merges or duplicate-URL conflicts within that scope. A URL collision with another selected
+  export is refused without changing its artifacts or import history; it cannot reactivate revoked
+  evidence. Search, source verification, and semantic projection independently require an enabled
+  root even if an artifact's state is inconsistent. No network client is part of this path.
 - Disabling OCR or invoking the OCR purge removes derived `loom.ocr` versions/passages but retains
   the original image locator and source bytes. Re-indexing after re-enabling recreates the derived
   records.

@@ -20,7 +20,7 @@ use crate::{
 pub const EXPORT_FORMAT: &str = "loom.portable-export";
 pub const EXPORT_FORMAT_VERSION: u32 = 1;
 /// Library schema versions whose exports this build can import.
-pub const IMPORTABLE_SCHEMA_VERSIONS: &[i64] = &[6, 7, 8, 9];
+pub const IMPORTABLE_SCHEMA_VERSIONS: &[i64] = &[6, 7, 8, 9, 10];
 
 /// Canonical tables in foreign-key order, with the column order used for deterministic output.
 const TABLES: &[(&str, &str)] = &[
@@ -299,9 +299,13 @@ impl Library {
         }
 
         let mut connection = self.lock()?;
+        // The empty-library check and import share one snapshot; another connection cannot
+        // populate a source between the check and the write without forcing a rollback.
+        let transaction = connection.transaction()?;
+        transaction.execute_batch("PRAGMA defer_foreign_keys = ON;")?;
         for (table, _) in TABLES {
             let rows: i64 =
-                connection.query_row(&format!("SELECT COUNT(*) FROM \"{table}\""), [], |row| {
+                transaction.query_row(&format!("SELECT COUNT(*) FROM \"{table}\""), [], |row| {
                     row.get(0)
                 })?;
             if rows > 0 {
@@ -315,8 +319,13 @@ impl Library {
             source_schema_version: export.library_schema_version,
             ..PortableImportReport::default()
         };
-        let transaction = connection.transaction()?;
-        transaction.execute_batch("PRAGMA defer_foreign_keys = ON;")?;
+        // Runtime work is not portable. A restored root ID/generation must not revive a worker
+        // that was prepared before the old canonical rows were purged.
+        transaction.execute("DELETE FROM index_jobs", [])?;
+        transaction.execute(
+            "UPDATE schema_meta SET value = ?1 WHERE key = 'authorization_incarnation'",
+            [uuid::Uuid::new_v4().to_string()],
+        )?;
         for name in export.tables.keys() {
             if !TABLES.iter().any(|(table, _)| table == name) {
                 return Err(LoomError::PortableExport(format!("unknown table {name}")));

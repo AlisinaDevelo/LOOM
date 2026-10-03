@@ -70,7 +70,7 @@ fn comparable(mut export: PortableExport) -> PortableExport {
 fn export_import_round_trip_preserves_every_canonical_row_and_setting() {
     let (_directory, library) = populated();
     let export = library.export_portable().unwrap();
-    assert_eq!(export.library_schema_version, 9);
+    assert_eq!(export.library_schema_version, 10);
     assert_eq!(export.settings["retention_days"], "90");
     assert_eq!(export.settings["ocr_enabled"], "0");
     for table in [
@@ -112,7 +112,71 @@ fn export_import_round_trip_preserves_every_canonical_row_and_setting() {
 }
 
 #[test]
-fn imports_exports_from_both_supported_schema_revisions() {
+fn schema_v9_export_without_generation_imports_with_safe_default() {
+    let (_directory, library) = populated();
+    let mut export = library.export_portable().unwrap();
+    export.library_schema_version = 9;
+    let roots = export.tables.get_mut("source_roots").unwrap();
+    let column = roots
+        .columns
+        .iter()
+        .position(|column| column == "scope_generation")
+        .unwrap();
+    roots.columns.remove(column);
+    for row in &mut roots.rows {
+        row.remove(column);
+    }
+    export.seal().unwrap();
+    let restored = Library::open_in_memory().unwrap();
+    assert!(restored.import_portable(&export).unwrap().fts_healthy);
+    let current = restored.export_portable().unwrap();
+    let roots = &current.tables["source_roots"];
+    let column = roots
+        .columns
+        .iter()
+        .position(|column| column == "scope_generation")
+        .unwrap();
+    assert!(roots.rows.iter().all(|row| row[column] == json!(0)));
+    assert_eq!(restored.stats().unwrap(), library.stats().unwrap());
+}
+
+#[test]
+fn portable_restore_preserves_revoked_generations_and_never_reenables_them() {
+    let (_directory, library) = populated();
+    let root = library
+        .source_roots()
+        .unwrap()
+        .into_iter()
+        .find(|root| root.kind == "directory")
+        .unwrap();
+    library.revoke_source_root(&root.locator).unwrap();
+    let export = library.export_portable().unwrap();
+    let restored = Library::open_in_memory().unwrap();
+    restored.import_portable(&export).unwrap();
+    assert_eq!(
+        comparable(restored.export_portable().unwrap()),
+        comparable(export)
+    );
+    assert!(restored
+        .search(&SearchRequest {
+            text: "retry anomaly".into(),
+            limit: 5
+        })
+        .unwrap()
+        .is_empty());
+    assert!(restored
+        .source_roots()
+        .unwrap()
+        .iter()
+        .any(|source| source.locator == root.locator && !source.enabled));
+    assert_eq!(
+        restored.reconcile_approved_roots().unwrap().roots_scanned,
+        1
+    );
+}
+
+#[test]
+fn imports_exports_from_supported_schema_revisions() {
     let (_directory, library) = populated();
 
     // Schema 6 predates the bookmark tables; its exports carry none of them.
@@ -251,11 +315,14 @@ fn imports_exports_from_both_supported_schema_revisions() {
         8
     );
 
-    let v9 = library.export_portable().unwrap();
+    let latest = library.export_portable().unwrap();
     let current = Library::open_in_memory().unwrap();
     assert_eq!(
-        current.import_portable(&v9).unwrap().source_schema_version,
-        9
+        current
+            .import_portable(&latest)
+            .unwrap()
+            .source_schema_version,
+        10
     );
 
     let mut unsupported = library.export_portable().unwrap();
