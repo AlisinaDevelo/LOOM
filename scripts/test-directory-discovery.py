@@ -44,7 +44,7 @@ def main():
             def canonical():
                 with sqlite3.connect(database) as connection:
                     return {table: connection.execute(f"SELECT * FROM {table} ORDER BY id").fetchall()
-                            for table in ("artifacts", "artifact_versions", "artifact_locators", "passages", "index_jobs")}
+                            for table in ("source_roots", "artifacts", "artifact_versions", "artifact_locators", "passages", "index_jobs")}
 
             command("index", root)
             before = canonical()
@@ -89,15 +89,26 @@ def main():
             assert command("search", '"Preserved synthetic source marker"') == hits
             assert command("search", '"Unpublished synthetic source marker"') == []
             assert command("search", '"Outside synthetic source marker"') == []
+            # The same refused tree must not become an enabled watch/reconcile scope in a
+            # previously empty library. Do not exempt source-root consent from the receipt.
+            first_database = base / "first-selection.sqlite3"
+            first = subprocess.run([str(binary), "--database", str(first_database), "index", str(root)],
+                                   text=True, capture_output=True, timeout=30, check=False)
+            assert first.returncode != 0, (scenario, first.stdout, first.stderr)
+            assert expected in first.stderr or "cooperative time limit" in first.stderr, first.stderr
+            with sqlite3.connect(first_database) as connection:
+                assert connection.execute("SELECT COUNT(*) FROM source_roots").fetchone()[0] == 0
+                assert connection.execute("SELECT COUNT(*) FROM index_jobs").fetchone()[0] == 0
             peak = re.search(r"(\d+)\s+maximum resident set size", result.stderr) if timed else None
             reports.append({"scenario": scenario, "generated_entries": generated,
                             "observed_limit": observed, "wall_ms": wall_ms,
                             "process_peak_resident_bytes": int(peak.group(1)) if peak else None,
-                            "artifact_and_checkpoint_tables_unchanged": True})
+                            "artifact_and_checkpoint_tables_unchanged": True,
+                            "source_roots_unchanged": True,
+                            "failed_first_selection_created_no_root": True})
     report = {"scope": "synthetic default-limit foreground CLI refusal, not directory scheduling",
               "measurements": reports,
-              "limitations": ["cooperative syscall deadline, not OS preemption", "CLI RSS includes SQLite/startup",
-                              "explicit selection may update source-root consent/last-seen metadata"]}
+              "limitations": ["cooperative syscall deadline, not OS preemption", "CLI RSS includes SQLite/startup"]}
     if args.report:
         args.report.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
     print(json.dumps(report, indent=2))

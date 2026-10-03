@@ -4,6 +4,57 @@ use loom_core::{Library, LibraryLimits, LoomError, SearchRequest};
 use tempfile::tempdir;
 
 #[test]
+fn failed_first_selection_and_reselection_do_not_grant_a_root() {
+    for initial_state in ["new", "enabled", "revoked"] {
+        let temporary = tempdir().unwrap();
+        let root = temporary.path().join("selected");
+        fs::create_dir(&root).unwrap();
+        fs::write(root.join("old.md"), "Selected source marker").unwrap();
+        let database = temporary.path().join("library.sqlite3");
+        let library = Library::open(&database).unwrap();
+        if initial_state != "new" {
+            library.index_path(&root).unwrap();
+            if initial_state == "revoked" {
+                library
+                    .revoke_source_root(root.canonicalize().unwrap().to_str().unwrap())
+                    .unwrap();
+            }
+        }
+        let connection = rusqlite::Connection::open(&database).unwrap();
+        let root_snapshot = || {
+            connection
+                .prepare("SELECT id, enabled, scope_generation, last_seen_at FROM source_roots ORDER BY id")
+                .unwrap()
+                .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?, row.get::<_, i64>(2)?, row.get::<_, String>(3)?)))
+                .unwrap()
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .unwrap()
+        };
+        let before = root_snapshot();
+        let checkpoint = library.index_checkpoint(&root).unwrap();
+        let mut deep = root.clone();
+        for _ in 0..33 {
+            deep.push("child");
+            fs::create_dir(&deep).unwrap();
+        }
+        assert!(library
+            .index_path(&root)
+            .unwrap_err()
+            .to_string()
+            .contains("depth limit"));
+        assert_eq!(
+            root_snapshot(),
+            before,
+            "{initial_state}: failed discovery changed consent"
+        );
+        assert_eq!(library.index_checkpoint(&root).unwrap(), checkpoint);
+        if initial_state != "enabled" {
+            assert_eq!(library.reconcile_approved_roots().unwrap().roots_scanned, 0);
+        }
+    }
+}
+
+#[test]
 fn failed_discovery_neither_publishes_partial_files_nor_reconciles_missing_sources() {
     let temporary = tempdir().unwrap();
     let root = temporary.path().join("selected");

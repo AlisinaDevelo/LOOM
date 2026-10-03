@@ -175,10 +175,10 @@ fn duplicate_relationships_are_idempotent_and_source_purge_cascades() {
     library
         .purge_source_root(source_path.to_str().unwrap())
         .unwrap();
-    assert!(library
-        .list_relationships(&source_id, 10)
-        .unwrap()
-        .is_empty());
+    assert!(matches!(
+        library.list_relationships(&source_id, 10),
+        Err(LoomError::ArtifactNotFound(id)) if id == source_id
+    ));
 }
 
 #[test]
@@ -233,7 +233,7 @@ fn version_history_keeps_old_metadata_but_only_resolves_the_current_source() {
 }
 
 #[test]
-fn revoked_source_history_has_no_evidence_action_and_unknown_ids_fail_closed() {
+fn revoked_source_history_hides_metadata_and_unknown_ids_fail_closed() {
     let (directory, library, source_id, _, _) = indexed_pair();
     let selected = library.artifact_version_history(&source_id, 20).unwrap();
     let reference = selected.versions[0].evidence.as_ref().unwrap();
@@ -241,12 +241,10 @@ fn revoked_source_history_has_no_evidence_action_and_unknown_ids_fail_closed() {
     library
         .revoke_source_root(source.to_str().unwrap())
         .unwrap();
-    let history = library.artifact_version_history(&source_id, 20).unwrap();
-    assert_eq!(history.artifact.state, "missing");
-    assert!(history
-        .versions
-        .iter()
-        .all(|version| version.evidence.is_none()));
+    assert!(matches!(
+        library.artifact_version_history(&source_id, 20),
+        Err(LoomError::ArtifactNotFound(id)) if id == source_id
+    ));
     assert!(library.resolve_verified_evidence(reference).is_err());
     assert!(library
         .resolve_verified_artifact_path(
@@ -262,6 +260,54 @@ fn revoked_source_history_has_no_evidence_action_and_unknown_ids_fail_closed() {
         library.artifact_version_history("11111111-1111-4111-8111-111111111111", 20),
         Err(LoomError::ArtifactNotFound(_))
     ));
+}
+
+#[test]
+fn relationship_views_hide_revoked_endpoints_and_reselection_restores_them() {
+    let (directory, library, source_id, target_id, _) = indexed_pair();
+    library
+        .add_relationship(&RelationshipInput {
+            source_artifact_id: source_id.clone(),
+            target_artifact_id: target_id.clone(),
+            kind: RelationshipKind::SavedFrom,
+            origin: RelationshipOrigin::UserConfirmed,
+            evidence_passage_id: None,
+            confidence: None,
+            method: "explicit-test-link".into(),
+            metadata: json!({}),
+        })
+        .unwrap();
+    let target = directory.path().join("target.md").canonicalize().unwrap();
+    library
+        .revoke_source_root(target.to_str().unwrap())
+        .unwrap();
+    assert!(library
+        .list_relationships(&source_id, 10)
+        .unwrap()
+        .is_empty());
+    assert!(matches!(
+        library.list_relationships(&target_id, 10),
+        Err(LoomError::ArtifactNotFound(id)) if id == target_id
+    ));
+    assert!(matches!(
+        library.artifact_version_history(&target_id, 10),
+        Err(LoomError::ArtifactNotFound(id)) if id == target_id
+    ));
+    library.index_path(&target).unwrap();
+    assert_eq!(library.list_relationships(&source_id, 10).unwrap().len(), 1);
+    assert_eq!(library.list_relationships(&target_id, 10).unwrap().len(), 1);
+}
+
+#[test]
+fn missing_but_enabled_sources_retain_metadata_history() {
+    let (directory, library, source_id, _, _) = indexed_pair();
+    let before = library.artifact_version_history(&source_id, 20).unwrap();
+    fs::remove_file(directory.path().join("source.md")).unwrap();
+    let history = library.artifact_version_history(&source_id, 20).unwrap();
+    assert_eq!(history, before);
+    assert!(library
+        .resolve_verified_evidence(history.versions[0].evidence.as_ref().unwrap())
+        .is_err());
 }
 
 #[test]
