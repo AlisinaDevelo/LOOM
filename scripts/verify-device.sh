@@ -145,6 +145,7 @@ run_step rust-msrv-tests cargo +1.88.0 test --locked -p loom-core -p loom-extrac
 run_step clear-msrv-test-target clear_rust_outputs
 run_step performance-build cargo build --locked -q -p loom-cli -p loom-extraction --bins
 run_step stage-cli-binary stage_cli_binary
+run_step directory-discovery python3 scripts/test-directory-discovery.py --loom "$EVIDENCE_DIR/loom" --report "$EVIDENCE_DIR/directory-discovery.json"
 run_step background-jobs python3 scripts/test-background-jobs.py --loom "$EVIDENCE_DIR/loom"
 run_step queued-indexing python3 scripts/test-queued-indexing.py --loom "$EVIDENCE_DIR/loom" --native-ocr
 run_step queued-responsiveness env LOOM_TEST_RESPONSE_REPORT="$EVIDENCE_DIR/queued-responsiveness.json" cargo test --locked -p loom-core --lib jobs::tests::persistent_retrieval_during_native_queued_ocr -- --exact --nocapture

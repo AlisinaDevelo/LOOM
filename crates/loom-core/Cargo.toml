@@ -22,12 +22,15 @@ serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 uuid.workspace = true
-walkdir.workspace = true
 zeroize.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+rustix.workspace = true
 
 [dev-dependencies]
 image.workspace = true
 tempfile.workspace = true
+walkdir.workspace = true
 
 [lints]
 workspace = true

@@ -2328,6 +2328,7 @@ dependencies = [
  "libc",
  "loom-extraction",
  "rusqlite",
+ "rustix",
  "serde",
  "serde_json",
  "tempfile",

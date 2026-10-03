@@ -60,7 +60,12 @@ uses `loom.ocr` 0.1.0 with a native provider boundary; bookmark metadata uses `l
 
 Ingestion accepts an explicitly selected regular file or directory, supports UTF-8 .txt/.md/.markdown,
 bounded text-based PDFs, and common PNG/JPEG/GIF/WebP images, does not follow symlinks, limits a file
-to 8 MiB, and limits one traversal to 20,000 files. Reads use a no-follow descriptor on Unix,
+to 8 MiB, and limits one traversal to 20,000 regular files. Discovery also bounds all entries,
+directory count/depth, path bytes and cooperative time. Unix directory enumeration uses pinned
+descriptors with component-relative no-follow opens; only the bounded final file list is sorted.
+Detected namespace changes abort before a checkpoint or artifact can be published; this is
+not an atomic filesystem snapshot. See [DIRECTORY_DISCOVERY.md](DIRECTORY_DISCOVERY.md).
+Returned paths still use the existing extraction boundary. Reads use a no-follow descriptor on Unix,
 canonical root containment, file identity, size, modification-time, and post-read checks. Files
 that change during a read are retried and reported if
 a stable read cannot be obtained. A complete directory rescan marks disappeared, unsupported, or

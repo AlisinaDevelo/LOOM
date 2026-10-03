@@ -1321,8 +1321,11 @@ impl Library {
         {
             return Err(LoomError::OcrDisabled);
         }
-        let discovery_fingerprint =
-            discovery_fingerprint(&discovered, authorization.ocr_policy.as_ref());
+        let discovery_fingerprint = discovery_fingerprint(
+            &discovered,
+            authorization.ocr_policy.as_ref(),
+            self.limits.max_files_per_request,
+        );
         let job = self.start_index_job(
             &authorization,
             &selected_uri,
@@ -4156,11 +4159,17 @@ pub(crate) fn validate_bookmark_scope_consistency(connection: &Connection) -> Re
     Ok(())
 }
 
-fn discovery_fingerprint(paths: &[PathBuf], ocr_policy: Option<&OcrPolicy>) -> String {
+fn discovery_fingerprint(
+    paths: &[PathBuf],
+    ocr_policy: Option<&OcrPolicy>,
+    max_files: usize,
+) -> String {
     let mut hasher = blake3::Hasher::new();
+    crate::discovery::DiscoveryLimits::for_files(max_files).fingerprint(&mut hasher);
     for path in paths {
-        hasher.update(path.to_string_lossy().as_bytes());
-        hasher.update(&[0]);
+        let bytes = path.as_os_str().as_encoded_bytes();
+        hasher.update(&(bytes.len() as u64).to_le_bytes());
+        hasher.update(bytes);
     }
     if let Some(policy) = ocr_policy {
         hasher.update(b"\0ocr-policy\0");
@@ -5671,6 +5680,21 @@ mod tests {
 
     use super::{Library, LibraryLimits};
     use crate::{ingest, EvidenceAnchor, LoomError, SearchRequest};
+
+    #[cfg(unix)]
+    #[test]
+    fn discovery_fingerprint_distinguishes_native_paths_and_bounds() {
+        use std::{ffi::OsString, os::unix::ffi::OsStringExt, path::PathBuf};
+        let first = PathBuf::from(OsString::from_vec(b"/x\x80.md".to_vec()));
+        let second = PathBuf::from(OsString::from_vec(b"/x\x81.md".to_vec()));
+        assert_eq!(first.to_string_lossy(), second.to_string_lossy());
+        let first_hash = super::discovery_fingerprint(std::slice::from_ref(&first), None, 10);
+        assert_ne!(
+            first_hash,
+            super::discovery_fingerprint(&[second], None, 10)
+        );
+        assert_ne!(first_hash, super::discovery_fingerprint(&[first], None, 11));
+    }
 
     // Deterministic prepared-provider boundary fixture. Native Vision quality is covered by
     // tests/image_ocr.rs; these tests control exactly when a prepared result reaches SQLite.

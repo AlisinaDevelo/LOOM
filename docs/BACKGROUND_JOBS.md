@@ -149,9 +149,9 @@ terminal forgetting cannot turn completed work into a misleading “job not foun
 
 Running cancellation sets a durable flag. A transaction already publishing may complete
 before a later cancellation obtains the SQLite writer lock; that completion is not rewritten.
-Cancellation committed before publication prevents it. It does not interrupt an in-process
-native provider mid-call; that limitation requires a watchdog/isolation design. No source bytes
-are deleted.
+Cancellation committed before publication prevents it. Queued file extraction probes durable
+claim/consent state and interrupts/reaps its one-shot helper; see [EXTRACTION_PROCESS.md](EXTRACTION_PROCESS.md).
+Synchronous foreground providers do not use that helper controller. No source bytes are deleted.
 
 Export ignores this runtime state. Successful portable restore clears jobs and advances the
 worker epoch in the canonical import transaction; a still-live old worker becomes stale.
@@ -176,7 +176,7 @@ The lock coordinates queued maintenance only; existing foreground writers still 
 existing SQLite/source-consent contracts, not this scheduler. Dispatch fairness is not a
 wall-clock starvation bound while one unsliced maintenance operation runs.
 The single-file adapter carries claim and scope/OCR fences through every canonical write;
-directory quanta and native-provider wall-clock/peak-memory isolation are not implemented.
+directory quanta are not implemented. Single-file helper limits do not prove whole-folder resource bounds.
 Semantic rebuild needs staged bounded work and fenced publication.
 Desktop admission, progress, durable cancellation/relaunch, and measured resource budgets
 remain required before #36 can close. No ambient capture or additional source access is enabled.
