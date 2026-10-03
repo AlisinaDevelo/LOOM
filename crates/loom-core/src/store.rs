@@ -3428,6 +3428,7 @@ impl Library {
                 .authorization
                 .verify_locator(&transaction, &target.locator)?;
             let snapshot = canonical_file_snapshot(&transaction, &target.locator)?;
+            target.verify_artifact_identity(&snapshot)?;
             if snapshot
                 .as_ref()
                 .is_some_and(|record| record.root_id != target.authorization.root_id)
@@ -3506,7 +3507,9 @@ impl Library {
             .target
             .authorization
             .verify_locator(&transaction, &prepared.target.locator)?;
-        if canonical_file_snapshot(&transaction, &prepared.target.locator)? != prepared.snapshot {
+        let current = canonical_file_snapshot(&transaction, &prepared.target.locator)?;
+        prepared.target.verify_artifact_identity(&current)?;
+        if current != prepared.snapshot {
             return Err(LoomError::SourceChanged(prepared.target.locator.clone()));
         }
         // Revalidate only after obtaining the writer lock: a competing writer may have held it
@@ -3797,6 +3800,7 @@ pub(crate) struct IndexFileTarget {
     pub(crate) locator: String,
     media_type: String,
     authorization: SourceAuthorization,
+    artifact_id: Option<String>,
 }
 
 pub(crate) fn canonical_queue_file(path: &Path, max_bytes: u64) -> Result<String> {
@@ -3848,6 +3852,8 @@ impl IndexFileTarget {
             locator: locator.to_owned(),
             media_type,
             authorization,
+            artifact_id: canonical_file_snapshot(connection, locator)?
+                .map(|snapshot| snapshot.artifact_id),
         };
         if target.media_type.starts_with("image/") {
             let policy = OcrPolicy::load(connection)?;
@@ -3888,6 +3894,10 @@ impl IndexFileTarget {
             && auth.generation >= 0
             && Uuid::parse_str(&auth.root_id).is_ok()
             && Uuid::parse_str(&auth.incarnation).is_ok()
+            && self
+                .artifact_id
+                .as_ref()
+                .is_none_or(|id| Uuid::parse_str(id).is_ok())
             && if self.media_type.starts_with("image/") {
                 auth.ocr_policy.as_ref().is_some_and(|policy| {
                     policy.enabled && Uuid::parse_str(&policy.revision).is_ok()
@@ -3899,6 +3909,41 @@ impl IndexFileTarget {
             return Err(LoomError::JobQueue("invalid file capability shape".into()));
         }
         Ok(())
+    }
+
+    fn verify_artifact_identity(&self, snapshot: &Option<CanonicalFileSnapshot>) -> Result<()> {
+        if snapshot.as_ref().map(|record| record.artifact_id.as_str())
+            != self.artifact_id.as_deref()
+        {
+            // An older binary may purge canonical evidence without knowing this runtime. A
+            // retry must not convert that old admission into permission to create a new artifact.
+            return Err(LoomError::SourceRevoked(self.authorization.root_id.clone()));
+        }
+        Ok(())
+    }
+
+    /// Creation from a previously empty selected root changes artifact identity as this job's
+    /// own output. Repeating that completed request must still return the original result.
+    pub(crate) fn same_completed_request(
+        &self,
+        original: &Self,
+        job: &crate::BackgroundJob,
+    ) -> bool {
+        if original.artifact_id.is_some()
+            || job.state != crate::JobState::Completed
+            || self.artifact_id.is_none()
+            || job
+                .result
+                .as_ref()
+                .and_then(|result| result.get("artifact_id"))
+                .and_then(serde_json::Value::as_str)
+                != self.artifact_id.as_deref()
+        {
+            return false;
+        }
+        let mut normalized = self.clone();
+        normalized.artifact_id = None;
+        normalized == *original
     }
 }
 

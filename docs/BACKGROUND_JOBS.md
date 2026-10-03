@@ -51,10 +51,14 @@ an enabled **file** root. Approval of a parent directory is insufficient for thi
 It rejects directories, symlinks, unsupported extensions, files over 8 MiB (or a smaller caller
 limit), unapproved/revoked roots, and images when OCR is disabled. Admission never selects a
 source or extracts bytes. The typed target retains root ID, consent generation, authorization
-incarnation, source kind/media type and, for images only, enabled OCR revision. Unknown fields
+incarnation, admission-time artifact ID (or absence), source kind/media type and, for images only,
+enabled OCR revision. Unknown fields
 or invalid capabilities fail closed. The path is capped at 4 KiB.
 
 This is **refresh latest authorized bytes at dispatch**, not a frozen admission-time snapshot.
+Artifact identity must still match admission. An older binary's canonical-only purge or a
+replacement artifact cancels old work; a retry cannot recreate deleted evidence. Explicit new
+admission after deletion may create a new artifact under the still-valid selected file scope.
 Each attempt reuses the original capability; retries never refresh consent. Revocation,
 re-selection, restore, kind changes, and OCR revision changes cannot reauthorize old work.
 Text/PDF work does not depend on OCR policy. Scope/OCR drift cancels the unit; content or

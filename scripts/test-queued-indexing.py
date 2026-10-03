@@ -76,7 +76,9 @@ def main():
         command("index", pdf)
         command("purge-artifact", command("search", "exact artifact recovery marker")[0]["artifact_id"])
         command("enqueue-index-file", pdf, "pdf-recovery")
-        assert command("run-next-job")["state"] == "completed"
+        recovered_pdf = command("run-next-job")
+        assert recovered_pdf["state"] == "completed"
+        assert command("enqueue-index-file", pdf, "pdf-recovery") == recovered_pdf
         pdf_hit = command("search", "exact artifact recovery marker")[0]
         assert pdf_hit["anchor"]["kind"] == "pdf_page" and pdf_hit["anchor"]["page"] == 1
         assert pdf.read_bytes() == pdf_bytes
@@ -131,6 +133,13 @@ def main():
             assert command("run-next-job", database_path=old_database)["operation"] == "fts_repair"
             assert command("run-next-job", database_path=old_database)["operation"] == "index_file"
             assert command("run-next-job", database_path=old_database) is None
+            # Older binaries can read canonical v10 but do not know about typed v3 targets.
+            # Their canonical purge must not let a previously admitted refresh resurrect evidence.
+            old_hit = command("search", "queued source marker", database_path=old_database)[0]
+            command("enqueue-index-file", source, "before-old-purge", database_path=old_database)
+            command("purge-artifact", old_hit["artifact_id"], executable=previous, database_path=old_database)
+            assert command("run-next-job", database_path=old_database)["state"] == "cancelled", "old-binary purge resurrected a deleted artifact"
+            assert command("search", "queued source marker", database_path=old_database) == []
         print("queued source CLI: PASS (text/PDF, scoped admission, atomic parent, cancellation/purge, OCR-off)"
               + ("; native OCR PASS" if args.native_ocr else "; native OCR not run")
               + ("; v2/v3 binaries PASS" if args.previous_loom else "; previous binary not provided"))

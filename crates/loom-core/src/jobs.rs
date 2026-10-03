@@ -371,6 +371,7 @@ pub(crate) fn purge_file_targets(
                 (SELECT id FROM source_roots WHERE locator=?1)
             OR json_extract(target_json,'$.locator') IN
                 (SELECT locator FROM artifact_locators WHERE artifact_id=?2 AND kind='file')
+            OR json_extract(target_json,'$.artifact_id') = ?2
             OR (?3=1 AND json_extract(target_json,'$.media_type') LIKE 'image/%'))",
         params![locator, artifact_id, images],
     )?;
@@ -682,10 +683,18 @@ fn admit(
         .optional()?;
     if let Some((id, existing_target)) = existing {
         let job = get_job(connection, &id)?;
-        if job.operation != operation
-            || job.priority != priority
-            || existing_target.as_deref() != target
-        {
+        let target_matches = existing_target.as_deref() == target || {
+            match (operation, existing_target.as_deref(), target) {
+                ("index_file", Some(original), Some(current)) => {
+                    crate::store::IndexFileTarget::parse(current)?.same_completed_request(
+                        &crate::store::IndexFileTarget::parse(original)?,
+                        &job,
+                    )
+                }
+                _ => false,
+            }
+        };
+        if job.operation != operation || job.priority != priority || !target_matches {
             return Err(LoomError::JobQueue(
                 "idempotency key has conflicting input".into(),
             ));
@@ -1467,6 +1476,50 @@ mod tests {
                 .unwrap(),
             1
         );
+    }
+
+    #[test]
+    fn admission_artifact_identity_survives_old_binary_purge_without_resurrection() {
+        let (_directory, library, source) = file_fixture();
+        let original = fs::read(&source).unwrap();
+        let artifact = file_identity(&library, &source).0;
+        library
+            .enqueue_index_file(&source, "pre-old-purge", JobPriority::Normal)
+            .unwrap();
+        // Older canonical-only tooling cannot remove a typed v3 operational target.
+        library
+            .lock()
+            .unwrap()
+            .execute("DELETE FROM artifacts WHERE id=?1", [&artifact])
+            .unwrap();
+        assert_eq!(library.background_jobs(128).unwrap().len(), 1);
+        let cancelled = library
+            .acquire_job_worker()
+            .unwrap()
+            .run_next()
+            .unwrap()
+            .unwrap();
+        assert_eq!(cancelled.state, JobState::Cancelled);
+        assert_eq!(library.stats().unwrap().artifacts, 0);
+        assert_eq!(fs::read(&source).unwrap(), original);
+        // Explicit new admission after deletion may create an artifact under the still-valid scope.
+        library
+            .enqueue_index_file(&source, "post-old-purge", JobPriority::Normal)
+            .unwrap();
+        let completed = library
+            .acquire_job_worker()
+            .unwrap()
+            .run_next()
+            .unwrap()
+            .unwrap();
+        assert_eq!(completed.state, JobState::Completed);
+        assert_eq!(
+            library
+                .enqueue_index_file(&source, "post-old-purge", JobPriority::Normal)
+                .unwrap(),
+            completed
+        );
+        assert_ne!(file_identity(&library, &source).0, artifact);
     }
 
     #[test]
