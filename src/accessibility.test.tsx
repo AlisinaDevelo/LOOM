@@ -167,4 +167,28 @@ describe("accessibility of the primary search workflow", () => {
     await screen.findByRole("heading", { name: "Recovered sources" });
     expect(notice?.textContent).not.toBe("");
   });
+  it("keeps an unrelated operation busy when the evidence viewer closes", async () => {
+    const baseline = invokeMock.getMockImplementation();
+    let finishIndex: (value: null) => void = () => {};
+    invokeMock.mockImplementation(async (command, args) => {
+      if (command === "index_selected_folder") {
+        return new Promise((resolve) => {
+          finishIndex = resolve;
+        });
+      }
+      return baseline?.(command, args);
+    });
+    render(<App />);
+    await searchAndOpenEvidence();
+
+    fireEvent.click(screen.getByRole("button", { name: /Add a folder/ }));
+    expect(await screen.findByRole("button", { name: /Stop indexing/ })).toBeInTheDocument();
+
+    fireEvent.keyDown(window, { key: "Escape" });
+    await waitFor(() =>
+      expect(screen.queryByRole("heading", { name: hit.title, level: 2 })).not.toBeInTheDocument(),
+    );
+    expect(screen.getByRole("button", { name: /Stop indexing/ })).toBeInTheDocument();
+    finishIndex(null);
+  });
 });

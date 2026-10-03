@@ -157,10 +157,12 @@ fn a_second_export_cannot_reactivate_or_adopt_another_scopes_bookmark() {
         );
         fs::write(&second, content).unwrap();
 
-        assert!(
-            library.import_bookmarks(&second).is_err(),
-            "an export must not adopt another scope's URL identity"
-        );
+        // The second export imports its own entry; the shared URL stays with the first export and
+        // is recorded as a per-record failure instead of being adopted or reactivated.
+        let report = library.import_bookmarks(&second).unwrap();
+        assert_eq!(report.imported, 1);
+        assert_eq!(report.failed, 1, "the shared URL must not be adopted");
+        assert!(report.failures[0].reason.contains("owned_by_other_export"));
         let after = library.export_portable().unwrap().tables;
         for table in [
             "artifacts",
@@ -170,11 +172,23 @@ fn a_second_export_cannot_reactivate_or_adopt_another_scopes_bookmark() {
             "bookmark_import_items",
             "passages",
         ] {
-            assert_eq!(
-                after[table], before[table],
-                "{table} changed on refused cross-scope import"
-            );
+            for row in &before[table].rows {
+                assert!(
+                    after[table].rows.contains(row),
+                    "{table} row owned by the first export changed on a cross-scope import"
+                );
+            }
         }
+        assert_eq!(
+            library
+                .search(&loom_core::SearchRequest {
+                    text: "secondonlybookmark".into(),
+                    limit: 10,
+                })
+                .unwrap()
+                .len(),
+            1
+        );
         let connection = rusqlite::Connection::open(&database).unwrap();
         let active_under_revoked: i64 = connection
             .query_row(
@@ -655,4 +669,100 @@ fn structurally_broken_or_empty_exports_still_fail_closed() {
         assert!(library.import_bookmarks(&path).is_err(), "{name}");
     }
     assert!(library.list_bookmark_imports(10).unwrap().is_empty());
+}
+
+const SHARED_A: &str = r#"<!DOCTYPE NETSCAPE-Bookmark-file-1>
+<DL><p>
+<DT><H3>Shared</H3>
+<DL><p>
+<DT><A HREF="https://example.test/shared" ADD_DATE="1700000001">Shared reference</A>
+<DT><A HREF="https://example.test/only-a" ADD_DATE="1700000002">Only in export A</A>
+</DL><p>
+</DL><p>
+"#;
+
+const SHARED_B: &str = r#"<!DOCTYPE NETSCAPE-Bookmark-file-1>
+<DL><p>
+<DT><H3>Shared</H3>
+<DL><p>
+<DT><A HREF="https://example.test/only-b" ADD_DATE="1700000003">Only in export B</A>
+<DT><A HREF="https://example.test/shared" ADD_DATE="1700000001">Shared reference</A>
+</DL><p>
+</DL><p>
+"#;
+
+#[test]
+fn overlapping_exports_import_everything_except_the_entry_another_export_owns() {
+    let directory = tempdir().unwrap();
+    let a = directory.path().join("chrome.html");
+    let b = directory.path().join("firefox.html");
+    fs::write(&a, SHARED_A).unwrap();
+    fs::write(&b, SHARED_B).unwrap();
+    let library = Library::open(directory.path().join("library.sqlite3")).unwrap();
+
+    let first = library.import_bookmarks(&a).unwrap();
+    assert_eq!((first.imported, first.failed), (2, 0));
+
+    // The second export shares one URL with the first: it imports its own entry and records the
+    // overlap as a per-record failure instead of rolling back the whole import.
+    let second = library.import_bookmarks(&b).unwrap();
+    assert_eq!((second.imported, second.failed), (1, 1));
+    assert!(second.failures[0].reason.contains("owned_by_other_export"));
+    let imports = library.list_bookmark_imports(10).unwrap();
+    let b_import = imports
+        .iter()
+        .find(|import| import.import_id == second.import_id)
+        .unwrap();
+    assert_eq!(b_import.status, "partial");
+    assert_eq!(b_import.failures[0].code, "owned_by_other_export");
+    assert_eq!(
+        b_import.failures[0].ordinal, 1,
+        "parser record numbering is kept"
+    );
+    let mut titles = library
+        .list_bookmarks(10)
+        .unwrap()
+        .into_iter()
+        .map(|record| record.title)
+        .collect::<Vec<_>>();
+    titles.sort();
+    assert_eq!(
+        titles,
+        vec!["Only in export A", "Only in export B", "Shared reference"]
+    );
+
+    // Revoking export A leaves export B's own record searchable.
+    library.revoke_source_root(&first.source_uri).unwrap();
+    let hits = library
+        .search(&loom_core::SearchRequest {
+            text: "Only in export B".into(),
+            limit: 5,
+        })
+        .unwrap();
+    assert_eq!(hits.len(), 1);
+
+    // Once export A is purged, re-selecting the unchanged export B imports the blocked entry into
+    // the same import and resolves its failure.
+    library.purge_root(&first.source_uri).unwrap();
+    let retried = library.import_bookmarks(&b).unwrap();
+    assert_eq!(retried.import_id, second.import_id);
+    assert_eq!((retried.imported, retried.failed), (1, 0));
+    let b_import = library
+        .list_bookmark_imports(10)
+        .unwrap()
+        .into_iter()
+        .find(|import| import.import_id == second.import_id)
+        .unwrap();
+    assert_eq!(b_import.status, "complete");
+    assert_eq!(b_import.failures[0].state, "resolved");
+    assert_eq!(
+        library
+            .search(&loom_core::SearchRequest {
+                text: "Shared reference".into(),
+                limit: 5,
+            })
+            .unwrap()
+            .len(),
+        1
+    );
 }

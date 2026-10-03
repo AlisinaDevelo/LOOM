@@ -316,6 +316,56 @@ impl Library {
                  )",
                 params![import_id, now, root_id],
             )?;
+            // Retry entries that only failed because another export owned their URL; once that
+            // export is purged, re-selecting this one imports them into the same import.
+            let mut report = BookmarkImportReport::default();
+            let blocked: Vec<u32> = {
+                let mut statement = transaction.prepare(
+                    "SELECT ordinal FROM bookmark_import_failures
+                     WHERE import_id = ?1 AND state = 'pending' AND code = 'owned_by_other_export'
+                     ORDER BY ordinal",
+                )?;
+                let rows = statement
+                    .query_map([&import_id], |row| row.get(0))?
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                rows
+            };
+            for record_ordinal in blocked {
+                let Some(index) = detailed
+                    .entry_positions
+                    .iter()
+                    .position(|(ordinal, _)| *ordinal == record_ordinal)
+                else {
+                    continue;
+                };
+                let entry = &export.bookmarks[index];
+                if bookmark_owned_by_other_export(&transaction, root_id, entry)? {
+                    continue;
+                }
+                import_bookmark_entry(
+                    &transaction,
+                    root_id,
+                    &source_uri,
+                    &import_id,
+                    entry,
+                    index,
+                    &now,
+                    &mut report,
+                )?;
+                transaction.execute(
+                    "UPDATE bookmark_import_failures
+                     SET state = 'resolved', resolved_by_import_id = ?1
+                     WHERE import_id = ?1 AND ordinal = ?2",
+                    params![import_id, record_ordinal],
+                )?;
+            }
+            transaction.execute(
+                "UPDATE bookmark_imports SET status = 'complete'
+                 WHERE id = ?1 AND status = 'partial' AND NOT EXISTS(
+                    SELECT 1 FROM bookmark_import_failures WHERE import_id = ?1 AND state = 'pending'
+                 )",
+                [&import_id],
+            )?;
             let failures = pending_import_failures(&transaction, &import_id)?;
             transaction.commit()?;
             return Ok(BookmarkImportReport {
@@ -328,7 +378,7 @@ impl Library {
                 failed: failures.len() as u64,
                 failures,
                 remote_fetches: 0,
-                ..BookmarkImportReport::default()
+                ..report
             });
         }
 
@@ -392,133 +442,35 @@ impl Library {
             ..BookmarkImportReport::default()
         };
         for (ordinal, entry) in export.bookmarks.iter().enumerate() {
-            let entry_hash = bookmark_entry_hash(entry);
-            let existing_record: Option<BookmarkRecordProjection> = transaction
-                .query_row(
-                    "SELECT b.id, b.title, b.entry_hash, b.added_at, b.modified_at,
-                         b.artifact_id, a.source_root_id
-                     FROM bookmark_records b JOIN artifacts a ON a.id = b.artifact_id
-                     WHERE b.url = ?1 AND b.folder_path = ?2",
-                    params![entry.url, entry.folder_path],
-                    |row| {
-                        Ok((
-                            row.get(0)?,
-                            row.get(1)?,
-                            row.get(2)?,
-                            row.get(3)?,
-                            row.get(4)?,
-                            row.get(5)?,
-                            row.get(6)?,
-                        ))
-                    },
-                )
-                .optional()?;
-            let same_url_elsewhere: bool = transaction.query_row(
-                "SELECT EXISTS(SELECT 1 FROM bookmark_records WHERE url = ?1)",
-                [&entry.url],
-                |row| row.get(0),
-            )?;
-            let (bookmark_id, artifact_id, outcome) = if let Some((
-                bookmark_id,
-                old_title,
-                old_hash,
-                old_added_at,
-                old_modified_at,
-                artifact_id,
-                existing_root_id,
-            )) = existing_record
-            {
-                if existing_root_id != *root_id {
-                    return Err(bookmark_scope_conflict());
-                }
-                let unchanged = old_hash == entry_hash
-                    && old_title == entry.title
-                    && old_added_at == entry.added_at
-                    && old_modified_at == entry.modified_at;
-                if unchanged {
-                    upsert_bookmark_artifact(
-                        &transaction,
-                        root_id,
-                        &source_uri,
-                        &artifact_id,
-                        entry,
-                        &entry_hash,
-                        &now,
-                    )?;
-                    report.unchanged += 1;
-                    (bookmark_id, artifact_id, "unchanged")
-                } else {
-                    upsert_bookmark_artifact(
-                        &transaction,
-                        root_id,
-                        &source_uri,
-                        &artifact_id,
-                        entry,
-                        &entry_hash,
-                        &now,
-                    )?;
-                    transaction.execute(
-                        "UPDATE bookmark_records
-                         SET title = ?1, added_at = ?2, modified_at = ?3, entry_hash = ?4,
-                             updated_at = ?5
-                         WHERE id = ?6",
-                        params![
-                            entry.title,
-                            entry.added_at,
-                            entry.modified_at,
-                            entry_hash,
-                            now,
-                            bookmark_id
-                        ],
-                    )?;
-                    report.merged += 1;
-                    (bookmark_id, artifact_id, "merged")
-                }
-            } else {
-                let artifact_id = ensure_bookmark_artifact(
+            let (record_ordinal, byte_offset) = detailed.entry_positions[ordinal];
+            if bookmark_owned_by_other_export(&transaction, root_id, entry)? {
+                record_owned_elsewhere(
                     &transaction,
-                    root_id,
-                    &source_uri,
-                    entry,
-                    &entry_hash,
+                    &import_id,
+                    record_ordinal,
+                    byte_offset,
                     &now,
                 )?;
-                let bookmark_id = Uuid::new_v4().to_string();
-                transaction.execute(
-                    "INSERT INTO bookmark_records(
-                        id, artifact_id, folder_path, title, url, added_at, modified_at,
-                        entry_hash, first_import_id, created_at, updated_at
-                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?10)",
-                    params![
-                        bookmark_id,
-                        artifact_id,
-                        entry.folder_path,
-                        entry.title,
-                        entry.url,
-                        entry.added_at,
-                        entry.modified_at,
-                        entry_hash,
-                        import_id,
-                        now
-                    ],
-                )?;
-                report.imported += 1;
-                let outcome = if same_url_elsewhere {
-                    report.conflicts += 1;
-                    "conflict"
-                } else {
-                    "imported"
-                };
-                (bookmark_id, artifact_id, outcome)
-            };
-            transaction.execute(
-                "INSERT INTO bookmark_import_items(
-                    import_id, bookmark_id, ordinal, entry_hash, outcome
-                 ) VALUES (?1, ?2, ?3, ?4, ?5)",
-                params![import_id, bookmark_id, ordinal as i64, entry_hash, outcome],
+                continue;
+            }
+            import_bookmark_entry(
+                &transaction,
+                root_id,
+                &source_uri,
+                &import_id,
+                entry,
+                ordinal,
+                &now,
+                &mut report,
             )?;
-            let _ = artifact_id;
         }
+        transaction.execute(
+            "UPDATE bookmark_imports SET status = 'partial'
+             WHERE id = ?1 AND status = 'complete' AND EXISTS(
+                SELECT 1 FROM bookmark_import_failures WHERE import_id = ?1 AND state = 'pending'
+             )",
+            [&import_id],
+        )?;
         report.failures = pending_import_failures(&transaction, &import_id)?;
         report.failed = report.failures.len() as u64;
         transaction.commit()?;
@@ -5117,6 +5069,190 @@ fn pending_import_failures(
         })?
         .collect::<std::result::Result<Vec<_>, _>>()?;
     Ok(failures)
+}
+
+/// Imports one parsed bookmark into `import_id`, merging with an existing record when one exists.
+#[allow(clippy::too_many_arguments)]
+fn import_bookmark_entry(
+    tx: &Transaction<'_>,
+    root_id: &str,
+    source_uri: &str,
+    import_id: &str,
+    entry: &BookmarkEntry,
+    ordinal: usize,
+    now: &str,
+    report: &mut BookmarkImportReport,
+) -> Result<()> {
+    let entry_hash = bookmark_entry_hash(entry);
+    let existing_record: Option<BookmarkRecordProjection> = tx
+        .query_row(
+            "SELECT b.id, b.title, b.entry_hash, b.added_at, b.modified_at,
+                     b.artifact_id, a.source_root_id
+                 FROM bookmark_records b JOIN artifacts a ON a.id = b.artifact_id
+                 WHERE b.url = ?1 AND b.folder_path = ?2",
+            params![entry.url, entry.folder_path],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                    row.get(6)?,
+                ))
+            },
+        )
+        .optional()?;
+    let same_url_elsewhere: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM bookmark_records WHERE url = ?1)",
+        [&entry.url],
+        |row| row.get(0),
+    )?;
+    let (bookmark_id, artifact_id, outcome) = if let Some((
+        bookmark_id,
+        old_title,
+        old_hash,
+        old_added_at,
+        old_modified_at,
+        artifact_id,
+        existing_root_id,
+    )) = existing_record
+    {
+        if existing_root_id != root_id {
+            return Err(bookmark_scope_conflict());
+        }
+        let unchanged = old_hash == entry_hash
+            && old_title == entry.title
+            && old_added_at == entry.added_at
+            && old_modified_at == entry.modified_at;
+        if unchanged {
+            upsert_bookmark_artifact(
+                tx,
+                root_id,
+                source_uri,
+                &artifact_id,
+                entry,
+                &entry_hash,
+                now,
+            )?;
+            report.unchanged += 1;
+            (bookmark_id, artifact_id, "unchanged")
+        } else {
+            upsert_bookmark_artifact(
+                tx,
+                root_id,
+                source_uri,
+                &artifact_id,
+                entry,
+                &entry_hash,
+                now,
+            )?;
+            tx.execute(
+                "UPDATE bookmark_records
+                     SET title = ?1, added_at = ?2, modified_at = ?3, entry_hash = ?4,
+                         updated_at = ?5
+                     WHERE id = ?6",
+                params![
+                    entry.title,
+                    entry.added_at,
+                    entry.modified_at,
+                    entry_hash,
+                    now,
+                    bookmark_id
+                ],
+            )?;
+            report.merged += 1;
+            (bookmark_id, artifact_id, "merged")
+        }
+    } else {
+        let artifact_id =
+            ensure_bookmark_artifact(tx, root_id, source_uri, entry, &entry_hash, now)?;
+        let bookmark_id = Uuid::new_v4().to_string();
+        tx.execute(
+            "INSERT INTO bookmark_records(
+                    id, artifact_id, folder_path, title, url, added_at, modified_at,
+                    entry_hash, first_import_id, created_at, updated_at
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?10)",
+            params![
+                bookmark_id,
+                artifact_id,
+                entry.folder_path,
+                entry.title,
+                entry.url,
+                entry.added_at,
+                entry.modified_at,
+                entry_hash,
+                import_id,
+                now
+            ],
+        )?;
+        report.imported += 1;
+        let outcome = if same_url_elsewhere {
+            report.conflicts += 1;
+            "conflict"
+        } else {
+            "imported"
+        };
+        (bookmark_id, artifact_id, outcome)
+    };
+    tx.execute(
+        "INSERT INTO bookmark_import_items(
+                import_id, bookmark_id, ordinal, entry_hash, outcome
+             ) VALUES (?1, ?2, ?3, ?4, ?5)",
+        params![import_id, bookmark_id, ordinal as i64, entry_hash, outcome],
+    )?;
+    let _ = artifact_id;
+    Ok(())
+}
+
+/// True when the bookmark's URL identity already belongs to a different selected export. Each
+/// bookmark artifact is owned by exactly one export's root, so revoking or purging one export never
+/// changes another; an overlapping entry is recorded as a per-record failure instead.
+fn bookmark_owned_by_other_export(
+    tx: &Transaction<'_>,
+    root_id: &str,
+    entry: &BookmarkEntry,
+) -> Result<bool> {
+    let owners: Vec<String> = {
+        let mut statement = tx.prepare(
+            "SELECT a.source_root_id FROM bookmark_records b
+             JOIN artifacts a ON a.id = b.artifact_id
+             WHERE b.url = ?1 AND b.folder_path = ?2
+             UNION
+             SELECT a.source_root_id FROM artifact_locators l
+             JOIN artifacts a ON a.id = l.artifact_id
+             WHERE l.kind = 'url' AND l.locator = ?1 AND l.active = 1",
+        )?;
+        let rows = statement
+            .query_map(params![entry.url, entry.folder_path], |row| row.get(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        rows
+    };
+    Ok(owners.iter().any(|owner| owner != root_id))
+}
+
+fn record_owned_elsewhere(
+    tx: &Transaction<'_>,
+    import_id: &str,
+    record_ordinal: u32,
+    byte_offset: usize,
+    now: &str,
+) -> Result<()> {
+    tx.execute(
+        "INSERT INTO bookmark_import_failures(
+            import_id, ordinal, byte_offset, code, detail, state, created_at
+         ) VALUES (?1, ?2, ?3, 'owned_by_other_export', ?4, 'pending', ?5)
+         ON CONFLICT(import_id, ordinal) DO NOTHING",
+        params![
+            import_id,
+            record_ordinal,
+            byte_offset as i64,
+            "this URL is already imported from another selected export; purge that export to import it here",
+            now
+        ],
+    )?;
+    Ok(())
 }
 
 fn bookmark_entry_hash(entry: &BookmarkEntry) -> String {
