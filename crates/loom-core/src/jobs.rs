@@ -2234,6 +2234,31 @@ mod tests {
         assert_eq!(library.stats().unwrap().artifacts, 0);
     }
 
+    #[test]
+    fn invalid_scheduling_policy_does_not_block_known_layout_deletion() {
+        let (_directory, library, source) = file_fixture();
+        library
+            .enqueue_index_file(&source, "delete-despite-policy", JobPriority::Normal)
+            .unwrap();
+        let artifact = file_identity(&library, &source).0;
+        library
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE background_job_runtime SET policy_json='invalid-policy' WHERE slot=1",
+                [],
+            )
+            .unwrap();
+        library.purge_artifact(&artifact).unwrap();
+        assert_eq!(library.stats().unwrap().artifacts, 0);
+        let retained: i64 = library
+            .lock()
+            .unwrap()
+            .query_row("SELECT COUNT(*) FROM background_jobs", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(retained, 0);
+    }
+
     fn assert_purge_runtime_recovery(error: LoomError, raw_fixture_marker: &str) {
         let reason = match error {
             LoomError::JobQueue(reason) => reason,
