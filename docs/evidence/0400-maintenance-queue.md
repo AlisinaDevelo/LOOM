@@ -2,7 +2,7 @@
 
 ## Tested scope
 
-Code head: `871936852c20037dc967374c7aa31feba5119f05`, based on merged main
+Code head: `aaa4dfae3a7ea267b7ed8dc724fd2c608b44a783`, based on merged main
 `7d67bf54715fd2c4cb0a7be74232568d6e029b4f`. Verified on 2026-10-03 on
 MacBookPro17,1, Apple M1 arm64 / 8 GiB, macOS 26.6.2 build 25G83; Rust 1.96.0
 and 1.88.0, Node 26.7.0, npm 11.19.0, Python 3.9.6. Rust used one build job,
@@ -83,6 +83,10 @@ before the genuine failing/passing comparison; they are not evidence of product 
 Re-review required transactional runtime migration instead of only rejecting the older DDL.
 The runtime-only version-2 marker and upgrade/rollback fixtures now cover that compatibility
 boundary. Hard-link admission is consistently refused, not just worker execution.
+Static re-review found no blocking issue in this deliberately FTS-only adapter. The remaining
+public-API contract note was addressed: ordinary `Library::open` handles also reject queue
+operations against incompatible runtime layouts, without preventing canonical evidence access.
+Policy corruption still permits bounded diagnostic inspection; admission/execution refuses it.
 
 The final stable capture suite took 91.20 seconds but passed without a restart. A retained
 three-second process sample during the delay shows Vision/CoreRecognition/ANE waits, not a
@@ -107,12 +111,12 @@ scope, ambient capture, networking, model download, external study, or signing c
 
 | Log | SHA-256 |
 | --- | --- |
-| `jobs-ship-workspace.log` | `f9d0621ba62274febacf5f5c5e5552db5a17121c22108d559ba3af3a86a87347` |
-| `jobs-ship-msrv-tests.log` | `7ba77df355ac2dcf15b20179a2906352ee30e0023981c59dafbbec643e89f436` |
-| `jobs-upgrade-cli-smoke.log` | `cd15b03cd5860d5b2c9391e10c64df8cc3b8648cdaab69932f2f878b444ed5f8` |
+| `jobs-reviewed-workspace.log` | `b7ad52ca98ce21b422942da34900b44c25fec35738ef9b42ebf9008b53460317` |
+| `jobs-reviewed-msrv-tests.log` | `36b882ab7038c0b4ab3a16faf528450f856c87c170efd0e43aa34565f3686578` |
+| `jobs-reviewed-cli.log` | `cd15b03cd5860d5b2c9391e10c64df8cc3b8648cdaab69932f2f878b444ed5f8` |
 | `jobs-fairness-before.log` | `eaefa669fec9a9d1104924795dfe7f99554502c7acf429510c04f09db5b92f69` |
 | `jobs-cli-ownership-before.log` | `ad865d9d05568847934269c99994077ec72526f43fb020f12b1691270f05fd01` |
-| `jobs-ship-frontend.log` | `a035cf1aaa628123000f828a53ffa9251b6fac591dea732c92c3bf2931f0d683` |
+| `jobs-reviewed-frontend.log` | `6e75fff1af65dc389af8c00a713864d430951fb57bef7c0a2a60e51b93c3b0fe` |
 | `jobs-ship-capture-sample.txt` | `e80cfe460f4731189e08ac0867c171cb68c2c13dafc7ae20bae3bd73df209a2b` |
 
 After merge, retain the exact main SHA/tree identity and rerun the queue, full workspace,
