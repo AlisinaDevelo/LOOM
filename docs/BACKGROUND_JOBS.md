@@ -77,6 +77,13 @@ foreground update cannot be replaced by the older prepared result. Artifact/vers
 FTS triggers, and parent `completed` result commit together; no legacy `index_jobs` checkpoint
 is created. Failures leave canonical evidence intact, with no missing-state cleanup or purge.
 
+Foreground publication, missing-source reconciliation, and durable checkpoint updates also
+reserve the SQLite writer with an IMMEDIATE transaction before reading consent/job state.
+Extraction still runs outside that transaction. SQLite write failures and unstable source
+reads stop the request without hiding the last good evidence or advancing the failing unit's
+checkpoint; retry can resume that unit. Genuine unavailable/invalid sources retain the existing
+missing-source behavior. This does not enroll foreground work in the queue or bound its providers.
+
 Artifact purge removes jobs for its exact file locators, not other artifacts sharing its root.
 Root purge also removes targeted jobs when no artifact exists. OCR purge removes image targets.
 This includes pending, running and terminal diagnostics, preventing resurrection and retained
