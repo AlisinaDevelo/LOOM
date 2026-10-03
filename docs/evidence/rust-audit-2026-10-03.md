@@ -93,7 +93,7 @@ Two initial harness failures were corrected and retained: restore preserves expo
 enabled state rather than disabling all roots, and macOS temporary locators need canonical
 resolution. These are test-assumption errors, not newly fixed product vulnerabilities.
 
-Reproduce the retained compatibility check with:
+The original compatibility command (historical scratch binaries are no longer available):
 
 ```text
 python3 scripts/test-backup-compatibility.py \
@@ -101,10 +101,13 @@ python3 scripts/test-backup-compatibility.py \
   --after /tmp/loom-jobs-evidence.INpfja/loom-audit-cli
 ```
 
-Raw reports/logs/binaries are retained under `/tmp/loom-jobs-evidence.INpfja`.
-The auditor and database remain under `/tmp/loom-audit-tools.cJAejt`. Its unused 618 MiB
-compile cache was moved to recoverable, task-owned Trash; no source, user library,
-evidence, or shared Cargo cache was deleted by this unit.
+Raw reports/logs/binaries were recorded under `/tmp/loom-jobs-evidence.INpfja`.
+That scratch directory was observed missing during later approved-file verification on
+2026-10-03. The digests below record historical runs, not currently accessible raw reports.
+The auditor and database were recorded under `/tmp/loom-audit-tools.cJAejt`; that scratch
+directory was also observed missing. The original unused 618 MiB compile cache was moved
+to task-owned Trash, then cleaned during the later approved-file verification. No source,
+user library, evidence, or shared Cargo cache was deleted by these narrow build-cache cleanups.
 
 ## Selected log hashes
 

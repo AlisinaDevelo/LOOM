@@ -328,6 +328,16 @@ struct StableBytes {
     modified_ns: Option<i64>,
 }
 
+/// Revalidate source bytes after extraction without invoking a parser/OCR provider again.
+pub(crate) fn verify_stable_hash(path: &Path, max_bytes: u64, expected: &str) -> Result<()> {
+    let stable = read_stable_bytes(path, path, max_bytes)?;
+    let actual = format!("blake3:{}", blake3::hash(&stable.bytes).to_hex());
+    if actual != expected {
+        return Err(LoomError::SourceChanged(path.display().to_string()));
+    }
+    Ok(())
+}
+
 fn read_stable_bytes(path: &Path, root: &Path, max_bytes: u64) -> Result<StableBytes> {
     for _ in 0..3 {
         match read_stable_bytes_once(path, root, max_bytes) {

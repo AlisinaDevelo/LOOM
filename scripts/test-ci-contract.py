@@ -88,6 +88,8 @@ class CiContractTests(unittest.TestCase):
         self.assertIn("python3 scripts/test-ci-contract.py", MAKEFILE)
         self.assertIn("run_step background-jobs python3 scripts/test-background-jobs.py", DEVICE)
         self.assertIn("python3 scripts/test-background-jobs.py --loom target/debug/loom", CI)
+        self.assertIn("run_step queued-indexing python3 scripts/test-queued-indexing.py", DEVICE)
+        self.assertIn("python3 scripts/test-queued-indexing.py --loom target/debug/loom", CI)
 
 
 if __name__ == "__main__":

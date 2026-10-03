@@ -1575,36 +1575,44 @@ impl Library {
         extractor_version: &str,
         checkpoint: Option<(&str, u64)>,
     ) -> Result<bool> {
-        let source_uri = utf8_path(path)?;
-        let title = path
-            .file_name()
-            .and_then(|value| value.to_str())
-            .unwrap_or(&source_uri)
-            .to_string();
-        let passages = if let Some(regions) = document.image_regions.as_deref() {
-            ingest::split_image_passages(regions)
-        } else if let Some(pages) = document.pdf_pages.as_deref() {
-            ingest::split_pdf_passages(
-                pages,
-                self.limits.passage_target_chars,
-                self.limits.passage_overlap_chars,
-            )
-        } else {
-            ingest::split_passages(
-                &document.normalized_text,
-                self.limits.passage_target_chars,
-                self.limits.passage_overlap_chars,
-            )
-        };
-        let parse_warnings_json = serde_json::to_string(&document.parse_warnings)?;
-        let extraction_metadata_json = serde_json::to_string(&document.extraction_metadata)?;
-        let page_count = document.page_count.map(|value| value as i64);
-        let now = Utc::now().to_rfc3339();
+        let prepared = PreparedIndexDocument::new(
+            path,
+            document,
+            self.limits,
+            extractor_id,
+            extractor_version,
+        )?;
         let mut connection = self.lock()?;
         let transaction = connection.transaction()?;
-        authorization.verify(&transaction)?;
+        let indexed =
+            Self::commit_index_document(&transaction, authorization, &prepared, checkpoint)?;
+        transaction.commit()?;
+        Ok(indexed)
+    }
+
+    /// The caller owns the transaction, allowing canonical writes and parent completion to commit
+    /// together. Only source-capability checks occur here, never extraction or source grants.
+    fn commit_index_document(
+        transaction: &Transaction<'_>,
+        authorization: &SourceAuthorization,
+        prepared: &PreparedIndexDocument,
+        checkpoint: Option<(&str, u64)>,
+    ) -> Result<bool> {
+        let PreparedIndexDocument {
+            source_uri,
+            title,
+            document,
+            passages,
+            extractor_id,
+            extractor_version,
+            parse_warnings_json,
+            extraction_metadata_json,
+            now,
+        } = prepared;
+        let page_count = document.page_count.map(i64::from);
+        authorization.verify(transaction)?;
         if extractor_id == IMAGE_OCR_EXTRACTOR_ID {
-            authorization.verify_ocr_result(&transaction)?;
+            authorization.verify_ocr_result(transaction)?;
         }
         let root_id = &authorization.root_id;
 
@@ -1642,13 +1650,12 @@ impl Library {
             .optional()?;
         if current_projection.as_ref().is_some_and(|projection| {
             projection.0 == document.raw_hash
-                && projection.1 == extractor_id
-                && projection.2 == extractor_version
+                && projection.1 == *extractor_id
+                && projection.2 == *extractor_version
         }) {
             if let Some((job_id, next_unit)) = checkpoint {
-                update_index_job_checkpoint(&transaction, authorization, job_id, next_unit, &now)?;
+                update_index_job_checkpoint(transaction, authorization, job_id, next_unit, now)?;
             }
-            transaction.commit()?;
             return Ok(false);
         }
 
@@ -1688,16 +1695,15 @@ impl Library {
             ],
         )?;
         if inserted > 0 {
-            insert_passages(&transaction, &version_id, &passages, &now)?;
+            insert_passages(transaction, &version_id, passages, now)?;
         }
         transaction.execute(
             "UPDATE artifacts SET active_version_id = ?1, last_seen_at = ?2 WHERE id = ?3",
             params![version_id, now, artifact_id],
         )?;
         if let Some((job_id, next_unit)) = checkpoint {
-            update_index_job_checkpoint(&transaction, authorization, job_id, next_unit, &now)?;
+            update_index_job_checkpoint(transaction, authorization, job_id, next_unit, now)?;
         }
-        transaction.commit()?;
         Ok(true)
     }
 
@@ -2675,6 +2681,7 @@ impl Library {
             selector: format!("root:{locator}"),
             ..DeletionReport::default()
         };
+        crate::jobs::purge_file_targets(&transaction, Some(locator), None, false)?;
         for artifact_id in artifact_ids {
             merge_deletion_reports(
                 &mut report,
@@ -3328,6 +3335,14 @@ impl Library {
     }
 
     pub(crate) fn open_for_jobs_with_limits(path: &Path, limits: LibraryLimits) -> Result<Self> {
+        Self::open_existing_job_library(path, limits, true)
+    }
+
+    pub(crate) fn open_existing_job_library(
+        path: &Path,
+        limits: LibraryLimits,
+        validate_runtime: bool,
+    ) -> Result<Self> {
         let path = path.canonicalize().map_err(|error| io_error(path, error))?;
         #[cfg(unix)]
         {
@@ -3350,7 +3365,9 @@ impl Library {
             ));
         }
         validate_schema_shape(&connection, SCHEMA_VERSION)?;
-        crate::jobs::validate_schema(&connection)?;
+        if validate_runtime {
+            crate::jobs::validate_schema(&connection)?;
+        }
         configure(&connection)?;
         connection.execute_batch("PRAGMA trusted_schema = OFF;")?;
         Ok(Self {
@@ -3369,7 +3386,7 @@ impl Library {
         let mut connection = self.lock()?;
         let transaction =
             connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-        claim.verify(&transaction)?;
+        claim.verify_operation(&transaction, "fts_repair", None)?;
         let before = fts_health(&transaction)?;
         rebuild_fts(&transaction)?;
         let after = fts_health(&transaction)?;
@@ -3380,6 +3397,140 @@ impl Library {
         }
         let report = serde_json::to_string(&FtsRepairReport { before, after })?;
         let completed = claim.complete(&transaction, &report)?;
+        transaction.commit()?;
+        Ok(completed)
+    }
+
+    pub(crate) fn queue_file_locator(&self, path: &Path) -> Result<String> {
+        canonical_queue_file(path, self.limits.max_file_bytes.min(8 * 1024 * 1024))
+    }
+
+    pub(crate) fn job_index_file(
+        &self,
+        claim: &crate::jobs::JobClaim,
+        json: &str,
+    ) -> Result<crate::jobs::BackgroundJob> {
+        let prepared = self.prepare_file_job(claim, json)?;
+        self.publish_file_job(claim, &prepared)
+    }
+
+    pub(crate) fn prepare_file_job(
+        &self,
+        claim: &crate::jobs::JobClaim,
+        json: &str,
+    ) -> Result<PreparedFileJob> {
+        let target = IndexFileTarget::parse(json)?;
+        let snapshot = {
+            let mut connection = self.lock()?;
+            let transaction = connection.transaction()?;
+            claim.verify_operation(&transaction, "index_file", Some(json))?;
+            target
+                .authorization
+                .verify_locator(&transaction, &target.locator)?;
+            let snapshot = canonical_file_snapshot(&transaction, &target.locator)?;
+            target.verify_artifact_identity(&snapshot)?;
+            if snapshot
+                .as_ref()
+                .is_some_and(|record| record.root_id != target.authorization.root_id)
+            {
+                return Err(LoomError::SourceRevoked(
+                    target.authorization.root_id.clone(),
+                ));
+            }
+            transaction.commit()?;
+            snapshot
+        };
+        // Provider work owns no SQLite transaction and no interactive connection mutex.
+        let path = Path::new(&target.locator);
+        let document = ingest::read_stable_with_limits_and_ocr(
+            path,
+            path,
+            self.limits.max_file_bytes.min(8 * 1024 * 1024),
+            self.limits.max_pdf_pages.min(2048),
+            target
+                .authorization
+                .ocr_policy
+                .as_ref()
+                .is_some_and(|policy| policy.enabled),
+            None,
+        )?;
+        enforce_file_job_output_bounds(&document)?;
+        if self
+            .limits
+            .passage_target_chars
+            .saturating_sub(self.limits.passage_overlap_chars)
+            < 256
+        {
+            return Err(LoomError::JobQueue(
+                "queued passage settings exceed the output budget".into(),
+            ));
+        }
+        let (extractor_id, extractor_version) = match document.media_type {
+            "application/pdf" => (PDF_EXTRACTOR_ID, PDF_EXTRACTOR_VERSION),
+            media if media.starts_with("image/") => (
+                IMAGE_OCR_EXTRACTOR_ID,
+                crate::ocr::IMAGE_OCR_EXTRACTOR_VERSION,
+            ),
+            _ => (EXTRACTOR_ID, EXTRACTOR_VERSION),
+        };
+        if document.media_type != target.media_type {
+            return Err(LoomError::JobQueue("file media type changed".into()));
+        }
+        let document = PreparedIndexDocument::new(
+            path,
+            document,
+            self.limits,
+            extractor_id,
+            extractor_version,
+        )?;
+        if document.passages.len() > 8192 {
+            return Err(LoomError::JobQueue("queued passages exceed 8192".into()));
+        }
+        Ok(PreparedFileJob {
+            target,
+            target_json: json.to_owned(),
+            snapshot,
+            document,
+        })
+    }
+
+    pub(crate) fn publish_file_job(
+        &self,
+        claim: &crate::jobs::JobClaim,
+        prepared: &PreparedFileJob,
+    ) -> Result<crate::jobs::BackgroundJob> {
+        let mut connection = self.lock()?;
+        let transaction =
+            connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        claim.verify_operation(&transaction, "index_file", Some(&prepared.target_json))?;
+        prepared
+            .target
+            .authorization
+            .verify_locator(&transaction, &prepared.target.locator)?;
+        let current = canonical_file_snapshot(&transaction, &prepared.target.locator)?;
+        prepared.target.verify_artifact_identity(&current)?;
+        if current != prepared.snapshot {
+            return Err(LoomError::SourceChanged(prepared.target.locator.clone()));
+        }
+        // Revalidate only after obtaining the writer lock: a competing writer may have held it
+        // while the user edited the file. This is a bounded byte read, not another extraction.
+        ingest::verify_stable_hash(
+            Path::new(&prepared.target.locator),
+            self.limits.max_file_bytes.min(8 * 1024 * 1024),
+            &prepared.document.document.raw_hash,
+        )?;
+        let indexed = Self::commit_index_document(
+            &transaction,
+            &prepared.target.authorization,
+            &prepared.document,
+            None,
+        )?;
+        let snapshot = canonical_file_snapshot(&transaction, &prepared.target.locator)?
+            .ok_or_else(|| LoomError::JobQueue("published file has no canonical record".into()))?;
+        let result = serde_json::to_string(&serde_json::json!({ "indexed": indexed,
+            "artifact_id": snapshot.artifact_id, "version_id": snapshot.version_id,
+            "content_hash": prepared.document.document.raw_hash }))?;
+        let completed = claim.complete(&transaction, &result)?;
         transaction.commit()?;
         Ok(completed)
     }
@@ -3485,10 +3636,153 @@ struct IndexJobProgress {
     next_unit: u64,
 }
 
+struct PreparedIndexDocument {
+    source_uri: String,
+    title: String,
+    document: StableDocument,
+    passages: Vec<PassageDraft>,
+    extractor_id: String,
+    extractor_version: String,
+    parse_warnings_json: String,
+    extraction_metadata_json: String,
+    now: String,
+}
+
+impl PreparedIndexDocument {
+    fn new(
+        path: &Path,
+        document: StableDocument,
+        limits: LibraryLimits,
+        extractor_id: &str,
+        extractor_version: &str,
+    ) -> Result<Self> {
+        let source_uri = utf8_path(path)?;
+        let title = path
+            .file_name()
+            .and_then(|value| value.to_str())
+            .unwrap_or(&source_uri)
+            .to_owned();
+        let passages = if let Some(regions) = document.image_regions.as_deref() {
+            ingest::split_image_passages(regions)
+        } else if let Some(pages) = document.pdf_pages.as_deref() {
+            ingest::split_pdf_passages(
+                pages,
+                limits.passage_target_chars,
+                limits.passage_overlap_chars,
+            )
+        } else {
+            ingest::split_passages(
+                &document.normalized_text,
+                limits.passage_target_chars,
+                limits.passage_overlap_chars,
+            )
+        };
+        let parse_warnings_json = serde_json::to_string(&document.parse_warnings)?;
+        let extraction_metadata_json = serde_json::to_string(&document.extraction_metadata)?;
+        Ok(Self {
+            source_uri,
+            title,
+            document,
+            passages,
+            extractor_id: extractor_id.to_owned(),
+            extractor_version: extractor_version.to_owned(),
+            parse_warnings_json,
+            extraction_metadata_json,
+            now: Utc::now().to_rfc3339(),
+        })
+    }
+}
+
+/// Captured before extraction, not admission: an independent foreground writer can update a
+/// selected file without changing its capability generation. Compare again inside publication.
+#[derive(Debug, PartialEq, Eq)]
+struct CanonicalFileSnapshot {
+    artifact_id: String,
+    root_id: String,
+    version_id: Option<String>,
+    state: String,
+    locator_active: bool,
+    last_seen_at: String,
+}
+
+fn canonical_file_snapshot(
+    connection: &Connection,
+    locator: &str,
+) -> Result<Option<CanonicalFileSnapshot>> {
+    connection
+        .query_row(
+            "SELECT a.id, a.source_root_id, a.active_version_id, a.state, l.active, a.last_seen_at
+         FROM artifact_locators l JOIN artifacts a ON a.id=l.artifact_id
+         WHERE l.kind='file' AND l.locator=?1",
+            [locator],
+            |row| {
+                Ok(CanonicalFileSnapshot {
+                    artifact_id: row.get(0)?,
+                    root_id: row.get(1)?,
+                    version_id: row.get(2)?,
+                    state: row.get(3)?,
+                    locator_active: row.get(4)?,
+                    last_seen_at: row.get(5)?,
+                })
+            },
+        )
+        .optional()
+        .map_err(Into::into)
+}
+
+pub(crate) struct PreparedFileJob {
+    target: IndexFileTarget,
+    target_json: String,
+    snapshot: Option<CanonicalFileSnapshot>,
+    document: PreparedIndexDocument,
+}
+
+fn enforce_file_job_output_bounds(document: &StableDocument) -> Result<()> {
+    const TEXT_LIMIT: usize = 2 * 1024 * 1024;
+    let valid = document.normalized_text.len() <= TEXT_LIMIT
+        && document.pdf_pages.as_ref().is_none_or(|pages| {
+            pages.len() <= 2048
+                && pages.iter().map(|(_, text)| text.len()).sum::<usize>() <= TEXT_LIMIT
+        })
+        && document.image_regions.as_ref().is_none_or(|regions| {
+            regions.len() <= 8192
+                && regions
+                    .iter()
+                    .map(|region| region.text.len())
+                    .sum::<usize>()
+                    <= TEXT_LIMIT
+        })
+        && document.parse_warnings.len() <= 128;
+    // Count serialization bytes without allocating an unbounded JSON string.
+    struct Budget(usize);
+    impl std::io::Write for Budget {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            if bytes.len() > self.0 {
+                return Err(std::io::Error::other("output budget exceeded"));
+            }
+            self.0 -= bytes.len();
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    if !valid
+        || serde_json::to_writer(Budget(16_384), &document.parse_warnings).is_err()
+        || serde_json::to_writer(Budget(65_536), &document.extraction_metadata).is_err()
+    {
+        return Err(LoomError::JobQueue(
+            "queued extractor output exceeds its publication budget".into(),
+        ));
+    }
+    Ok(())
+}
+
 /// Consent belongs to one generation of one exact selected root, not to a locator forever.
 /// Verify inside the same SQLite transaction as every resulting write; a process-local mutex
 /// cannot fence a different desktop/CLI connection.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 struct SourceAuthorization {
     root_id: String,
     generation: i64,
@@ -3497,6 +3791,172 @@ struct SourceAuthorization {
     // Only scans containing images depend on OCR policy. This also fences their cleanup,
     // diagnostic progress, and failure writes, not just a successful provider result.
     ocr_policy: Option<OcrPolicy>,
+}
+
+/// Only an exact selected file capability is executable; no directory discovery or source grant.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct IndexFileTarget {
+    pub(crate) locator: String,
+    media_type: String,
+    authorization: SourceAuthorization,
+    // Explicit null means admission saw no artifact. A missing field must not acquire that
+    // meaning after a later deletion. deserialize_with makes the field required in Serde.
+    #[serde(deserialize_with = "required_artifact_identity")]
+    artifact_id: Option<String>,
+}
+
+fn required_artifact_identity<'de, D>(
+    deserializer: D,
+) -> std::result::Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    serde::Deserialize::deserialize(deserializer)
+}
+
+pub(crate) fn canonical_queue_file(path: &Path, max_bytes: u64) -> Result<String> {
+    let metadata = fs::symlink_metadata(path).map_err(|error| io_error(path, error))?;
+    if !metadata.is_file() || metadata.file_type().is_symlink() || metadata.len() > max_bytes {
+        return Err(LoomError::InvalidPath(
+            "queued input must be one bounded regular file".into(),
+        ));
+    }
+    let canonical = path.canonicalize().map_err(|error| io_error(path, error))?;
+    if ingest::supported_media_type(&canonical).is_none() {
+        return Err(LoomError::UnsupportedSource(
+            canonical.display().to_string(),
+        ));
+    }
+    let locator = utf8_path(&canonical)?;
+    if locator.len() > 4096 || locator.chars().any(char::is_control) {
+        return Err(LoomError::InvalidPath(
+            "queued locator exceeds its supported bounds".into(),
+        ));
+    }
+    Ok(locator)
+}
+
+impl IndexFileTarget {
+    pub(crate) fn capture(connection: &Connection, locator: &str) -> Result<Self> {
+        let authorization = connection
+            .query_row(
+                "SELECT id, scope_generation,
+                (SELECT value FROM schema_meta WHERE key = 'authorization_incarnation'), kind
+             FROM source_roots WHERE locator = ?1 AND kind = 'file' AND enabled = 1",
+                [locator],
+                |row| {
+                    Ok(SourceAuthorization {
+                        root_id: row.get(0)?,
+                        generation: row.get(1)?,
+                        incarnation: row.get(2)?,
+                        kind: row.get(3)?,
+                        ocr_policy: None,
+                    })
+                },
+            )
+            .optional()?
+            .ok_or_else(|| LoomError::SourceRevoked(locator.to_owned()))?;
+        let media_type = ingest::supported_media_type(Path::new(locator))
+            .ok_or_else(|| LoomError::UnsupportedSource(locator.to_owned()))?
+            .to_owned();
+        let mut target = Self {
+            locator: locator.to_owned(),
+            media_type,
+            authorization,
+            artifact_id: canonical_file_snapshot(connection, locator)?
+                .map(|snapshot| snapshot.artifact_id),
+        };
+        if target.media_type.starts_with("image/") {
+            let policy = OcrPolicy::load(connection)?;
+            if !policy.enabled {
+                return Err(LoomError::OcrDisabled);
+            }
+            target.authorization.ocr_policy = Some(policy);
+        }
+        target.validate()?;
+        target.authorization.verify_locator(connection, locator)?;
+        Ok(target)
+    }
+
+    pub(crate) fn parse(json: &str) -> Result<Self> {
+        if json.len() > 16_384 {
+            return Err(LoomError::JobQueue("file target exceeds 16 KiB".into()));
+        }
+        let target: Self = serde_json::from_str(json)
+            .map_err(|_| LoomError::JobQueue("invalid typed file target".into()))?;
+        target.validate()?;
+        Ok(target)
+    }
+
+    fn validate(&self) -> Result<()> {
+        let auth = &self.authorization;
+        let path = Path::new(&self.locator);
+        let valid = self.locator.len() <= 4096
+            && !self.locator.chars().any(char::is_control)
+            && path.is_absolute()
+            && !path.components().any(|part| {
+                matches!(
+                    part,
+                    std::path::Component::ParentDir | std::path::Component::CurDir
+                )
+            })
+            && ingest::supported_media_type(path) == Some(self.media_type.as_str())
+            && auth.kind == "file"
+            && auth.generation >= 0
+            && Uuid::parse_str(&auth.root_id).is_ok()
+            && Uuid::parse_str(&auth.incarnation).is_ok()
+            && self
+                .artifact_id
+                .as_ref()
+                .is_none_or(|id| Uuid::parse_str(id).is_ok())
+            && if self.media_type.starts_with("image/") {
+                auth.ocr_policy.as_ref().is_some_and(|policy| {
+                    policy.enabled && Uuid::parse_str(&policy.revision).is_ok()
+                })
+            } else {
+                auth.ocr_policy.is_none()
+            };
+        if !valid {
+            return Err(LoomError::JobQueue("invalid file capability shape".into()));
+        }
+        Ok(())
+    }
+
+    fn verify_artifact_identity(&self, snapshot: &Option<CanonicalFileSnapshot>) -> Result<()> {
+        if snapshot.as_ref().map(|record| record.artifact_id.as_str())
+            != self.artifact_id.as_deref()
+        {
+            // An older binary may purge canonical evidence without knowing this runtime. A
+            // retry must not convert that old admission into permission to create a new artifact.
+            return Err(LoomError::SourceRevoked(self.authorization.root_id.clone()));
+        }
+        Ok(())
+    }
+
+    /// Creation from a previously empty selected root changes artifact identity as this job's
+    /// own output. Repeating that completed request must still return the original result.
+    pub(crate) fn same_completed_request(
+        &self,
+        original: &Self,
+        job: &crate::BackgroundJob,
+    ) -> bool {
+        if original.artifact_id.is_some()
+            || job.state != crate::JobState::Completed
+            || self.artifact_id.is_none()
+            || job
+                .result
+                .as_ref()
+                .and_then(|result| result.get("artifact_id"))
+                .and_then(serde_json::Value::as_str)
+                != self.artifact_id.as_deref()
+        {
+            return false;
+        }
+        let mut normalized = self.clone();
+        normalized.artifact_id = None;
+        normalized == *original
+    }
 }
 
 impl SourceAuthorization {
@@ -4972,6 +5432,7 @@ fn delete_artifact_transaction(
     if !exists {
         return Err(LoomError::ArtifactNotFound(artifact_id.to_string()));
     }
+    crate::jobs::purge_file_targets(transaction, None, Some(artifact_id), false)?;
     let versions_deleted: i64 = transaction.query_row(
         "SELECT COUNT(*) FROM artifact_versions WHERE artifact_id = ?1",
         [artifact_id],
@@ -5028,6 +5489,7 @@ fn merge_deletion_reports(target: &mut DeletionReport, source: DeletionReport) {
 }
 
 fn purge_ocr_records_transaction(transaction: &Transaction<'_>) -> Result<OcrPurgeReport> {
+    crate::jobs::purge_file_targets(transaction, None, None, true)?;
     let artifacts_affected: i64 = transaction.query_row(
         "SELECT COUNT(DISTINCT artifact_id) FROM artifact_versions WHERE extractor_id = ?1",
         [IMAGE_OCR_EXTRACTOR_ID],
@@ -5055,7 +5517,8 @@ fn purge_ocr_records_transaction(transaction: &Transaction<'_>) -> Result<OcrPur
     })
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 struct OcrPolicy {
     enabled: bool,
     revision: String,
@@ -5260,6 +5723,76 @@ mod tests {
             .unwrap();
         assert_eq!(recovered, action != "reassert_enabled");
         assert_eq!(worker.ocr_status().unwrap().derived_versions, 1);
+    }
+
+    #[test]
+    fn queued_prepared_ocr_obeys_revision_and_purge_fences_before_any_canonical_write() {
+        use super::{
+            CanonicalFileSnapshot, IndexFileTarget, PreparedFileJob, PreparedIndexDocument,
+        };
+        for action in ["reassert", "disable", "purge"] {
+            let directory = tempdir().unwrap();
+            let source = directory.path().join("queued-policy.png");
+            let original = include_bytes!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../tests/fixtures/ocr-golden.png"
+            ));
+            fs::write(&source, original).unwrap();
+            let library = Library::open(directory.path().join("queued-policy.sqlite3")).unwrap();
+            library.set_ocr_enabled(false).unwrap();
+            library.index_path(&source).unwrap();
+            library.set_ocr_enabled(true).unwrap();
+            let queued = library
+                .enqueue_index_file(&source, "queued-policy", crate::JobPriority::Normal)
+                .unwrap();
+            let mut worker = library.acquire_job_worker().unwrap();
+            let claim = worker.claim_for_test().unwrap().unwrap();
+            let json: String = library
+                .lock()
+                .unwrap()
+                .query_row(
+                    "SELECT target_json FROM background_jobs WHERE id=?1",
+                    [&queued.id],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            let target = IndexFileTarget::parse(&json).unwrap();
+            let snapshot: Option<CanonicalFileSnapshot> =
+                super::canonical_file_snapshot(&library.lock().unwrap(), &target.locator).unwrap();
+            let prepared = PreparedFileJob {
+                target,
+                target_json: json,
+                snapshot,
+                document: PreparedIndexDocument::new(
+                    &source,
+                    prepared_ocr_document(&source),
+                    LibraryLimits::default(),
+                    crate::ocr::IMAGE_OCR_EXTRACTOR_ID,
+                    crate::ocr::IMAGE_OCR_EXTRACTOR_VERSION,
+                )
+                .unwrap(),
+            };
+            match action {
+                "reassert" => {
+                    library.set_ocr_enabled(true).unwrap();
+                }
+                "disable" => {
+                    library.set_ocr_enabled(false).unwrap();
+                }
+                "purge" => {
+                    library.purge_ocr_records().unwrap();
+                }
+                _ => unreachable!(),
+            }
+            let before = library.export_portable().unwrap().digest;
+            assert!(
+                library.publish_file_job(&claim, &prepared).is_err(),
+                "published after {action}"
+            );
+            assert_eq!(library.export_portable().unwrap().digest, before);
+            assert_eq!(library.ocr_status().unwrap().derived_versions, 0);
+            assert_eq!(fs::read(&source).unwrap(), original);
+        }
     }
 
     #[test]

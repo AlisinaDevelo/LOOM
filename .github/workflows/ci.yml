@@ -48,6 +48,8 @@ jobs:
           --queries benchmarks/retrieval/v0/queries.jsonl
       - name: Durable maintenance queue CLI contract
         run: python3 scripts/test-background-jobs.py --loom target/debug/loom
+      - name: Approved-file queue CLI contract
+        run: python3 scripts/test-queued-indexing.py --loom target/debug/loom
 
   rust-msrv:
     name: Rust 1.88 core minimum version
