@@ -3409,8 +3409,9 @@ impl Library {
         &self,
         claim: &crate::jobs::JobClaim,
         json: &str,
+        supervisor: Option<&loom_extraction::ExtractionSupervisor>,
     ) -> Result<crate::jobs::BackgroundJob> {
-        let prepared = self.prepare_file_job(claim, json)?;
+        let prepared = self.prepare_file_job(claim, json, supervisor)?;
         self.publish_file_job(claim, &prepared)
     }
 
@@ -3418,6 +3419,7 @@ impl Library {
         &self,
         claim: &crate::jobs::JobClaim,
         json: &str,
+        supervisor: Option<&loom_extraction::ExtractionSupervisor>,
     ) -> Result<PreparedFileJob> {
         let target = IndexFileTarget::parse(json)?;
         let snapshot = {
@@ -3442,18 +3444,42 @@ impl Library {
         };
         // Provider work owns no SQLite transaction and no interactive connection mutex.
         let path = Path::new(&target.locator);
-        let document = ingest::read_stable_with_limits_and_ocr(
-            path,
-            path,
-            self.limits.max_file_bytes.min(8 * 1024 * 1024),
-            self.limits.max_pdf_pages.min(2048),
-            target
+        let media_type = ingest::supported_media_type(path)
+            .ok_or_else(|| LoomError::UnsupportedSource("queued media is unsupported".into()))?;
+        if media_type != target.media_type {
+            return Err(LoomError::JobQueue("file media type changed".into()));
+        }
+        if media_type.starts_with("image/")
+            && !target
                 .authorization
                 .ocr_policy
                 .as_ref()
-                .is_some_and(|policy| policy.enabled),
-            None,
-        )?;
+                .is_some_and(|p| p.enabled)
+        {
+            return Err(LoomError::OcrDisabled);
+        }
+        let stable =
+            ingest::read_stable_bytes(path, path, self.limits.max_file_bytes.min(8 * 1024 * 1024))?;
+        let media = loom_extraction::MediaKind::from_mime(media_type)?;
+        let mut budget = loom_extraction::ExtractionBudget::for_media(media);
+        budget.max_pdf_pages = self.limits.max_pdf_pages.min(2048) as u32;
+        let adjacent;
+        let supervisor = match supervisor {
+            Some(supervisor) => supervisor,
+            None => {
+                adjacent = loom_extraction::ExtractionSupervisor::adjacent()?;
+                &adjacent
+            }
+        };
+        let output = supervisor
+            .extract(&stable.bytes, media, budget, || {
+                self.probe_file_job(claim, json, &target, &snapshot)
+            })
+            .map_err(|error| match error {
+                loom_extraction::RunError::Extraction(error) => LoomError::from(error),
+                loom_extraction::RunError::Interrupted(error) => error,
+            })?;
+        let document = ingest::stable_document_from_output(stable, media_type, output.source, None);
         enforce_file_job_output_bounds(&document)?;
         if self
             .limits
@@ -3491,7 +3517,46 @@ impl Library {
             target_json: json.to_owned(),
             snapshot,
             document,
+            extraction_metrics: output.metrics,
         })
+    }
+
+    /// Short DB-only probe: no source access or five-second SQLite busy wait while a child runs.
+    fn probe_file_job(
+        &self,
+        claim: &crate::jobs::JobClaim,
+        json: &str,
+        target: &IndexFileTarget,
+        snapshot: &Option<CanonicalFileSnapshot>,
+    ) -> Result<()> {
+        let mut connection = self.connection.try_lock().map_err(|error| match error {
+            std::sync::TryLockError::Poisoned(_) => LoomError::LockPoisoned,
+            std::sync::TryLockError::WouldBlock => {
+                LoomError::Database(rusqlite::Error::SqliteFailure(
+                    rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_BUSY),
+                    None,
+                ))
+            }
+        })?;
+        connection.busy_timeout(std::time::Duration::ZERO)?;
+        let result = (|| {
+            let transaction = connection.transaction()?;
+            claim.verify_operation(&transaction, "index_file", Some(json))?;
+            target
+                .authorization
+                .verify_persisted_locator(&transaction, &target.locator)?;
+            let current = canonical_file_snapshot(&transaction, &target.locator)?;
+            target.verify_artifact_identity(&current)?;
+            if &current != snapshot {
+                return Err(LoomError::SourceChanged(target.locator.clone()));
+            }
+            transaction.commit()?;
+            Ok(())
+        })();
+        let restored = connection
+            .busy_timeout(std::time::Duration::from_secs(5))
+            .map_err(LoomError::from);
+        result.and(restored)
     }
 
     pub(crate) fn publish_file_job(
@@ -3529,7 +3594,8 @@ impl Library {
             .ok_or_else(|| LoomError::JobQueue("published file has no canonical record".into()))?;
         let result = serde_json::to_string(&serde_json::json!({ "indexed": indexed,
             "artifact_id": snapshot.artifact_id, "version_id": snapshot.version_id,
-            "content_hash": prepared.document.document.raw_hash }))?;
+            "content_hash": prepared.document.document.raw_hash,
+            "extraction": prepared.extraction_metrics }))?;
         let completed = claim.complete(&transaction, &result)?;
         transaction.commit()?;
         Ok(completed)
@@ -3735,6 +3801,7 @@ pub(crate) struct PreparedFileJob {
     target_json: String,
     snapshot: Option<CanonicalFileSnapshot>,
     document: PreparedIndexDocument,
+    extraction_metrics: loom_extraction::ExtractionMetrics,
 }
 
 fn enforce_file_job_output_bounds(document: &StableDocument) -> Result<()> {
@@ -3960,6 +4027,28 @@ impl IndexFileTarget {
 }
 
 impl SourceAuthorization {
+    fn verify_persisted_locator(&self, connection: &Connection, locator: &str) -> Result<()> {
+        let valid: bool = connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM source_roots
+             WHERE id=?1 AND locator=?2 AND enabled=1 AND scope_generation=?3 AND kind=?4
+             AND (SELECT value FROM schema_meta WHERE key='authorization_incarnation')=?5)",
+            params![
+                self.root_id,
+                locator,
+                self.generation,
+                self.kind,
+                self.incarnation
+            ],
+            |row| row.get(0),
+        )?;
+        if !valid {
+            return Err(LoomError::SourceRevoked(self.root_id.clone()));
+        }
+        if let Some(policy) = &self.ocr_policy {
+            policy.verify_current(connection)?;
+        }
+        Ok(())
+    }
     fn verify(&self, connection: &Connection) -> Result<()> {
         let locator: Option<String> = connection.query_row(
             "SELECT locator FROM source_roots
@@ -5763,6 +5852,7 @@ mod tests {
                 target,
                 target_json: json,
                 snapshot,
+                extraction_metrics: Default::default(),
                 document: PreparedIndexDocument::new(
                     &source,
                     prepared_ocr_document(&source),

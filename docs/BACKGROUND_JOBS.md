@@ -7,6 +7,7 @@ not desktop background indexing. Synchronous ingestion/OCR/semantic commands rem
 ## Using the current adapter
 
 ```sh
+cargo build --locked -p loom-extraction --bin loom-extractor
 cargo run --locked -p loom-cli -- enqueue-fts-repair repair-after-import --low
 cargo run --locked -p loom-cli -- index /absolute/selected-file.md
 cargo run --locked -p loom-cli -- enqueue-index-file /absolute/selected-file.md refresh-selected-file
@@ -34,15 +35,15 @@ Repeating a key with identical operation/priority/target returns its original ro
 row. Conflicting input is rejected without changing it. Terminal keys are not silently evicted.
 At the retained-record limit, explicitly forgetting a terminal record frees capacity and forgets
 its key; a later request with that key becomes new work. Pending/running jobs cannot be forgotten.
-The separate `background_job_schema_version` marker is runtime-only. Version 3 adds a typed
-file target, bounded to 16 KiB, while preserving UTF-8 diagnostic bounds and valid result JSON.
-Existing version-2 or recognized unversioned layouts require explicit
+The separate `background_job_schema_version` marker is runtime-only. Version 4 requires
+supervised byte-only extraction; version 3 introduced the typed file target, bounded to 16 KiB.
+Existing version-3, version-2 or recognized unversioned layouts require explicit
 `upgrade-job-runtime`. Upgrade takes the kernel worker lock before opening SQLite; migration,
 epoch rotation, and abandoned-work recovery share one transaction. A live worker prevents it.
 Ordinary opening does not migrate an existing runtime. Records, policy, sequence, and priority
 accounting survive upgrade; invalid legacy diagnostics roll back without dropping jobs.
 Unknown layouts are refused. Old binaries can still read canonical schema-10 evidence but must
-refuse v3 queue commands. Upgrade is operational, not a portable schema migration.
+refuse v4 queue commands. Upgrade is operational, not a portable schema migration.
 The first shipped v3 target includes admission-time artifact identity; earlier development
 prototypes were not released as a separate supported runtime. A missing identity is not
 silently upgraded to the identity of existing evidence. Explicit `null` records absence at
@@ -94,7 +95,10 @@ Queued preparation limits extracted UTF-8 text to 2 MiB, PDF pages to 2,048, reg
 to 8,192, warnings to 128/16 KiB and extractor metadata to 64 KiB. Passage settings require a
 minimum 256-character target-minus-overlap gap. JSON size checking does not allocate an
 unbounded serialized copy. These are **post-provider publication limits**, not proof of native
-parser/OCR peak-memory or wall-clock isolation. The bounded final byte read holds the worker's
+parser/OCR peak-memory guarantees by themselves. Queued providers now run in a one-shot
+`loom-extractor` process with finite wall/CPU/input/output/address-space budgets and sampled
+resident/physical-footprint enforcement. See [the process boundary](EXTRACTION_PROCESS.md)
+for precise limits and limitations. The bounded final byte read holds the worker's
 writer transaction briefly; resource measurements remain required. SQLite and user-owned
 filesystem writes cannot commit atomically, so evidence opening must still validate originals.
 
@@ -102,7 +106,7 @@ filesystem writes cannot commit atomically, so evidence opening must still valid
 | --- | --- |
 | queued/retryable → running | Due work; exclusive worker; current epoch; attempt budget remains |
 | running → completed | Same claim token/epoch/target, valid capability, cancellation absent; fenced publication |
-| running → retryable | Content/CAS drift, SQLite busy/locked or temporary I/O; attempts remain; persisted delay |
+| running → retryable | Content/CAS drift, SQLite busy/locked, temporary I/O, helper launch/crash; attempts remain; persisted delay |
 | running → failed | Permanent failure or exhausted attempts |
 | queued/retryable → cancelled | Explicit cancellation before claim |
 | running → cancelled | Durable cancellation or superseded source/OCR capability at a safe boundary |
@@ -117,6 +121,9 @@ an older eligible low-priority job cannot be repeatedly bypassed by newer jobs.
 Policy changes require no pending work and cannot shrink the retained bound below current use.
 Library policy validation caps pending jobs at 128, rows at 4,096, attempts/bursts at eight,
 and retry delay at 3,600 seconds. Error text is capped at 4 KiB and results at 64 KiB.
+Provider unavailability, invalid output and resource overruns are failures, not consent
+cancellations. A successful operational result includes helper wall/CPU/peak-resident metrics;
+these diagnostics are excluded from portable canonical exports.
 
 ## Ownership, cancellation, and restore
 

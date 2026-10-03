@@ -2325,10 +2325,8 @@ dependencies = [
  "fs2",
  "getrandom 0.4.3",
  "image",
- "kamadak-exif",
  "libc",
- "loom-ocr-macos",
- "pdf-extract",
+ "loom-extraction",
  "rusqlite",
  "serde",
  "serde_json",
@@ -2337,6 +2335,21 @@ dependencies = [
  "uuid",
  "walkdir",
  "zeroize",
+]
+
+[[package]]
+name = "loom-extraction"
+version = "0.1.0"
+dependencies = [
+ "image",
+ "kamadak-exif",
+ "libc",
+ "loom-ocr-macos",
+ "pdf-extract",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.21",
 ]
 
 [[package]]

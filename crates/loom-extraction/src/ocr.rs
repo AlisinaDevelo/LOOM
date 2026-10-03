@@ -1,0 +1,434 @@
+//! Bounded image geometry and the local OCR provider boundary.
+//!
+//! Vision returns normalized rectangles with an origin at the lower-left. LOOM converts those
+//! values once into oriented, top-left pixel coordinates and stores only fixed-point metadata in
+//! SQLite. The conversion is pure Rust and therefore testable on every target; the provider call
+//! itself is supplied by the macOS-only `loom-ocr-macos` crate.
+
+use std::io::{BufReader, Cursor};
+
+use exif::{In, Reader as ExifReader, Tag};
+use image::ImageReader;
+use serde_json::json;
+
+use crate::{ExtractionError as LoomError, Result};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OcrConfidenceState {
+    Confirmed,
+    LowConfidence,
+}
+
+impl OcrConfidenceState {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Confirmed => "confirmed",
+            Self::LowConfidence => "low_confidence",
+        }
+    }
+}
+
+pub const IMAGE_OCR_EXTRACTOR_ID: &str = "loom.ocr";
+pub const IMAGE_OCR_EXTRACTOR_VERSION: &str = "0.1.0";
+pub const DEFAULT_SCALE_MILLI: u32 = 1_000;
+pub const LOW_CONFIDENCE_THRESHOLD_MILLI: u32 = 800;
+const MAX_IMAGE_PIXELS: u64 = 100_000_000;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ImagePixelBounds {
+    pub x: u32,
+    pub y: u32,
+    pub width: u32,
+    pub height: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ImageOcrRegion {
+    pub text: String,
+    pub confidence_milli: u32,
+    pub bounds: ImagePixelBounds,
+    pub char_start: u64,
+    pub char_end: u64,
+    pub line_start: u64,
+    pub line_end: u64,
+    pub image_width: u32,
+    pub image_height: u32,
+    pub orientation: u8,
+    pub scale_milli: u32,
+}
+
+#[derive(Debug)]
+pub struct ImageExtraction {
+    pub normalized_text: String,
+    pub regions: Vec<ImageOcrRegion>,
+    pub metadata: serde_json::Value,
+    pub warnings: Vec<String>,
+}
+
+pub fn confidence_state(confidence_milli: u32) -> OcrConfidenceState {
+    if confidence_milli >= LOW_CONFIDENCE_THRESHOLD_MILLI {
+        OcrConfidenceState::Confirmed
+    } else {
+        OcrConfidenceState::LowConfidence
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ImageProperties {
+    pub width: u32,
+    pub height: u32,
+    pub orientation: u8,
+}
+
+pub fn inspect_image(bytes: &[u8]) -> Result<ImageProperties> {
+    if bytes.is_empty() {
+        return Err(LoomError::ImageExtraction("image bytes are empty".into()));
+    }
+    let reader = ImageReader::new(Cursor::new(bytes))
+        .with_guessed_format()
+        .map_err(|error| {
+            LoomError::ImageExtraction(format!("could not identify image: {error}"))
+        })?;
+    let (width, height) = reader.into_dimensions().map_err(|error| {
+        LoomError::ImageExtraction(format!("could not read image dimensions: {error}"))
+    })?;
+    if width == 0 || height == 0 {
+        return Err(LoomError::ImageExtraction(
+            "image dimensions must be non-zero".into(),
+        ));
+    }
+    if u64::from(width) * u64::from(height) > MAX_IMAGE_PIXELS {
+        return Err(LoomError::ImageExtraction(format!(
+            "image dimensions exceed the {MAX_IMAGE_PIXELS}-pixel limit"
+        )));
+    }
+    Ok(ImageProperties {
+        width,
+        height,
+        orientation: exif_orientation(bytes),
+    })
+}
+
+fn exif_orientation(bytes: &[u8]) -> u8 {
+    let mut reader = BufReader::new(Cursor::new(bytes));
+    let Ok(exif) = ExifReader::new().read_from_container(&mut reader) else {
+        return 1;
+    };
+    let Some(field) = exif.get_field(Tag::Orientation, In::PRIMARY) else {
+        return 1;
+    };
+    match field.value.get_uint(0) {
+        Some(value @ 1..=8) => value as u8,
+        _ => 1,
+    }
+}
+
+pub fn oriented_dimensions(width: u32, height: u32, orientation: u8) -> (u32, u32) {
+    if (5..=8).contains(&orientation) {
+        (height, width)
+    } else {
+        (width, height)
+    }
+}
+
+/// Converts a normalized lower-left rectangle into a clamped top-left pixel rectangle.
+pub fn normalized_to_pixel_bounds(
+    normalized: loom_ocr_macos::NormalizedBounds,
+    encoded_width: u32,
+    encoded_height: u32,
+    orientation: u8,
+) -> Result<ImagePixelBounds> {
+    if encoded_width == 0 || encoded_height == 0 {
+        return Err(LoomError::ImageExtraction(
+            "image dimensions must be non-zero".into(),
+        ));
+    }
+    if !(1..=8).contains(&orientation)
+        || ![
+            normalized.x,
+            normalized.y,
+            normalized.width,
+            normalized.height,
+        ]
+        .into_iter()
+        .all(f32::is_finite)
+    {
+        return Err(LoomError::OcrExtraction(
+            "provider returned invalid image geometry".into(),
+        ));
+    }
+    let (width, height) = oriented_dimensions(encoded_width, encoded_height, orientation);
+    let x = scaled_round(normalized.x, width).min(width.saturating_sub(1));
+    let y =
+        scaled_round(1.0 - normalized.y - normalized.height, height).min(height.saturating_sub(1));
+    let right = scaled_round(normalized.x + normalized.width, width)
+        .max(x.saturating_add(1))
+        .min(width);
+    let bottom = scaled_round(1.0 - normalized.y, height)
+        .max(y.saturating_add(1))
+        .min(height);
+    Ok(ImagePixelBounds {
+        x,
+        y,
+        width: right
+            .saturating_sub(x)
+            .max(1)
+            .min(width.saturating_sub(x).max(1)),
+        height: bottom
+            .saturating_sub(y)
+            .max(1)
+            .min(height.saturating_sub(y).max(1)),
+    })
+}
+
+fn scaled_round(value: f32, extent: u32) -> u32 {
+    let value = (value as f64).clamp(0.0, 1.0);
+    (value * extent as f64).round().clamp(0.0, extent as f64) as u32
+}
+
+pub fn scaled_pixel_bounds(bounds: ImagePixelBounds, scale_milli: u32) -> ImagePixelBounds {
+    let scale = scale_milli.max(1) as u64;
+    let scale_one = 1_000u64;
+    let scale_value = |value: u32| -> u32 {
+        ((u64::from(value) * scale + scale_one / 2) / scale_one).min(u64::from(u32::MAX)) as u32
+    };
+    ImagePixelBounds {
+        x: scale_value(bounds.x),
+        y: scale_value(bounds.y),
+        width: scale_value(bounds.width),
+        height: scale_value(bounds.height),
+    }
+}
+
+pub fn extract_image(bytes: &[u8]) -> Result<ImageExtraction> {
+    let properties = inspect_image(bytes)?;
+    let provider =
+        loom_ocr_macos::recognize(bytes, properties.orientation).map_err(|error| match error {
+            loom_ocr_macos::OcrError::Unavailable(message) => LoomError::OcrUnavailable(message),
+            loom_ocr_macos::OcrError::InvalidInput(message)
+            | loom_ocr_macos::OcrError::Provider(message) => LoomError::OcrExtraction(message),
+        })?;
+    if provider.regions.is_empty() {
+        return Err(LoomError::OcrExtraction(
+            "no-readable-text: provider returned no text regions".into(),
+        ));
+    }
+
+    let (image_width, image_height) =
+        oriented_dimensions(properties.width, properties.height, properties.orientation);
+    let mut normalized_text = String::new();
+    let mut regions = Vec::with_capacity(provider.regions.len());
+    let mut low_confidence_regions = 0u64;
+    for (index, region) in provider.regions.into_iter().enumerate() {
+        if index > 0 {
+            normalized_text.push('\n');
+        }
+        let char_start = normalized_text.chars().count() as u64;
+        normalized_text.push_str(&region.text);
+        let char_end = normalized_text.chars().count() as u64;
+        let bounds = normalized_to_pixel_bounds(
+            region.bounds,
+            properties.width,
+            properties.height,
+            properties.orientation,
+        )?;
+        let confidence_milli = (region.confidence.clamp(0.0, 1.0) * 1_000.0).round() as u32;
+        if matches!(
+            confidence_state(confidence_milli),
+            OcrConfidenceState::LowConfidence
+        ) {
+            low_confidence_regions += 1;
+        }
+        regions.push(ImageOcrRegion {
+            text: region.text,
+            confidence_milli,
+            bounds,
+            char_start,
+            char_end,
+            line_start: index as u64 + 1,
+            line_end: index as u64 + 1,
+            image_width,
+            image_height,
+            orientation: properties.orientation,
+            scale_milli: DEFAULT_SCALE_MILLI,
+        });
+    }
+
+    let metadata = json!({
+        "kind": "image_ocr",
+        "provider_id": provider.provider_id,
+        "provider_version": provider.provider_version,
+        "model_version": provider.model_version,
+        "language": provider.language,
+        "image_width": image_width,
+        "image_height": image_height,
+        "encoded_width": properties.width,
+        "encoded_height": properties.height,
+        "orientation": properties.orientation,
+        "scale_milli": DEFAULT_SCALE_MILLI,
+        "region_count": regions.len(),
+        "confidence_threshold_milli": LOW_CONFIDENCE_THRESHOLD_MILLI,
+        "low_confidence_regions": low_confidence_regions,
+        "confidence_state": if low_confidence_regions == 0 {
+            OcrConfidenceState::Confirmed.as_str()
+        } else {
+            OcrConfidenceState::LowConfidence.as_str()
+        },
+    });
+    Ok(ImageExtraction {
+        normalized_text,
+        regions,
+        metadata,
+        warnings: provider.warnings,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::OcrConfidenceState;
+    use super::{
+        confidence_state, normalized_to_pixel_bounds, oriented_dimensions, scaled_pixel_bounds,
+        ImagePixelBounds, LOW_CONFIDENCE_THRESHOLD_MILLI,
+    };
+    use loom_ocr_macos::NormalizedBounds;
+
+    #[test]
+    fn oriented_dimensions_swap_for_rotated_exif_values() {
+        assert_eq!(oriented_dimensions(120, 80, 1), (120, 80));
+        assert_eq!(oriented_dimensions(120, 80, 6), (80, 120));
+        assert_eq!(oriented_dimensions(120, 80, 8), (80, 120));
+    }
+
+    #[test]
+    fn normalized_vision_bounds_become_top_left_pixels() {
+        let bounds = normalized_to_pixel_bounds(
+            NormalizedBounds {
+                x: 0.25,
+                y: 0.5,
+                width: 0.5,
+                height: 0.25,
+            },
+            800,
+            400,
+            1,
+        )
+        .unwrap();
+        assert_eq!(
+            bounds,
+            ImagePixelBounds {
+                x: 200,
+                y: 100,
+                width: 400,
+                height: 100,
+            }
+        );
+    }
+
+    #[test]
+    fn rotated_bounds_use_oriented_pixel_space() {
+        let bounds = normalized_to_pixel_bounds(
+            NormalizedBounds {
+                x: 0.0,
+                y: 0.0,
+                width: 0.5,
+                height: 0.5,
+            },
+            800,
+            400,
+            6,
+        )
+        .unwrap();
+        assert_eq!(bounds.x, 0);
+        assert_eq!(bounds.y, 400);
+        assert_eq!(bounds.width, 200);
+        assert_eq!(bounds.height, 400);
+    }
+
+    #[test]
+    fn scale_is_fixed_point_and_rounds_without_float_drift() {
+        assert_eq!(
+            scaled_pixel_bounds(
+                ImagePixelBounds {
+                    x: 3,
+                    y: 5,
+                    width: 11,
+                    height: 13,
+                },
+                2_000,
+            ),
+            ImagePixelBounds {
+                x: 6,
+                y: 10,
+                width: 22,
+                height: 26,
+            }
+        );
+    }
+
+    #[test]
+    fn confidence_state_has_a_documented_inclusive_threshold() {
+        assert_eq!(LOW_CONFIDENCE_THRESHOLD_MILLI, 800);
+        assert_eq!(confidence_state(799), OcrConfidenceState::LowConfidence);
+        assert_eq!(confidence_state(800), OcrConfidenceState::Confirmed);
+        assert_eq!(confidence_state(1_000), OcrConfidenceState::Confirmed);
+    }
+
+    #[test]
+    fn geometry_contract_covers_orientation_and_retina_scale() {
+        let portrait = normalized_to_pixel_bounds(
+            NormalizedBounds {
+                x: 0.1,
+                y: 0.2,
+                width: 0.3,
+                height: 0.4,
+            },
+            1_200,
+            600,
+            1,
+        )
+        .unwrap();
+        assert_eq!(
+            portrait,
+            ImagePixelBounds {
+                x: 120,
+                y: 240,
+                width: 360,
+                height: 240
+            }
+        );
+        let rotated = normalized_to_pixel_bounds(
+            NormalizedBounds {
+                x: 0.1,
+                y: 0.2,
+                width: 0.3,
+                height: 0.4,
+            },
+            1_200,
+            600,
+            6,
+        )
+        .unwrap();
+        assert_eq!(
+            rotated,
+            ImagePixelBounds {
+                x: 60,
+                y: 480,
+                width: 180,
+                height: 480
+            }
+        );
+        assert_eq!(
+            scaled_pixel_bounds(portrait, 2_000),
+            ImagePixelBounds {
+                x: 240,
+                y: 480,
+                width: 720,
+                height: 480
+            }
+        );
+        assert_eq!(oriented_dimensions(1_200, 600, 6), (600, 1_200));
+    }
+}

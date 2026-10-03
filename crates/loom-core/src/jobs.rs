@@ -185,7 +185,7 @@ pub(crate) fn ensure_schema(connection: &Connection) -> Result<()> {
         [serde_json::to_string(&JobQueuePolicy::default())?],
     )?;
     transaction.execute(
-        "INSERT INTO schema_meta(key,value) VALUES ('background_job_schema_version','3')",
+        "INSERT INTO schema_meta(key,value) VALUES ('background_job_schema_version','4')",
         [],
     )?;
     transaction.commit()?;
@@ -202,10 +202,11 @@ fn upgrade_runtime(connection: &Connection) -> Result<()> {
             |row| row.get(0),
         )
         .optional()?;
-    if version.as_deref() == Some("3") {
+    if version.as_deref() == Some("4") {
         return validate_schema(connection);
     }
     let recognized = match version.as_deref() {
+        Some("3") => validate_definitions(connection, &current_runtime_schema()),
         Some("2") => validate_definitions(connection, RUNTIME_SCHEMA),
         None => validate_definitions(connection, RUNTIME_SCHEMA)
             .or_else(|_| validate_definitions(connection, &legacy_runtime_schema())),
@@ -221,17 +222,20 @@ fn upgrade_runtime(connection: &Connection) -> Result<()> {
         ));
     }
     connection.execute_batch(
-        "ALTER TABLE background_jobs RENAME TO background_jobs_v2;
+        "ALTER TABLE background_jobs RENAME TO background_jobs_previous;
         DROP INDEX background_jobs_ready;",
     )?;
     connection.execute_batch(&current_runtime_schema())?;
+    let copy = if version.as_deref() == Some("3") {
+        "INSERT INTO background_jobs SELECT * FROM background_jobs_previous"
+    } else {
+        "INSERT INTO background_jobs SELECT *, NULL FROM background_jobs_previous"
+    };
+    // Reapply STRICT/CHECK constraints to every bounded retained row, including v3.
+    connection.execute(copy, [])?;
+    connection.execute("DROP TABLE background_jobs_previous", [])?;
     connection.execute(
-        "INSERT INTO background_jobs SELECT *, NULL FROM background_jobs_v2",
-        [],
-    )?;
-    connection.execute("DROP TABLE background_jobs_v2", [])?;
-    connection.execute(
-        "INSERT INTO schema_meta(key,value) VALUES ('background_job_schema_version','3')
+        "INSERT INTO schema_meta(key,value) VALUES ('background_job_schema_version','4')
          ON CONFLICT(key) DO UPDATE SET value=excluded.value",
         [],
     )?;
@@ -287,7 +291,7 @@ fn validate_runtime_layout(connection: &Connection) -> Result<()> {
             |row| row.get(0),
         )
         .optional()?;
-    if version.as_deref() != Some("3") {
+    if version.as_deref() != Some("4") {
         return Err(LoomError::JobQueue(
             "unsupported or unmigrated runtime schema; explicitly run upgrade-job-runtime".into(),
         ));
@@ -350,7 +354,7 @@ pub(crate) fn purge_file_targets(
             |row| row.get(0),
         )
         .optional()?;
-    if version.as_deref() != Some("3") {
+    if !matches!(version.as_deref(), Some("3" | "4")) {
         if version.as_deref() == Some("2") {
             validate_definitions(connection, RUNTIME_SCHEMA)?;
         } else if version.is_none() {
@@ -651,6 +655,7 @@ impl JobWorker {
             library,
             epoch,
             _ownership: ownership,
+            extractor: None,
         })
     }
 }
@@ -754,6 +759,7 @@ pub struct JobWorker {
     library: Library,
     epoch: i64,
     _ownership: File,
+    extractor: Option<loom_extraction::ExtractionSupervisor>,
 }
 
 pub(crate) struct JobClaim {
@@ -812,6 +818,13 @@ impl JobClaim {
 }
 
 impl JobWorker {
+    /// Explicit trusted executable configuration for hosts that stage the helper elsewhere.
+    /// This is runtime wiring, not persisted source consent; there is no PATH/env fallback.
+    pub fn with_extractor_path(mut self, path: impl AsRef<Path>) -> Result<Self> {
+        self.extractor = Some(loom_extraction::ExtractionSupervisor::new(path)?);
+        Ok(self)
+    }
+
     fn claim_at(&mut self, now: i64) -> Result<Option<JobClaim>> {
         let mut connection = self.library.lock()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -952,7 +965,10 @@ impl JobWorker {
             };
             match (operation.as_str(), target.as_deref()) {
                 ("fts_repair", None) => self.library.job_repair_fts(&claim),
-                ("index_file", Some(json)) => self.library.job_index_file(&claim, json),
+                ("index_file", Some(json)) => {
+                    self.library
+                        .job_index_file(&claim, json, self.extractor.as_ref())
+                }
                 _ => Err(LoomError::JobQueue("invalid operation or target".into())),
             }
         })();
@@ -966,7 +982,6 @@ impl JobWorker {
                     LoomError::SourceRevoked(_)
                         | LoomError::OcrPolicyChanged
                         | LoomError::OcrDisabled
-                        | LoomError::OcrUnavailable(_)
                 ),
                 &error.to_string(),
                 Utc::now().timestamp_millis(),
@@ -980,6 +995,10 @@ impl JobWorker {
 fn is_retryable(error: &LoomError) -> bool {
     match error {
         LoomError::SourceChanged(_) => true,
+        LoomError::Extraction(
+            loom_extraction::ExtractionError::Launch
+            | loom_extraction::ExtractionError::ChildCrashed,
+        ) => true,
         LoomError::Database(rusqlite::Error::SqliteFailure(code, _)) => matches!(
             code.code,
             rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked
@@ -1005,10 +1024,636 @@ mod tests {
     };
     use tempfile::{tempdir, TempDir};
 
+    #[test]
+    fn fresh_queue_requires_supervised_extraction_runtime() {
+        let (_directory, library) = fixture();
+        let connection = library.lock().unwrap();
+        let version: String = connection
+            .query_row(
+                "SELECT value FROM schema_meta WHERE key='background_job_schema_version'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(version, "4", "old workers must refuse before claiming work");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn persistent_retrieval_during_native_queued_ocr() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let (directory, library) = fixture();
+        let corpus = directory.path().join("corpus");
+        fs::create_dir(&corpus).unwrap();
+        for index in 0..256 {
+            fs::write(
+                corpus.join(format!("source-{index:04}.md")),
+                format!("Background responsiveness source marker {index:04}.\n"),
+            )
+            .unwrap();
+        }
+        library.set_ocr_enabled(false).unwrap();
+        assert_eq!(library.index_path(&corpus).unwrap().indexed, 256);
+        let mut images = Vec::new();
+        for index in 0..24 {
+            let image = corpus.join(format!("cropped-{index:02}.png"));
+            fs::write(
+                &image,
+                include_bytes!(concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/../../benchmarks/retrieval/v1/corpus/screenshot/ocr-cropped.png"
+                )),
+            )
+            .unwrap();
+            assert_eq!(library.index_path(&image).unwrap().skipped, 1);
+            images.push(image);
+        }
+        library.set_ocr_enabled(true).unwrap();
+        let ids = images
+            .iter()
+            .enumerate()
+            .map(|(index, image)| {
+                library
+                    .enqueue_index_file(image, &format!("response-{index}"), JobPriority::Normal)
+                    .unwrap()
+                    .id
+            })
+            .collect::<Vec<_>>();
+        let request = crate::SearchRequest {
+            text: "\"Background responsiveness source marker\"".into(),
+            limit: 5,
+        };
+        let tuples = |hits: Vec<crate::SearchHit>| {
+            hits.into_iter()
+                .map(|hit| {
+                    (
+                        hit.artifact_id,
+                        hit.version_id,
+                        hit.passage_id,
+                        hit.content_hash,
+                        hit.anchor,
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        let expected = tuples(library.search(&request).unwrap());
+        assert_eq!(expected.len(), 5);
+        // One interactive Library stays open throughout. No CLI startup,
+        // canonical migration or FTS rebuilding occurs inside any measurement.
+        let retrieval = || {
+            let start = Instant::now();
+            let hits = library.search(&request).unwrap();
+            let elapsed = start.elapsed().as_secs_f64() * 1000.0;
+            assert_eq!(tuples(hits), expected);
+            elapsed
+        };
+        let baseline = (0..50).map(|_| retrieval()).collect::<Vec<_>>();
+        let observations = Connection::open_with_flags(
+            directory.path().join("queue.sqlite3"),
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .unwrap();
+        observations
+            .busy_timeout(Duration::from_millis(100))
+            .unwrap();
+        let running_claim = || {
+            observations.query_row(
+                "SELECT id,epoch,claim_token FROM background_jobs WHERE state='running' LIMIT 1",
+                [], |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?, row.get::<_, String>(2)?)),
+            ).optional().unwrap()
+        };
+        assert!(running_claim().is_none());
+        let stop = AtomicBool::new(false);
+        struct StopOnDrop<'a> {
+            stop: &'a AtomicBool,
+            library: &'a Library,
+            ids: &'a [String],
+        }
+        impl Drop for StopOnDrop<'_> {
+            fn drop(&mut self) {
+                self.stop.store(true, Ordering::Release);
+                for id in self.ids {
+                    if self.library.background_job(id).is_ok_and(|job| {
+                        matches!(
+                            job.state,
+                            JobState::Running | JobState::Queued | JobState::Retryable
+                        )
+                    }) {
+                        let _ = self.library.cancel_background_job(id);
+                    }
+                }
+            }
+        }
+        let mut worker = test_worker(&library).unwrap();
+        let (overlapping, jobs) = std::thread::scope(|scope| {
+            let thread = scope.spawn(|| {
+                let mut jobs = Vec::new();
+                while !stop.load(Ordering::Acquire) {
+                    match worker.run_next().unwrap() {
+                        Some(job) => {
+                            println!("cohort job {}: {:?}", jobs.len() + 1, job.state);
+                            jobs.push(job);
+                        }
+                        None => break,
+                    }
+                }
+                jobs
+            });
+            // Drop inside the scope before join, including measurement panic:
+            // revoke pending/running work so a failed test cannot strand helpers.
+            let _cleanup = StopOnDrop {
+                stop: &stop,
+                library: &library,
+                ids: &ids,
+            };
+            let start = Instant::now();
+            let mut last_progress = Instant::now();
+            let mut overlapping = Vec::new();
+            while !thread.is_finished() {
+                assert!(
+                    start.elapsed() < Duration::from_secs(120),
+                    "OCR cohort deadline"
+                );
+                let before = running_claim();
+                let elapsed = retrieval();
+                let after = running_claim();
+                if last_progress.elapsed() > Duration::from_secs(10) {
+                    println!(
+                        "cohort elapsed {:?}; running {:?}; overlap {}",
+                        start.elapsed(),
+                        after,
+                        overlapping.len()
+                    );
+                    last_progress = Instant::now();
+                }
+                if before.is_some() && before == after {
+                    overlapping.push(elapsed);
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            (overlapping, thread.join().unwrap())
+        });
+        assert_eq!(jobs.len(), 24);
+        for (job, id) in jobs.iter().zip(&ids) {
+            assert_eq!(&job.id, id);
+            assert_eq!(job.state, JobState::Completed, "{job:?}");
+            assert_eq!(job.attempts, 1);
+        }
+        let summary = |samples: &[f64]| {
+            assert!(!samples.is_empty());
+            let mut ordered = samples.to_vec();
+            ordered.sort_by(f64::total_cmp);
+            serde_json::json!({ "samples": ordered.len(),
+                "median_ms": (ordered[(ordered.len()-1)/2] + ordered[ordered.len()/2]) / 2.0,
+                "p95_ms": ordered[(ordered.len()*95).div_ceil(100)-1], "max_ms": ordered.last().unwrap() })
+        };
+        let report = serde_json::json!({
+            "scope": "persistent Library lexical search; 256 synthetic text files; 24 explicitly selected cropped OCR images",
+            "baseline": summary(&baseline), "same_claim_overlap": summary(&overlapping),
+            "completed_ocr_jobs": jobs.len(),
+            "extraction": jobs.iter().map(|job| job.result.as_ref().unwrap()["extraction"].clone()).collect::<Vec<_>>(),
+            "smoke_gate": { "minimum_same_claim_samples": 20, "p95_ms_ceiling": 25 },
+            "not_proven": ["desktop responsiveness", "100k corpus responsiveness", "hard peak RSS", "Vision service memory"]
+        });
+        println!("queued persistent retrieval: {report}");
+        if let Some(path) = std::env::var_os("LOOM_TEST_RESPONSE_REPORT") {
+            fs::write(path, serde_json::to_vec_pretty(&report).unwrap()).unwrap();
+        }
+        assert!(
+            overlapping.len() >= 20,
+            "insufficient verified overlap samples"
+        );
+        assert!(
+            report["same_claim_overlap"]["p95_ms"].as_f64().unwrap() < 25.0,
+            "{report}"
+        );
+        assert!(!library
+            .search(&crate::SearchRequest {
+                text: "LOOM OCR marker".into(),
+                limit: 5
+            })
+            .unwrap()
+            .is_empty());
+    }
+
     fn fixture() -> (TempDir, Library) {
         let directory = tempdir().unwrap();
         let library = Library::open(directory.path().join("queue.sqlite3")).unwrap();
         (directory, library)
+    }
+
+    // Unit race/state fixtures use the real helper, staged explicitly before cargo test.
+    // They never silently fall back to an in-process provider.
+    fn test_extractor_path() -> std::path::PathBuf {
+        std::env::current_exe()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("loom-extractor")
+    }
+
+    fn test_extractor() -> loom_extraction::ExtractionSupervisor {
+        loom_extraction::ExtractionSupervisor::new(test_extractor_path()).unwrap()
+    }
+
+    fn test_worker(library: &Library) -> Result<JobWorker> {
+        library
+            .acquire_job_worker()?
+            .with_extractor_path(test_extractor_path())
+    }
+
+    fn reacquire_after_deliberate_test_drop(library: &Library) -> Result<JobWorker> {
+        // Other test threads can fork with a transient copy of the CLOEXEC lock
+        // descriptor. This applies only after a known owner release; production
+        // acquisition and all live-contention assertions remain immediate.
+        let start = Instant::now();
+        loop {
+            match test_worker(library) {
+                Err(LoomError::JobWorkerBusy) if start.elapsed() < Duration::from_millis(500) => {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                result => return result,
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    fn fault_extractor(mode: &str) -> (TempDir, std::path::PathBuf, std::path::PathBuf) {
+        let directory = tempdir().unwrap();
+        let pid = directory.path().join("pid");
+        let source = directory.path().join("fault.rs");
+        let executable = directory.path().join("fault");
+        fs::write(
+            &source,
+            format!(
+                "const PID_FILE: &str = {:?};\nconst MODE: &str = {mode:?};\nconst HELPER: &str = {:?};\n{}",
+                pid.to_str().unwrap(),
+                test_extractor_path().to_str().unwrap(),
+                include_str!("../../loom-extraction/tests/support/fault.rs")
+            ),
+        )
+        .unwrap();
+        let output = Command::new("rustc")
+            .arg("--edition=2021")
+            .arg(source)
+            .arg("-o")
+            .arg(&executable)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(Command::new(&executable)
+            .arg("--warmup")
+            .status()
+            .unwrap()
+            .success());
+        assert!(!pid.exists(), "warmup must not count as fault entry");
+        (directory, executable, pid)
+    }
+
+    #[cfg(unix)]
+    fn wait_for_fixture(pid: &Path) {
+        let start = Instant::now();
+        while !pid.exists() {
+            assert!(
+                start.elapsed() < Duration::from_secs(3),
+                "child never entered main"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    #[cfg(unix)]
+    fn assert_fixture_reaped(pid: &Path) {
+        let pid = fs::read_to_string(pid).unwrap();
+        assert!(
+            Command::new("/bin/ps")
+                .args(["-p", &pid, "-o", "pid="])
+                .output()
+                .unwrap()
+                .stdout
+                .is_empty(),
+            "extractor remains alive or zombie"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn live_extraction_fences_cancel_revoke_purge_restore_target_and_foreground_cas() {
+        for action in [
+            "cancel",
+            "revoke",
+            "purge",
+            "root-purge",
+            "restore",
+            "target",
+            "cas",
+        ] {
+            let (_directory, library, source) = file_fixture();
+            let restore = library.export_portable().unwrap();
+            fs::write(&source, "Pending private-synthetic refresh.").unwrap();
+            let job = library
+                .enqueue_index_file(&source, "live-fence", JobPriority::Normal)
+                .unwrap();
+            let (_fault_dir, executable, pid) = fault_extractor("hang");
+            let mut worker = library
+                .acquire_job_worker()
+                .unwrap()
+                .with_extractor_path(executable)
+                .unwrap();
+            let started = Instant::now();
+            let thread = std::thread::spawn(move || worker.run_next());
+            wait_for_fixture(&pid);
+            assert_eq!(
+                library.background_job(&job.id).unwrap().state,
+                JobState::Running
+            );
+            match action {
+                "cancel" => {
+                    library.cancel_background_job(&job.id).unwrap();
+                }
+                "revoke" => {
+                    library
+                        .revoke_source_root(source.to_str().unwrap())
+                        .unwrap();
+                }
+                "purge" => {
+                    library
+                        .purge_artifact(&file_identity(&library, &source).0)
+                        .unwrap();
+                }
+                "root-purge" => {
+                    library.purge_root(source.to_str().unwrap()).unwrap();
+                }
+                "restore" => {
+                    // Fixture-only empty-library precondition; preserve operational rows so
+                    // import/epoch invalidation is tested, not public purge cleanup alone.
+                    library
+                        .lock()
+                        .unwrap()
+                        .execute_batch("DELETE FROM artifacts; DELETE FROM source_roots;")
+                        .unwrap();
+                    library.import_portable(&restore).unwrap();
+                }
+                "target" => {
+                    library.lock().unwrap().execute("UPDATE background_jobs SET target_json=json_set(target_json,'$.locator','/wrong.md') WHERE id=?1", [&job.id]).unwrap();
+                }
+                "cas" => {
+                    library.index_path(&source).unwrap();
+                }
+                _ => unreachable!(),
+            }
+            let after_controller = library.export_portable().unwrap().digest;
+            let outcome = thread.join().unwrap();
+            assert!(
+                started.elapsed() < Duration::from_secs(3),
+                "{action}: probe did not interrupt promptly"
+            );
+            assert_fixture_reaped(&pid);
+            assert_eq!(
+                library.export_portable().unwrap().digest,
+                after_controller,
+                "{action}: stale child published"
+            );
+            match action {
+                "purge" | "root-purge" => assert!(outcome.is_err(), "{action}: {outcome:?}"),
+                "restore" => {
+                    // The monitor may see the empty precondition before import commits.
+                    assert!(
+                        outcome.is_err() || outcome.unwrap().unwrap().state == JobState::Cancelled
+                    );
+                    assert!(library.background_jobs(128).unwrap().is_empty());
+                }
+                "cancel" | "revoke" => {
+                    assert_eq!(outcome.unwrap().unwrap().state, JobState::Cancelled)
+                }
+                "target" => assert_eq!(outcome.unwrap().unwrap().state, JobState::Failed),
+                "cas" => assert_eq!(outcome.unwrap().unwrap().state, JobState::Retryable),
+                _ => unreachable!(),
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn provider_unavailability_is_failure_not_consent_cancellation_and_does_not_publish() {
+        let (_directory, library, source) = file_fixture();
+        let before = library.export_portable().unwrap().digest;
+        fs::write(
+            &source,
+            "Never publish this private-synthetic provider failure.",
+        )
+        .unwrap();
+        library
+            .enqueue_index_file(&source, "provider-unavailable", JobPriority::Normal)
+            .unwrap();
+        let (_fault_dir, executable, pid) = fault_extractor("unavailable");
+        let failed = library
+            .acquire_job_worker()
+            .unwrap()
+            .with_extractor_path(executable)
+            .unwrap()
+            .run_next()
+            .unwrap()
+            .unwrap();
+        assert_eq!(failed.state, JobState::Failed);
+        assert_eq!(failed.attempts, 1);
+        assert_eq!(
+            failed.last_error.as_deref(),
+            Some("OCR is unavailable: local provider is unavailable")
+        );
+        assert_eq!(library.export_portable().unwrap().digest, before);
+        assert_fixture_reaped(&pid);
+        assert!(!is_retryable(&LoomError::OcrUnavailable(
+            "unavailable".into()
+        )));
+        for error in [
+            loom_extraction::ExtractionError::WallTime,
+            loom_extraction::ExtractionError::CpuTime,
+            loom_extraction::ExtractionError::Memory,
+            loom_extraction::ExtractionError::OutputLimit,
+        ] {
+            assert!(!is_retryable(&LoomError::Extraction(error)));
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn live_image_policy_rotation_and_purge_stop_blocked_provider_input() {
+        for action in ["reassert", "disable", "purge"] {
+            let (directory, library) = fixture();
+            let source = directory.path().join("policy.png");
+            fs::write(
+                &source,
+                include_bytes!(concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/../../tests/fixtures/ocr-golden.png"
+                )),
+            )
+            .unwrap();
+            library.set_ocr_enabled(false).unwrap();
+            library.index_path(&source).unwrap();
+            library.set_ocr_enabled(true).unwrap();
+            let job = library
+                .enqueue_index_file(&source, "live-ocr-policy", JobPriority::Normal)
+                .unwrap();
+            let (_fault_dir, executable, pid) = fault_extractor("hang");
+            let mut worker = library
+                .acquire_job_worker()
+                .unwrap()
+                .with_extractor_path(executable)
+                .unwrap();
+            let thread = std::thread::spawn(move || worker.run_next());
+            wait_for_fixture(&pid);
+            match action {
+                "reassert" => {
+                    library.set_ocr_enabled(true).unwrap();
+                }
+                "disable" => {
+                    library.set_ocr_enabled(false).unwrap();
+                }
+                "purge" => {
+                    library.purge_ocr_records().unwrap();
+                }
+                _ => unreachable!(),
+            }
+            let after = library.export_portable().unwrap().digest;
+            let outcome = thread.join().unwrap();
+            assert_fixture_reaped(&pid);
+            assert_eq!(library.export_portable().unwrap().digest, after);
+            assert_eq!(library.stats().unwrap().artifacts, 0);
+            if matches!(action, "purge" | "disable") {
+                assert!(outcome.is_err());
+                assert!(library.background_job(&job.id).is_err());
+            } else {
+                assert_eq!(outcome.unwrap().unwrap().state, JobState::Cancelled);
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn actual_helper_crashes_retry_only_to_budget_and_memory_overrun_fails_without_publication() {
+        for mode in ["crash", "memory", "oversize-output"] {
+            let (_directory, library, source) = file_fixture();
+            let before = library.export_portable().unwrap().digest;
+            fs::write(&source, "Never publish faulting provider evidence.").unwrap();
+            library
+                .enqueue_index_file(&source, "fault-budget", JobPriority::Normal)
+                .unwrap();
+            let (_fault_dir, executable, pid) = fault_extractor(mode);
+            let mut worker = library
+                .acquire_job_worker()
+                .unwrap()
+                .with_extractor_path(executable)
+                .unwrap();
+            for attempt in 1..=if mode == "crash" { 3 } else { 1 } {
+                let settled = worker.run_next().unwrap().unwrap();
+                assert_eq!(settled.attempts, attempt);
+                assert_eq!(
+                    settled.state,
+                    if mode == "crash" && attempt < 3 {
+                        JobState::Retryable
+                    } else {
+                        JobState::Failed
+                    },
+                    "{mode}: {settled:?}"
+                );
+                assert_fixture_reaped(&pid);
+                assert_eq!(library.export_portable().unwrap().digest, before);
+                if mode == "memory" {
+                    assert!(settled
+                        .last_error
+                        .as_deref()
+                        .unwrap()
+                        .contains("sampled memory"));
+                } else if mode == "oversize-output" {
+                    assert!(settled
+                        .last_error
+                        .as_deref()
+                        .unwrap()
+                        .contains("output limit"));
+                }
+                if settled.state == JobState::Retryable {
+                    assert!(
+                        worker.run_next().unwrap().is_none(),
+                        "persisted retry delay was bypassed"
+                    );
+                    std::thread::sleep(Duration::from_millis(1100));
+                }
+            }
+            assert!(worker.run_next().unwrap().is_none());
+        }
+    }
+
+    #[test]
+    fn v3_runtime_upgrade_preserves_typed_work_and_refuses_live_or_invalid_layouts() {
+        let (_directory, library, source) = file_fixture();
+        let queued = library
+            .enqueue_index_file(&source, "v3-file", JobPriority::Low)
+            .unwrap();
+        let before = library.export_portable().unwrap().digest;
+        let worker = test_worker(&library).unwrap();
+        library
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE schema_meta SET value='3' WHERE key='background_job_schema_version'",
+                [],
+            )
+            .unwrap();
+        assert!(matches!(
+            library.upgrade_job_runtime(),
+            Err(LoomError::JobWorkerBusy)
+        ));
+        drop(worker);
+        assert!(library.acquire_job_worker().is_err());
+        library.upgrade_job_runtime().unwrap();
+        assert_eq!(library.background_job(&queued.id).unwrap(), queued);
+        library.upgrade_job_runtime().unwrap();
+        assert_eq!(library.background_job(&queued.id).unwrap(), queued);
+        assert_eq!(library.export_portable().unwrap().digest, before);
+        library.lock().unwrap().execute_batch("UPDATE schema_meta SET value='3' WHERE key='background_job_schema_version'; PRAGMA ignore_check_constraints=ON;").unwrap();
+        library
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE background_jobs SET last_error=?1 WHERE id=?2",
+                params!["x".repeat(4097), queued.id],
+            )
+            .unwrap();
+        library
+            .lock()
+            .unwrap()
+            .execute_batch("PRAGMA ignore_check_constraints=OFF;")
+            .unwrap();
+        assert!(library.upgrade_job_runtime().is_err());
+        let connection = library.lock().unwrap();
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT value FROM schema_meta WHERE key='background_job_schema_version'",
+                    [],
+                    |row| row.get::<_, String>(0)
+                )
+                .unwrap(),
+            "3"
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT length(last_error) FROM background_jobs WHERE id=?1",
+                    [&queued.id],
+                    |row| row.get::<_, i64>(0)
+                )
+                .unwrap(),
+            4097
+        );
     }
 
     fn now() -> i64 {
@@ -1120,7 +1765,7 @@ mod tests {
         let queued = library
             .enqueue_index_file(&source, "refresh", JobPriority::Normal)
             .unwrap();
-        let mut worker = library.acquire_job_worker().unwrap();
+        let mut worker = test_worker(&library).unwrap();
         let completed = worker.run_next().unwrap().unwrap();
         assert_eq!(completed.id, queued.id);
         assert_eq!(completed.state, JobState::Completed);
@@ -1165,9 +1810,12 @@ mod tests {
         library
             .enqueue_index_file(&source, "atomic", JobPriority::Normal)
             .unwrap();
-        let mut worker = library.acquire_job_worker().unwrap();
+        let mut worker = test_worker(&library).unwrap();
         let (claim, json) = claim_file(&mut worker);
-        let prepared = worker.library.prepare_file_job(&claim, &json).unwrap();
+        let prepared = worker
+            .library
+            .prepare_file_job(&claim, &json, Some(&test_extractor()))
+            .unwrap();
         library.lock().unwrap().execute_batch("CREATE TRIGGER fail_job_completion BEFORE UPDATE OF state ON background_jobs WHEN NEW.state='completed' BEGIN SELECT RAISE(ABORT,'fixture rollback'); END;").unwrap();
         assert!(worker.library.publish_file_job(&claim, &prepared).is_err());
         assert_eq!(library.export_portable().unwrap().digest, before);
@@ -1199,9 +1847,12 @@ mod tests {
         let job = library
             .enqueue_index_file(&source, "cancel-prepared", JobPriority::Normal)
             .unwrap();
-        let mut worker = library.acquire_job_worker().unwrap();
+        let mut worker = test_worker(&library).unwrap();
         let (claim, json) = claim_file(&mut worker);
-        let prepared = worker.library.prepare_file_job(&claim, &json).unwrap();
+        let prepared = worker
+            .library
+            .prepare_file_job(&claim, &json, Some(&test_extractor()))
+            .unwrap();
         library.cancel_background_job(&job.id).unwrap();
         assert!(matches!(
             worker.library.publish_file_job(&claim, &prepared),
@@ -1229,7 +1880,7 @@ mod tests {
         assert!(library
             .enqueue_index_file(&source, "old-capability", JobPriority::Normal)
             .is_err());
-        let mut worker = library.acquire_job_worker().unwrap();
+        let mut worker = test_worker(&library).unwrap();
         let cancelled = worker.run_next().unwrap().unwrap();
         assert_eq!(cancelled.id, job.id);
         assert_eq!(cancelled.state, JobState::Cancelled);
@@ -1250,9 +1901,12 @@ mod tests {
         library
             .enqueue_index_file(&source, "stale-source", JobPriority::Normal)
             .unwrap();
-        let mut worker = library.acquire_job_worker().unwrap();
+        let mut worker = test_worker(&library).unwrap();
         let (claim, json) = claim_file(&mut worker);
-        let prepared = worker.library.prepare_file_job(&claim, &json).unwrap();
+        let prepared = worker
+            .library
+            .prepare_file_job(&claim, &json, Some(&test_extractor()))
+            .unwrap();
         let before = library.export_portable().unwrap().digest;
         fs::write(&source, "Foreground newer source.").unwrap();
         assert!(matches!(
@@ -1286,9 +1940,12 @@ mod tests {
         library
             .enqueue_index_file(&source, "writer-contention", JobPriority::Normal)
             .unwrap();
-        let mut worker = library.acquire_job_worker().unwrap();
+        let mut worker = test_worker(&library).unwrap();
         let (claim, json) = claim_file(&mut worker);
-        let prepared = worker.library.prepare_file_job(&claim, &json).unwrap();
+        let prepared = worker
+            .library
+            .prepare_file_job(&claim, &json, Some(&test_extractor()))
+            .unwrap();
         let before = library.export_portable().unwrap().digest;
         let database = directory.path().join("queue.sqlite3");
         let changed_source = source.clone();
@@ -1318,9 +1975,12 @@ mod tests {
         library
             .enqueue_index_file(&source, "typed", JobPriority::Normal)
             .unwrap();
-        let mut worker = library.acquire_job_worker().unwrap();
+        let mut worker = test_worker(&library).unwrap();
         let (claim, json) = claim_file(&mut worker);
-        let prepared = worker.library.prepare_file_job(&claim, &json).unwrap();
+        let prepared = worker
+            .library
+            .prepare_file_job(&claim, &json, Some(&test_extractor()))
+            .unwrap();
         let before = library.export_portable().unwrap().digest;
         let mut changed: serde_json::Value = serde_json::from_str(&json).unwrap();
         changed["locator"] = serde_json::json!("/not-an-approved-source.md");
@@ -1346,12 +2006,7 @@ mod tests {
             )
             .unwrap();
         drop(worker);
-        let failed = library
-            .acquire_job_worker()
-            .unwrap()
-            .run_next()
-            .unwrap()
-            .unwrap();
+        let failed = test_worker(&library).unwrap().run_next().unwrap().unwrap();
         assert_eq!(failed.state, JobState::Failed);
         assert!(failed.target_locator.is_none());
         assert_eq!(library.export_portable().unwrap().digest, before);
@@ -1364,9 +2019,12 @@ mod tests {
         let job = library
             .enqueue_index_file(&source, "purge-prepared", JobPriority::Normal)
             .unwrap();
-        let mut worker = library.acquire_job_worker().unwrap();
+        let mut worker = test_worker(&library).unwrap();
         let (claim, json) = claim_file(&mut worker);
-        let prepared = worker.library.prepare_file_job(&claim, &json).unwrap();
+        let prepared = worker
+            .library
+            .prepare_file_job(&claim, &json, Some(&test_extractor()))
+            .unwrap();
         let artifact = file_identity(&library, &source).0;
         library.purge_artifact(&artifact).unwrap();
         assert!(library.background_job(&job.id).is_err());
@@ -1391,11 +2049,14 @@ mod tests {
         let job = library
             .enqueue_index_file(&source, "recover-file", JobPriority::Normal)
             .unwrap();
-        let mut old = library.acquire_job_worker().unwrap();
+        let mut old = test_worker(&library).unwrap();
         let (claim, json) = claim_file(&mut old);
-        let prepared = old.library.prepare_file_job(&claim, &json).unwrap();
+        let prepared = old
+            .library
+            .prepare_file_job(&claim, &json, Some(&test_extractor()))
+            .unwrap();
         drop(old);
-        let mut new = library.acquire_job_worker().unwrap();
+        let mut new = test_worker(&library).unwrap();
         assert!(matches!(
             new.library.publish_file_job(&claim, &prepared),
             Err(LoomError::JobClaimStale(_))
@@ -1414,14 +2075,9 @@ mod tests {
         library
             .enqueue_index_file(&source, "output-limit", JobPriority::Normal)
             .unwrap();
-        let failed = library
-            .acquire_job_worker()
-            .unwrap()
-            .run_next()
-            .unwrap()
-            .unwrap();
+        let failed = test_worker(&library).unwrap().run_next().unwrap().unwrap();
         assert_eq!(failed.state, JobState::Failed);
-        assert!(failed.last_error.unwrap().contains("publication budget"));
+        assert!(failed.last_error.unwrap().contains("output limit"));
         assert_eq!(library.export_portable().unwrap().digest, before);
         fs::write(&source, "x".repeat(8 * 1024 * 1024 + 1)).unwrap();
         assert!(library
@@ -1483,12 +2139,7 @@ mod tests {
         assert_eq!(library.background_job(&malformed.id).unwrap(), malformed);
         library.purge_ocr_records().unwrap();
         assert_eq!(library.background_job(&malformed.id).unwrap(), malformed);
-        let failed = library
-            .acquire_job_worker()
-            .unwrap()
-            .run_next()
-            .unwrap()
-            .unwrap();
+        let failed = test_worker(&library).unwrap().run_next().unwrap().unwrap();
         assert_eq!(failed.id, malformed.id);
         assert_eq!(failed.state, JobState::Failed);
         assert!(failed.target_locator.is_none());
@@ -1511,12 +2162,7 @@ mod tests {
                 [&job.id],
             )
             .unwrap();
-        let failed = library
-            .acquire_job_worker()
-            .unwrap()
-            .run_next()
-            .unwrap()
-            .unwrap();
+        let failed = test_worker(&library).unwrap().run_next().unwrap().unwrap();
         assert_eq!(failed.id, job.id);
         assert_eq!(failed.state, JobState::Failed);
         assert_eq!(library.export_portable().unwrap().digest, before);
@@ -1543,12 +2189,7 @@ mod tests {
                 .unwrap();
         }
         let before = library.export_portable().unwrap().digest;
-        let failed = library
-            .acquire_job_worker()
-            .unwrap()
-            .run_next()
-            .unwrap()
-            .unwrap();
+        let failed = test_worker(&library).unwrap().run_next().unwrap().unwrap();
         assert_eq!(failed.id, job.id);
         assert_eq!(failed.state, JobState::Failed);
         assert_eq!(library.export_portable().unwrap().digest, before);
@@ -1594,12 +2235,7 @@ mod tests {
             .execute("DELETE FROM artifacts WHERE id=?1", [&artifact])
             .unwrap();
         assert_eq!(library.background_jobs(128).unwrap().len(), 1);
-        let cancelled = library
-            .acquire_job_worker()
-            .unwrap()
-            .run_next()
-            .unwrap()
-            .unwrap();
+        let cancelled = test_worker(&library).unwrap().run_next().unwrap().unwrap();
         assert_eq!(cancelled.state, JobState::Cancelled);
         assert_eq!(library.stats().unwrap().artifacts, 0);
         assert_eq!(fs::read(&source).unwrap(), original);
@@ -1607,12 +2243,7 @@ mod tests {
         library
             .enqueue_index_file(&source, "post-old-purge", JobPriority::Normal)
             .unwrap();
-        let completed = library
-            .acquire_job_worker()
-            .unwrap()
-            .run_next()
-            .unwrap()
-            .unwrap();
+        let completed = test_worker(&library).unwrap().run_next().unwrap().unwrap();
         assert_eq!(completed.state, JobState::Completed);
         assert_eq!(
             library
@@ -1631,9 +2262,12 @@ mod tests {
         library
             .enqueue_index_file(&source, "restore-file", JobPriority::Normal)
             .unwrap();
-        let mut worker = library.acquire_job_worker().unwrap();
+        let mut worker = test_worker(&library).unwrap();
         let (claim, json) = claim_file(&mut worker);
-        let prepared = worker.library.prepare_file_job(&claim, &json).unwrap();
+        let prepared = worker
+            .library
+            .prepare_file_job(&claim, &json, Some(&test_extractor()))
+            .unwrap();
         // Restore accepts only an empty canonical library. Preserve operational state here so
         // this fixture isolates restore fencing rather than the separately tested purge fence.
         library
@@ -1651,8 +2285,7 @@ mod tests {
         let queued = library
             .enqueue_index_file(&source, "post-restore-file", JobPriority::Normal)
             .unwrap();
-        let completed = library
-            .acquire_job_worker()
+        let completed = test_worker(&library)
             .unwrap()
             .run_next_inner(|completed| {
                 library.forget_background_job(&completed.id).unwrap();
@@ -1707,12 +2340,7 @@ mod tests {
             .enqueue_index_file(&image, "old-ocr-policy", JobPriority::Normal)
             .unwrap();
         library.set_ocr_enabled(true).unwrap(); // same boolean, new explicit consent revision
-        let cancelled = library
-            .acquire_job_worker()
-            .unwrap()
-            .run_next()
-            .unwrap()
-            .unwrap();
+        let cancelled = test_worker(&library).unwrap().run_next().unwrap().unwrap();
         assert_eq!(cancelled.state, JobState::Cancelled);
         assert!(cancelled.last_error.unwrap().contains("policy changed"));
         library
@@ -1821,7 +2449,7 @@ mod tests {
             .enqueue_fts_repair("repair", JobPriority::Normal)
             .unwrap();
         assert_eq!(job.state, JobState::Queued);
-        let mut worker = library.acquire_job_worker().unwrap();
+        let mut worker = test_worker(&library).unwrap();
         assert!(
             !library.fts_health().unwrap().healthy,
             "worker acquisition rebuilt the derivative"
@@ -1853,7 +2481,7 @@ mod tests {
         let job = library
             .enqueue_fts_repair("forget-after-publish", JobPriority::Normal)
             .unwrap();
-        let mut worker = library.acquire_job_worker().unwrap();
+        let mut worker = test_worker(&library).unwrap();
         let finished = worker
             .run_next_inner(|snapshot| {
                 assert_eq!(snapshot.state, JobState::Completed);
@@ -1962,7 +2590,7 @@ mod tests {
                 ..Default::default()
             })
             .unwrap();
-        let mut worker = library.acquire_job_worker().unwrap();
+        let mut worker = test_worker(&library).unwrap();
         library
             .enqueue_fts_repair("legacy-completed", JobPriority::High)
             .unwrap();
@@ -2033,7 +2661,7 @@ mod tests {
             .settings
             .contains_key("background_job_schema_version"));
         assert!(claim.verify(&migrated.lock().unwrap()).is_err());
-        let mut worker = migrated.acquire_job_worker().unwrap();
+        let mut worker = test_worker(&migrated).unwrap();
         let claim = worker.claim_at(now()).unwrap().unwrap();
         migrated.import_portable(&archive).unwrap();
         assert!(migrated.background_jobs(128).unwrap().is_empty());
@@ -2159,7 +2787,7 @@ mod tests {
         let job = library
             .enqueue_fts_repair("retry", JobPriority::Normal)
             .unwrap();
-        let mut worker = library.acquire_job_worker().unwrap();
+        let mut worker = test_worker(&library).unwrap();
         let mut clock = now();
         for attempt in 1..=3 {
             let claim = worker.claim_at(clock).unwrap().unwrap();
@@ -2200,7 +2828,7 @@ mod tests {
         let running = library
             .enqueue_fts_repair("cancel-running", JobPriority::Normal)
             .unwrap();
-        let mut worker = library.acquire_job_worker().unwrap();
+        let mut worker = test_worker(&library).unwrap();
         let claim = worker.claim_at(now()).unwrap().unwrap();
         assert_eq!(claim.id, running.id);
         assert!(library.forget_background_job(&running.id).is_err());
@@ -2230,18 +2858,25 @@ mod tests {
             .enqueue_fts_repair("older-low", JobPriority::Low)
             .unwrap();
         for index in 0..4 {
-            let mut worker = library.acquire_job_worker().unwrap();
+            let mut worker = if index == 0 {
+                test_worker(&library)
+            } else {
+                reacquire_after_deliberate_test_drop(&library)
+            }
+            .expect("released test owner remained locked after bounded exec window");
             library
                 .enqueue_fts_repair(&format!("high-{index}"), JobPriority::High)
                 .unwrap();
             let claim = worker.claim_at(now()).unwrap().unwrap();
             assert_ne!(claim.id, low.id);
             complete(&worker, &claim);
+            drop(worker);
         }
         library
             .enqueue_fts_repair("more-high", JobPriority::High)
             .unwrap();
-        let mut worker = library.acquire_job_worker().unwrap();
+        let mut worker = reacquire_after_deliberate_test_drop(&library)
+            .expect("released test owner remained locked after bounded exec window");
         let claim = worker.claim_at(now()).unwrap().unwrap();
         assert_eq!(claim.id, low.id);
         complete(&worker, &claim);
@@ -2257,14 +2892,14 @@ mod tests {
         let job = library
             .enqueue_fts_repair("crashed", JobPriority::Normal)
             .unwrap();
-        let mut old = library.acquire_job_worker().unwrap();
+        let mut old = test_worker(&library).unwrap();
         let claim = old.claim_at(now()).unwrap().unwrap();
         assert!(matches!(
-            library.acquire_job_worker(),
+            test_worker(&library),
             Err(LoomError::JobWorkerBusy)
         ));
         drop(old);
-        let mut new = library.acquire_job_worker().unwrap();
+        let mut new = test_worker(&library).unwrap();
         assert_eq!(
             library.background_job(&job.id).unwrap().state,
             JobState::Retryable
@@ -2293,7 +2928,7 @@ mod tests {
             .unwrap();
         assert_eq!(library.export_portable().unwrap().digest, archive.digest);
         assert!(!archive.tables.contains_key("background_jobs"));
-        let mut worker = library.acquire_job_worker().unwrap();
+        let mut worker = test_worker(&library).unwrap();
         let claim = worker.claim_at(now()).unwrap().unwrap();
         archive
             .tables
@@ -2324,7 +2959,7 @@ mod tests {
         library
             .enqueue_fts_repair("independent-connection", JobPriority::Normal)
             .unwrap();
-        let mut worker = library.acquire_job_worker().unwrap();
+        let mut worker = test_worker(&library).unwrap();
         let interactive_guard = library.lock().unwrap();
         let (send, receive) = std::sync::mpsc::channel();
         let task = std::thread::spawn(move || {
@@ -2356,7 +2991,7 @@ mod tests {
         let job = library
             .enqueue_fts_repair("diagnostic", JobPriority::Normal)
             .unwrap();
-        let mut worker = library.acquire_job_worker().unwrap();
+        let mut worker = test_worker(&library).unwrap();
         let claim = worker.claim_at(now()).unwrap().unwrap();
         worker
             .settle_failure(&claim, false, &"🔥".repeat(4096), now())
@@ -2404,7 +3039,7 @@ mod tests {
         fs::write(&outside, "must stay unchanged").unwrap();
         std::os::unix::fs::symlink(&outside, directory.path().join("queue.sqlite3.worker.lock"))
             .unwrap();
-        assert!(library.acquire_job_worker().is_err());
+        assert!(test_worker(&library).is_err());
         assert_eq!(fs::read_to_string(outside).unwrap(), "must stay unchanged");
     }
 
@@ -2418,9 +3053,9 @@ mod tests {
         let different = Library::open(directory.path().join("different.sqlite3")).unwrap();
         fs::remove_file(&alias).unwrap();
         std::os::unix::fs::symlink(different.job_database_path().unwrap(), &alias).unwrap();
-        let worker = library.acquire_job_worker().unwrap();
+        let worker = test_worker(&library).unwrap();
         assert!(matches!(
-            alias_library.acquire_job_worker(),
+            test_worker(&alias_library),
             Err(LoomError::JobWorkerBusy)
         ));
         drop(worker);
@@ -2430,7 +3065,7 @@ mod tests {
         )
         .unwrap();
         assert!(
-            matches!(library.acquire_job_worker(), Err(LoomError::JobQueue(reason)) if reason.contains("hard-linked"))
+            matches!(test_worker(&library), Err(LoomError::JobQueue(reason)) if reason.contains("hard-linked"))
         );
         assert!(
             matches!(Library::open_for_jobs(directory.path().join("hard.sqlite3")), Err(LoomError::JobQueue(reason)) if reason.contains("hard-linked"))
@@ -2446,7 +3081,7 @@ mod tests {
         fs::rename(&path, directory.path().join("original.sqlite3")).unwrap();
         fs::write(&path, "replacement must not be opened").unwrap();
         assert!(
-            matches!(library.acquire_job_worker(), Err(LoomError::JobQueue(reason)) if reason.contains("identity changed"))
+            matches!(test_worker(&library), Err(LoomError::JobQueue(reason)) if reason.contains("identity changed"))
         );
         assert_eq!(
             fs::read_to_string(path).unwrap(),
@@ -2465,10 +3100,7 @@ mod tests {
                 [],
             )
             .unwrap();
-        assert!(matches!(
-            library.acquire_job_worker(),
-            Err(LoomError::JobQueue(_))
-        ));
+        assert!(matches!(test_worker(&library), Err(LoomError::JobQueue(_))));
         for code in [rusqlite::ffi::SQLITE_BUSY, rusqlite::ffi::SQLITE_LOCKED] {
             assert!(is_retryable(&LoomError::Database(
                 rusqlite::Error::SqliteFailure(rusqlite::ffi::Error::new(code), None)
@@ -2499,7 +3131,7 @@ mod tests {
             return;
         };
         let library = Library::open_for_jobs(database).unwrap();
-        let mut worker = library.acquire_job_worker().unwrap();
+        let mut worker = test_worker(&library).unwrap();
         let claim = worker.claim_at(now()).unwrap().unwrap();
         let target: Option<String> = worker
             .library
@@ -2511,9 +3143,12 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        let _prepared = target
-            .as_deref()
-            .map(|json| worker.library.prepare_file_job(&claim, json).unwrap());
+        let _prepared = target.as_deref().map(|json| {
+            worker
+                .library
+                .prepare_file_job(&claim, json, Some(&test_extractor()))
+                .unwrap()
+        });
         fs::write(
             std::env::var_os("LOOM_TEST_JOB_LOCK_READY").unwrap(),
             "ready",
@@ -2565,7 +3200,7 @@ mod tests {
             }
             assert!(ready.exists(), "child did not acquire the worker lock");
             assert!(matches!(
-                library.acquire_job_worker(),
+                test_worker(&library),
                 Err(LoomError::JobWorkerBusy)
             ));
             assert_eq!(
@@ -2575,7 +3210,7 @@ mod tests {
             assert_eq!(library.export_portable().unwrap().digest, canonical);
             child.0.kill().unwrap();
             child.0.wait().unwrap();
-            let mut recovered = library.acquire_job_worker().unwrap();
+            let mut recovered = test_worker(&library).unwrap();
             let completed = recovered.run_next().unwrap().unwrap();
             assert_eq!(completed.state, JobState::Completed);
             assert_eq!(completed.id, job.id);

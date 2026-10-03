@@ -15,6 +15,8 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--loom", type=Path, required=True)
     parser.add_argument("--previous-loom", type=Path)
+    parser.add_argument("--previous-file-loom", type=Path, help="retained runtime-v3 binary")
+    parser.add_argument("--report", type=Path, help="write synthetic-fixture resource measurements")
     parser.add_argument("--native-ocr", action="store_true")
     args = parser.parse_args()
     if not __debug__:
@@ -23,6 +25,16 @@ def main():
         parser.error("native OCR requires macOS")
     binary = args.loom.resolve()
     fixtures = Path(__file__).resolve().parents[1] / "benchmarks"
+    measurements = []
+
+    def measured(job, media):
+        assert job["state"] == "completed", job
+        metrics = job["result"]["extraction"]
+        assert metrics["peak_resident_bytes"] > 0
+        assert metrics["sample_interval_ms"] == 25
+        assert metrics["address_space_limit_installed"] is True
+        assert metrics["wall_ms"] > 0 and metrics["cpu_ms"] >= 0
+        measurements.append({"media": media, **metrics})
     with tempfile.TemporaryDirectory(prefix="loom-queued-source-") as temporary:
         root = Path(temporary).resolve()
         database = root / "library.sqlite3"
@@ -32,7 +44,7 @@ def main():
         def command(*arguments, rejected=False, database_path=database, executable=binary):
             result = subprocess.run(
                 [str(executable), "--database", str(database_path), *map(str, arguments)],
-                text=True, capture_output=True, timeout=120 if args.native_ocr else 30, check=False,
+                text=True, capture_output=True, timeout=240 if args.native_ocr else 45, check=False,
             )
             if rejected:
                 assert result.returncode != 0, (arguments, result.stdout)
@@ -41,6 +53,7 @@ def main():
             return json.loads(result.stdout)
 
         command("index", source)
+        assert command("upgrade-job-runtime") == {"background_job_schema_version": 4}
         before = command("search", "approved source marker")[0]
         source.write_text("Refreshed queued source marker.\n", encoding="utf-8")
         queued = command("enqueue-index-file", source, "refresh-file")
@@ -50,6 +63,7 @@ def main():
         with sqlite3.connect(database) as connection:
             checkpoints = connection.execute("SELECT COUNT(*) FROM index_jobs").fetchone()[0]
         completed = command("run-next-job")
+        measured(completed, "text/markdown")
         assert completed["id"] == queued["id"] and completed["state"] == "completed"
         after = command("search", "queued source marker")[0]
         assert after["artifact_id"] == before["artifact_id"]
@@ -77,6 +91,7 @@ def main():
         command("purge-artifact", command("search", "exact artifact recovery marker")[0]["artifact_id"])
         command("enqueue-index-file", pdf, "pdf-recovery")
         recovered_pdf = command("run-next-job")
+        measured(recovered_pdf, "application/pdf")
         assert recovered_pdf["state"] == "completed"
         assert command("enqueue-index-file", pdf, "pdf-recovery") == recovered_pdf
         pdf_hit = command("search", "exact artifact recovery marker")[0]
@@ -99,7 +114,7 @@ def main():
         if args.native_ocr:
             command("ocr-enable")
             command("enqueue-index-file", image, "native-ocr")
-            assert command("run-next-job")["state"] == "completed"
+            measured(command("run-next-job"), "image/png")
             image_hit = command("search", "LOOM OCR marker")[0]
             assert image_hit["anchor"]["kind"] == "image_region"
             assert image_hit["anchor"]["width"] > 0 and image_hit["anchor"]["height"] > 0
@@ -140,9 +155,33 @@ def main():
             command("purge-artifact", old_hit["artifact_id"], executable=previous, database_path=old_database)
             assert command("run-next-job", database_path=old_database)["state"] == "cancelled", "old-binary purge resurrected a deleted artifact"
             assert command("search", "queued source marker", database_path=old_database) == []
+        if args.previous_file_loom:
+            previous = args.previous_file_loom.resolve()
+            old_database = root / "version3.sqlite3"
+            command("index", source, executable=previous, database_path=old_database)
+            old_job = command("enqueue-index-file", source, "v3-file-preserve", executable=previous, database_path=old_database)
+            command("stats", database_path=old_database)
+            with sqlite3.connect(old_database) as connection:
+                assert connection.execute("SELECT value FROM schema_meta WHERE key='background_job_schema_version'").fetchone()[0] == "3"
+            command("run-next-job", database_path=old_database, rejected=True)
+            assert command("jobs", executable=previous, database_path=old_database) == [old_job]
+            with old_database.with_name(old_database.name + ".worker.lock").open("a+b") as owner:
+                fcntl.flock(owner, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                command("upgrade-job-runtime", database_path=old_database, rejected=True)
+            command("upgrade-job-runtime", database_path=old_database)
+            command("upgrade-job-runtime", database_path=old_database)
+            assert command("jobs", database_path=old_database) == [old_job]
+            command("run-next-job", executable=previous, database_path=old_database, rejected=True)
+            assert command("search", "queued source marker", executable=previous, database_path=old_database)
+            measured(command("run-next-job", database_path=old_database), "text/markdown (v3->v4)")
+            with sqlite3.connect(old_database) as connection:
+                assert connection.execute("SELECT value FROM schema_meta WHERE key='background_job_schema_version'").fetchone()[0] == "4"
+        if args.report:
+            args.report.write_text(json.dumps({"platform": sys.platform, "measurements": measurements}, indent=2) + "\n", encoding="utf-8")
         print("queued source CLI: PASS (text/PDF, scoped admission, atomic parent, cancellation/purge, OCR-off)"
               + ("; native OCR PASS" if args.native_ocr else "; native OCR not run")
-              + ("; v2/v3 binaries PASS" if args.previous_loom else "; previous binary not provided"))
+              + ("; v2/v4 binaries PASS" if args.previous_loom else "; v2 binary not provided")
+              + ("; v3/v4 binaries PASS" if args.previous_file_loom else "; v3 binary not provided"))
 
 
 if __name__ == "__main__":
