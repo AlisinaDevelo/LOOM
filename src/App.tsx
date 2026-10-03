@@ -696,8 +696,8 @@ function App() {
     } catch (caught) {
       setError(errorMessage(caught));
       setNotice(/\bOCR\b/i.test(errorMessage(caught))
-        ? "Capture requires local image OCR; review OCR settings and retry. No new capture was kept."
-        : "Capture stopped safely. Check Screen Recording permission or cancel the picker, then retry.");
+        ? "Capture requires local image OCR; review OCR settings and retry."
+        : "Capture stopped safely. Review the error, then retry.");
     } finally {
       setCaptureBusy(null);
     }

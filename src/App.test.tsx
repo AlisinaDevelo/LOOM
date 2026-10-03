@@ -231,7 +231,9 @@ describe("desktop truth path", () => {
     fireEvent.submit(screen.getByRole("search"));
 
     expect(await screen.findByRole("heading", { name: "Recovered sources" })).toBeInTheDocument();
-    expect(screen.getByRole("heading", { name: "Recovered sources" })).toHaveFocus();
+    await waitFor(() => {
+      expect(screen.getByRole("heading", { name: "Recovered sources" })).toHaveFocus();
+    });
     expect(screen.getByText("retry anomalies")).toBeInTheDocument();
     expect(screen.getByText("Why this matched")).toBeInTheDocument();
     expect(screen.getByText(hit.match_reason)).toBeInTheDocument();
@@ -912,7 +914,7 @@ describe("desktop truth path", () => {
     fireEvent.click(await screen.findByRole("button", { name: "Capture region" }));
     expect(await screen.findByRole("alert")).toHaveTextContent(reason);
     expect(screen.getByRole("status")).toHaveTextContent("Capture requires local image OCR");
-    expect(screen.getByRole("status")).toHaveTextContent("No new capture was kept.");
+    expect(screen.getByRole("status")).not.toHaveTextContent("No new capture was kept.");
     expect(screen.getByRole("status")).not.toHaveTextContent("Captured region");
     expect(screen.getByRole("status")).not.toHaveTextContent("Screen Recording permission");
   });

@@ -309,6 +309,8 @@ not part of the portable archive or a source identity.
 Image-containing scans additionally capture `ocr_enabled` and an opaque `ocr_policy_revision`
 from one SQLite snapshot. Each successful OCR commit requires that captured enabled policy;
 all request writes, including cleanup and checkpoints, compare its revision transactionally.
+The desktop capture error path does not perform canonical cleanup or unlink committed pixels;
+it reports their retained location for explicit user review/removal instead.
 Enable/disable, explicit OCR purge, and portable restore rotate the revision even if the boolean
 is unchanged or no OCR rows exist. An interrupted scan's discovery fingerprint includes the
 enabled state and revision, forcing a full restart after a policy change. A pure text/PDF scan
