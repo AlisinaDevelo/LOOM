@@ -800,8 +800,18 @@ impl Library {
     /// artifacts are no longer searchable or openable. Re-selection through the folder picker is
     /// the only path that re-enables the exact root.
     pub fn revoke_source_root(&self, locator: &str) -> Result<SourceRootInfo> {
+        self.revoke_source_root_with_probe(locator, || {})
+    }
+
+    // The probe is a private deterministic seam after lookup; production performs no extra work.
+    fn revoke_source_root_with_probe(
+        &self,
+        locator: &str,
+        after_lookup: impl FnOnce(),
+    ) -> Result<SourceRootInfo> {
         let mut connection = self.lock()?;
-        let transaction = connection.transaction()?;
+        let transaction =
+            connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         let exists: bool = transaction.query_row(
             "SELECT EXISTS(SELECT 1 FROM source_roots WHERE locator = ?1)",
             [locator],
@@ -812,6 +822,7 @@ impl Library {
                 "source root is not persisted: {locator}"
             )));
         }
+        after_lookup();
         transaction.execute(
             "UPDATE source_roots SET enabled = 0, scope_generation = scope_generation + 1,
                 last_seen_at = ?1 WHERE locator = ?2",
@@ -5759,6 +5770,45 @@ mod tests {
 
     use super::{Library, LibraryLimits};
     use crate::{ingest, EvidenceAnchor, LoomError, SearchRequest};
+
+    #[test]
+    fn source_revocation_reserves_writer_before_reading_consent() {
+        let temporary = tempdir().unwrap();
+        let source = temporary.path().join("selected.md");
+        fs::write(&source, "Revocation writer marker").unwrap();
+        let source = source.canonicalize().unwrap();
+        let database = temporary.path().join("library.sqlite3");
+        let library = Library::open(&database).unwrap();
+        library.index_path(&source).unwrap();
+        let mut contender = rusqlite::Connection::open(&database).unwrap();
+        contender.busy_timeout(std::time::Duration::ZERO).unwrap();
+        let revoked = library
+            .revoke_source_root_with_probe(source.to_str().unwrap(), || {
+                let transaction =
+                    contender.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate);
+                assert!(
+                    matches!(transaction,
+                Err(rusqlite::Error::SqliteFailure(error, _))
+                if error.code == rusqlite::ErrorCode::DatabaseBusy),
+                    "a second writer acquired a snapshot after revocation's consent lookup"
+                );
+            })
+            .unwrap();
+        assert!(!revoked.enabled);
+        assert!(library
+            .search(&SearchRequest {
+                text: "Revocation writer marker".into(),
+                limit: 5
+            })
+            .unwrap()
+            .is_empty());
+        // Revocation releases its reservation; no lock is leaked on successful completion.
+        contender
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .unwrap()
+            .commit()
+            .unwrap();
+    }
 
     #[test]
     fn staged_selection_cannot_undo_revocation_purge_restore_or_replacement() {
