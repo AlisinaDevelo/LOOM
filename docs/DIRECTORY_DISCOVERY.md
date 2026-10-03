@@ -88,3 +88,8 @@ CLI refusals with 33 nested directories, 4,096 child directories, 20,000 unsuppo
 checkpoint rows and
 macOS process peak RSS. All content is synthetic. The target-device runner includes this fixture.
 No private screenshot is captured; the existing OCR runner uses its rights-clean cropped region.
+
+The large-library performance harness indexes the existing 20,000-file generation shards as
+explicit disjoint roots into one library. Its version 2 report retains every batch receipt and
+aggregate full-library counts; discovery bounds remain unchanged. This measures a 100k library,
+not one 100k folder admission or durable background directory scheduling.

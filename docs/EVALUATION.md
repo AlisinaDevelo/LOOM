@@ -116,11 +116,21 @@ rights-clean real-world corpora and multilingual/layout studies remain future wo
 
 Issue 0207 has a device-reproducible scale harness at
 [`scripts/performance-budget.py`](../scripts/performance-budget.py). It generates a deterministic,
-rights-clean corpus at 10,000 and 100,000 artifacts (70% Markdown and 30% plain text), selects one
-corpus root explicitly, and invokes the in-process CLI performance command. The generator records
-its version, seed, shard shape, source bytes, query marker, and aggregate SHA-256 manifest; the
-100,000-file shape uses explicit `--max-files 100000` rather than changing the normal 20,000-file
-request boundary.
+rights-clean corpus at 10,000 and 100,000 artifacts (80% Markdown and 20% plain text), selects each
+disjoint generation shard explicitly, and invokes the in-process CLI performance command. The
+generator records its version, seed, shard shape, source bytes, query marker, and aggregate
+SHA-256 manifest; the
+100,000-artifact library uses five `--index-root` requests of at most 20,000 files each, in one
+process and one SQLite library. The normal file, entry, directory, path, payload and cooperative
+time bounds apply to every request; no discovery limit is raised to make the benchmark pass.
+The CLI's `--max-files` is per request and defaults to 20,000, not total library size.
+Explicit roots must be inside the canonical corpus, disjoint and nonduplicated (at most 4,096).
+Validation precedes opening SQLite. An indexing failure produces no performance summary, but
+already completed batches remain in that library: batching is not an atomic multi-root operation.
+Version 2 reports retain each selected root and its real indexing run ID/counts alongside the
+aggregate metrics; the harness rejects missing or incomplete batch receipts. This admission
+change must be accounted for when comparing older single-request measurements. It does not
+implement durable directory jobs, resumable enumeration or 100k background responsiveness.
 
 Run it on the target Mac after building `target/debug/loom`:
 
