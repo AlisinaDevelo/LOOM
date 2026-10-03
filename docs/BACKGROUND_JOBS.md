@@ -43,6 +43,9 @@ Ordinary opening does not migrate an existing runtime. Records, policy, sequence
 accounting survive upgrade; invalid legacy diagnostics roll back without dropping jobs.
 Unknown layouts are refused. Old binaries can still read canonical schema-10 evidence but must
 refuse v3 queue commands. Upgrade is operational, not a portable schema migration.
+The first shipped v3 target includes admission-time artifact identity; earlier development
+prototypes were not released as a separate supported runtime. A missing identity is not
+silently upgraded to the identity of existing evidence.
 
 ## Approved-file contract
 
@@ -77,6 +80,14 @@ Root purge also removes targeted jobs when no artifact exists. OCR purge removes
 This includes pending, running and terminal diagnostics, preventing resurrection and retained
 operational locators. Unknown runtime layouts block deletion before canonical changes commit;
 resolve the unsupported runtime rather than claiming a successful incomplete purge.
+Purge selectors do not match unrelated malformed targets that have no locator/identity;
+these remain inspectable, fail on dispatch, and can be explicitly forgotten once terminal.
+
+Mixed-version compatibility is canonical **read** compatibility, not a complete privacy-erasure
+guarantee. Older canonical-only binaries cannot remove v3 operational locators/diagnostics.
+Their artifact deletion still cancels previously admitted refreshes through the identity fence,
+but use the current binary's purge (or terminal-record forgetting) to erase those queue records.
+An older binary reporting a successful canonical purge does not prove v3 queue metadata is gone.
 
 Queued preparation limits extracted UTF-8 text to 2 MiB, PDF pages to 2,048, regions/passages
 to 8,192, warnings to 128/16 KiB and extractor metadata to 64 KiB. Passage settings require a

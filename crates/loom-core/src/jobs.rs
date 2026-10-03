@@ -366,12 +366,14 @@ pub(crate) fn purge_file_targets(
     validate_runtime_layout(connection)?;
     connection.execute(
         "DELETE FROM background_jobs WHERE operation='index_file' AND (
-            json_extract(target_json,'$.locator') IS ?1
-            OR json_extract(target_json,'$.authorization.root_id') IN
-                (SELECT id FROM source_roots WHERE locator=?1)
-            OR json_extract(target_json,'$.locator') IN
-                (SELECT locator FROM artifact_locators WHERE artifact_id=?2 AND kind='file')
-            OR json_extract(target_json,'$.artifact_id') = ?2
+            (?1 IS NOT NULL AND (
+                json_extract(target_json,'$.locator') = ?1
+                OR json_extract(target_json,'$.authorization.root_id') IN
+                    (SELECT id FROM source_roots WHERE locator=?1)))
+            OR (?2 IS NOT NULL AND (
+                json_extract(target_json,'$.locator') IN
+                    (SELECT locator FROM artifact_locators WHERE artifact_id=?2 AND kind='file')
+                OR json_extract(target_json,'$.artifact_id') = ?2))
             OR (?3=1 AND json_extract(target_json,'$.media_type') LIKE 'image/%'))",
         params![locator, artifact_id, images],
     )?;
@@ -1452,6 +1454,72 @@ mod tests {
         assert!(library.background_job(&second_job.id).is_err());
         assert_eq!(library.background_job(&first_job.id).unwrap(), first_job);
         assert_eq!(library.stats().unwrap().artifacts, 1);
+    }
+
+    #[test]
+    fn artifact_and_ocr_purges_preserve_unrelated_malformed_target_diagnostics() {
+        let (_directory, library, source) = file_fixture();
+        let original = fs::read(&source).unwrap();
+        let malformed = library
+            .enqueue_index_file(&source, "malformed-target-diagnostics", JobPriority::Normal)
+            .unwrap();
+        library
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE background_jobs SET target_json='{}' WHERE id=?1",
+                [&malformed.id],
+            )
+            .unwrap();
+        let malformed = library.background_job(&malformed.id).unwrap();
+        assert!(malformed.target_locator.is_none());
+        let matching = library
+            .enqueue_index_file(&source, "purge-matching-target", JobPriority::Normal)
+            .unwrap();
+        library
+            .purge_artifact(&file_identity(&library, &source).0)
+            .unwrap();
+        assert!(library.background_job(&matching.id).is_err());
+        assert_eq!(library.background_job(&malformed.id).unwrap(), malformed);
+        library.purge_ocr_records().unwrap();
+        assert_eq!(library.background_job(&malformed.id).unwrap(), malformed);
+        let failed = library
+            .acquire_job_worker()
+            .unwrap()
+            .run_next()
+            .unwrap()
+            .unwrap();
+        assert_eq!(failed.id, malformed.id);
+        assert_eq!(failed.state, JobState::Failed);
+        assert!(failed.target_locator.is_none());
+        assert_eq!(library.stats().unwrap().artifacts, 0);
+        assert_eq!(fs::read(source).unwrap(), original);
+    }
+
+    #[test]
+    fn missing_admission_artifact_identity_cannot_refresh_existing_evidence() {
+        let (_directory, library, source) = file_fixture();
+        let before = library.export_portable().unwrap().digest;
+        let job = library
+            .enqueue_index_file(&source, "missing-admission-identity", JobPriority::Normal)
+            .unwrap();
+        library
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE background_jobs SET target_json=json_remove(target_json,'$.artifact_id') WHERE id=?1",
+                [&job.id],
+            )
+            .unwrap();
+        let cancelled = library
+            .acquire_job_worker()
+            .unwrap()
+            .run_next()
+            .unwrap()
+            .unwrap();
+        assert_eq!(cancelled.id, job.id);
+        assert_eq!(cancelled.state, JobState::Cancelled);
+        assert_eq!(library.export_portable().unwrap().digest, before);
     }
 
     #[test]
