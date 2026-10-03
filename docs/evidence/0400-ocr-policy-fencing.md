@@ -14,7 +14,9 @@ The tested code head is `bc96b12ccd5d0037912c50d07fece84d7f8d5e76`, based on mer
 main `4ee54e6ae0c678fad6bbf9467f5b92f7dce27eda`. Core changes are in `94c4fd6`, capture
 cleanup in `3cd89a8`, Markdown tooling in `1cc5038`, and purge copy in `bc96b12`.
 The Rust tree was unchanged by the latter two commits; the final UI/build checks include them.
-Raw logs, including failed runs, are retained locally in `/tmp/loom-jobs-evidence.INpfja`.
+Raw logs, including failed runs, were recorded in `/tmp/loom-jobs-evidence.INpfja`.
+That scratch directory was observed missing during later approved-file verification on
+2026-10-03. The digests below record historical runs, not currently accessible raw logs.
 
 ## Contract and regression evidence
 

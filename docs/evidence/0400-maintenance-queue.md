@@ -35,7 +35,9 @@ are not yet adapters. The operational contract and limitations are in
 - Read-only live reconciliation: same counts, zero mutations and no warnings.
 
 CLI was built/staged separately before the desktop binary replaced `target/debug/loom`.
-Raw logs and binaries remain at `/tmp/loom-jobs-evidence.INpfja`.
+Raw logs and binaries were recorded at `/tmp/loom-jobs-evidence.INpfja`.
+That scratch directory was observed missing during later approved-file verification on
+2026-10-03. The digests below record historical runs, not currently accessible raw logs.
 
 ## Race, failure, and negative fixtures
 
