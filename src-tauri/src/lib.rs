@@ -520,37 +520,92 @@ fn commit_capture(capture_root: &Path, temporary: &Path) -> CommandResult<Commit
     })
 }
 
-/// Once committed, a content-addressed capture may belong to a newer indexing attempt. A failed
-/// worker must not purge its rows or unlink its pixels; removal requires the explicit user command.
-/// Serializes captures so committing, indexing, and discarding one capture never interleave with
-/// another. Captures are content-addressed: without this, discarding a failed new capture could
-/// remove the file an identical concurrent capture had just indexed.
-static CAPTURE_LOCK: Mutex<()> = Mutex::new(());
+/// Lock file that serializes capture commits across threads and app instances. Captures are
+/// content-addressed, so without it discarding a failed new capture could remove the file an
+/// identical concurrent capture (in this process or another LOOM instance) had just indexed.
+const CAPTURE_LOCK_FILE: &str = ".loom-capture.lock";
+/// A holder that crashed leaves the lock behind; one capture's commit and index take seconds.
+const STALE_CAPTURE_LOCK: std::time::Duration = std::time::Duration::from_secs(120);
 
-/// Explains a failed capture. A capture this call created is discarded so no unindexed pixels stay
-/// on disk; a duplicate belongs to an earlier capture, so its pixels are kept.
-fn capture_index_error(destination: &Path, reason: &str, discarded: bool) -> String {
-    if discarded {
-        format!("capture could not be indexed: {reason}. The new capture was discarded; nothing was kept")
-    } else {
-        format!(
-            "capture could not be indexed: {reason}. The earlier capture with identical pixels is kept at {}",
-            destination.display()
-        )
+struct CaptureStoreLock(PathBuf);
+
+impl Drop for CaptureStoreLock {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.0);
     }
 }
 
-/// Removes a capture this call created, with any rows its failed indexing left. Returns whether
-/// it was discarded; a duplicate is never touched.
-fn discard_new_capture(library: &Library, destination: &Path, duplicate: bool) -> bool {
+fn lock_capture_store(capture_root: &Path) -> CommandResult<CaptureStoreLock> {
+    let path = capture_root.join(CAPTURE_LOCK_FILE);
+    for _ in 0..500 {
+        match fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+        {
+            Ok(_) => return Ok(CaptureStoreLock(path)),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                let stale = fs::metadata(&path)
+                    .and_then(|metadata| metadata.modified())
+                    .ok()
+                    .and_then(|modified| std::time::SystemTime::now().duration_since(modified).ok())
+                    .is_some_and(|age| age > STALE_CAPTURE_LOCK);
+                if stale {
+                    let _ = fs::remove_file(&path);
+                } else {
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+            }
+            Err(error) => return Err(format!("capture storage is unavailable: {error}")),
+        }
+    }
+    Err("another capture is still being saved; try again".into())
+}
+
+/// What happened to a capture whose indexing failed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FailedCapture {
+    /// The capture was new, and its pixels and rows were removed.
+    Discarded,
+    /// The pixels belong to an earlier identical capture and were left alone.
+    KeptDuplicate,
+    /// Removing the rows failed, so the pixels were kept rather than orphaning them.
+    KeptAfterCleanupFailed,
+}
+
+fn capture_index_error(destination: &Path, reason: &str, outcome: FailedCapture) -> String {
+    match outcome {
+        FailedCapture::Discarded => format!(
+            "capture could not be indexed: {reason}. The new capture was discarded; nothing was kept"
+        ),
+        FailedCapture::KeptDuplicate => format!(
+            "capture could not be indexed: {reason}. The earlier capture with identical pixels is kept at {}",
+            destination.display()
+        ),
+        FailedCapture::KeptAfterCleanupFailed => format!(
+            "capture could not be indexed: {reason}. Its pixels are kept at {} because its records could not be removed; use Purge captures",
+            destination.display()
+        ),
+    }
+}
+
+/// Removes a capture this call created. Its rows are purged first, and the pixels are deleted
+/// only if that succeeded, so a failed cleanup never leaves rows pointing at a missing file. A
+/// duplicate is never touched.
+fn discard_new_capture(library: &Library, destination: &Path, duplicate: bool) -> FailedCapture {
     if duplicate {
-        return false;
+        return FailedCapture::KeptDuplicate;
     }
-    if let Ok(locator) = destination.canonicalize() {
-        let _ = library.purge_source_root(&locator.to_string_lossy());
+    let purged = destination.canonicalize().ok().is_some_and(|locator| {
+        library
+            .purge_source_root(&locator.to_string_lossy())
+            .is_ok()
+    });
+    if purged && fs::remove_file(destination).is_ok() {
+        FailedCapture::Discarded
+    } else {
+        FailedCapture::KeptAfterCleanupFailed
     }
-    let _ = fs::remove_file(destination);
-    !destination.exists()
 }
 
 fn capture_native_image(
@@ -565,9 +620,6 @@ fn capture_native_image(
     {
         return Err(loom_core::LoomError::OcrDisabled.to_string());
     }
-    let _serialized = CAPTURE_LOCK
-        .lock()
-        .map_err(|_| "capture lock is unavailable".to_string())?;
     fs::create_dir_all(capture_root)
         .map_err(|error| format!("capture storage is unavailable: {error}"))?;
     let temporary = capture_root.join(format!(".loom-capture-{}.png", uuid::Uuid::new_v4()));
@@ -579,6 +631,14 @@ fn capture_native_image(
             status.code().map_or_else(|| "unknown".into(), |code| code.to_string())
         ));
     }
+    // Held from commit through indexing and any discard; not while the interactive picker is open.
+    let _store_lock = match lock_capture_store(capture_root) {
+        Ok(lock) => lock,
+        Err(error) => {
+            let _ = fs::remove_file(&temporary);
+            return Err(error);
+        }
+    };
     let CommittedCapture {
         destination,
         content_hash,
@@ -593,11 +653,11 @@ fn capture_native_image(
     let index = match library.index_captured_image(&destination, &context) {
         Ok(index) => index,
         Err(error) => {
-            let discarded = discard_new_capture(library, &destination, duplicate);
+            let outcome = discard_new_capture(library, &destination, duplicate);
             return Err(capture_index_error(
                 &destination,
                 &error.to_string(),
-                discarded,
+                outcome,
             ));
         }
     };
@@ -612,8 +672,8 @@ fn capture_native_image(
                 .then(|| "one exact image result is required".to_string())
         });
     if let Some(reason) = failure {
-        let discarded = discard_new_capture(library, &destination, duplicate);
-        return Err(capture_index_error(&destination, &reason, discarded));
+        let outcome = discard_new_capture(library, &destination, duplicate);
+        return Err(capture_index_error(&destination, &reason, outcome));
     }
     Ok(CaptureReport {
         status: if duplicate || index.unchanged > 0 {
@@ -853,25 +913,65 @@ mod tests {
         // A failed duplicate never touches the earlier capture's pixels.
         let original_bytes = fs::read(&committed.destination).unwrap();
         let library = loom_core::Library::open_in_memory().unwrap();
-        let discarded = super::discard_new_capture(&library, &duplicate.destination, true);
-        assert!(!discarded);
+        let outcome = super::discard_new_capture(&library, &duplicate.destination, true);
+        assert_eq!(outcome, super::FailedCapture::KeptDuplicate);
         let error =
-            super::capture_index_error(&duplicate.destination, "OCR policy changed", discarded);
+            super::capture_index_error(&duplicate.destination, "OCR policy changed", outcome);
         assert!(error.contains("earlier capture with identical pixels is kept at"));
         assert!(error.contains(&duplicate.destination.to_string_lossy().to_string()));
         assert_eq!(fs::read(&committed.destination).unwrap(), original_bytes);
 
         // A failed new capture is discarded, so no unindexed pixels stay on disk.
-        let discarded = super::discard_new_capture(&library, &committed.destination, false);
-        assert!(discarded);
+        let outcome = super::discard_new_capture(&library, &committed.destination, false);
+        assert_eq!(outcome, super::FailedCapture::Discarded);
         let error = super::capture_index_error(
             &committed.destination,
             "index checkpoint is stale",
-            discarded,
+            outcome,
         );
         assert!(error.contains("index checkpoint is stale"));
         assert!(error.contains("discarded"));
         assert!(png_files(root.path()).is_empty());
+
+        // When cleanup cannot run, nothing is reported as discarded.
+        let outcome = super::discard_new_capture(&library, &committed.destination, false);
+        assert_eq!(outcome, super::FailedCapture::KeptAfterCleanupFailed);
+        assert!(
+            super::capture_index_error(&committed.destination, "x", outcome)
+                .contains("Purge captures")
+        );
+    }
+
+    #[test]
+    fn capture_store_lock_serializes_holders_and_reclaims_stale_locks() {
+        let root = tempfile::tempdir().unwrap();
+        let lock_path = root.path().join(super::CAPTURE_LOCK_FILE);
+        let first = super::lock_capture_store(root.path()).unwrap();
+        assert!(lock_path.exists());
+
+        let waiter_root = root.path().to_path_buf();
+        let waiter = std::thread::spawn(move || {
+            let started = std::time::Instant::now();
+            let _second = super::lock_capture_store(&waiter_root).unwrap();
+            started.elapsed()
+        });
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        drop(first);
+        assert!(waiter.join().unwrap() >= std::time::Duration::from_millis(150));
+        assert!(!lock_path.exists(), "dropping the lock removes the file");
+
+        // A lock left by a crashed instance is reclaimed once it is stale.
+        fs::write(&lock_path, b"").unwrap();
+        let old = std::time::SystemTime::now() - std::time::Duration::from_secs(600);
+        fs::File::options()
+            .write(true)
+            .open(&lock_path)
+            .unwrap()
+            .set_modified(old)
+            .unwrap();
+        let reclaimed = super::lock_capture_store(root.path()).unwrap();
+        drop(reclaimed);
+        assert!(!lock_path.exists());
     }
 
     #[test]
