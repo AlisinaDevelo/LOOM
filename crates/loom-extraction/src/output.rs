@@ -24,9 +24,26 @@ pub enum SourceOutput {
 }
 
 impl SourceOutput {
-    /// Validate helper-owned values before they become a canonical document.
+    /// Validate helper-owned values using the strict worker resource budget.
     pub fn validate(&self, media: MediaKind, budget: ExtractionBudget) -> Result<()> {
         budget.validate()?;
+        self.validate_with_limits(
+            media,
+            budget.max_pdf_pages as usize,
+            budget.max_image_pixels,
+        )
+    }
+
+    /// Validate output shape with the caller's explicit publication limits.
+    ///
+    /// The helper budget remains strict, while foreground indexing can retain its existing
+    /// configured PDF and 100M-pixel limits without weakening the worker's resource contract.
+    pub fn validate_with_limits(
+        &self,
+        media: MediaKind,
+        max_pdf_pages: usize,
+        max_image_pixels: u64,
+    ) -> Result<()> {
         let invalid = || ExtractionError::Protocol("invalid evidence geometry or media".into());
         match self {
             Self::Text { text } if matches!(media, MediaKind::Text | MediaKind::Markdown) => {
@@ -46,7 +63,7 @@ impl SourceOutput {
                 if *page_count == 0 || pages.len() != *page_count as usize {
                     return Err(invalid());
                 }
-                if *page_count > budget.max_pdf_pages {
+                if (*page_count as usize) > max_pdf_pages {
                     return Err(ExtractionError::OutputLimit);
                 }
                 let mut total = pages.len().saturating_sub(1) * 2;
@@ -81,7 +98,7 @@ impl SourceOutput {
                 if first.image_width == 0
                     || first.image_height == 0
                     || u64::from(first.image_width) * u64::from(first.image_height)
-                        > budget.max_image_pixels
+                        > max_image_pixels
                     || !(1..=8).contains(&first.orientation)
                     || first.scale_milli != 1000
                 {
@@ -148,6 +165,12 @@ fn invalid_text_controls(text: &str) -> bool {
 
 fn validate_warnings(warnings: &[String]) -> Result<()> {
     if warnings.len() > 128 || warnings.iter().map(String::len).sum::<usize>() > 16_384 {
+        return Err(ExtractionError::OutputLimit);
+    }
+    // The raw bound above also bounds this allocation, including JSON escaping.
+    let serialized = serde_json::to_vec(warnings)
+        .map_err(|_| ExtractionError::Protocol("invalid warning serialization".into()))?;
+    if serialized.len() > 16_384 {
         return Err(ExtractionError::OutputLimit);
     }
     Ok(())
@@ -442,6 +465,105 @@ mod tests {
         let mut altered = original;
         altered["regions"][0]["bounds"]["extra"] = serde_json::json!(1);
         assert!(serde_json::from_value::<SourceOutput>(altered).is_err());
+    }
+
+    #[test]
+    fn foreground_image_limit_can_exceed_the_strict_queue_budget() {
+        let output = SourceOutput::Image {
+            regions: vec![ocr::ImageOcrRegion {
+                text: "synthetic".into(),
+                confidence_milli: 900,
+                bounds: ocr::ImagePixelBounds {
+                    x: 0,
+                    y: 0,
+                    width: 1,
+                    height: 1,
+                },
+                char_start: 0,
+                char_end: 9,
+                line_start: 1,
+                line_end: 1,
+                image_width: 5_000,
+                image_height: 4_000,
+                orientation: 1,
+                scale_milli: 1_000,
+            }],
+            metadata: serde_json::json!({
+                "kind": "image_ocr", "provider_id": loom_ocr_macos::PROVIDER_ID,
+                "provider_version": loom_ocr_macos::PROVIDER_VERSION,
+                "model_version": format!("{}3", loom_ocr_macos::MODEL_FAMILY),
+                "language": "auto", "image_width": 5_000, "image_height": 4_000,
+                "encoded_width": 5_000, "encoded_height": 4_000, "orientation": 1,
+                "scale_milli": 1_000, "region_count": 1, "confidence_threshold_milli": 800,
+                "low_confidence_regions": 0, "confidence_state": "confirmed"
+            }),
+            warnings: vec![],
+        };
+        let budget = ExtractionBudget::for_media(MediaKind::Png);
+
+        assert!(output.validate(MediaKind::Png, budget).is_err());
+        output
+            .validate_with_limits(MediaKind::Png, 2_048, 100_000_000)
+            .unwrap();
+    }
+
+    #[test]
+    fn shared_text_limit_counts_utf8_bytes_and_preserves_the_exact_boundary() {
+        let accepted = SourceOutput::Text {
+            text: "é".repeat(MAX_TEXT_BYTES / 2),
+        };
+        let budget = ExtractionBudget::for_media(MediaKind::Text);
+        accepted.validate(MediaKind::Text, budget).unwrap();
+        accepted
+            .validate_with_limits(MediaKind::Text, 2_048, 100_000_000)
+            .unwrap();
+        let rejected = SourceOutput::Text {
+            text: format!("{}x", "é".repeat(MAX_TEXT_BYTES / 2)),
+        };
+        assert_eq!(
+            rejected.validate(MediaKind::Text, budget),
+            Err(ExtractionError::OutputLimit)
+        );
+        assert_eq!(
+            rejected.validate_with_limits(MediaKind::Text, 2_048, 100_000_000),
+            Err(ExtractionError::OutputLimit)
+        );
+        let mut invalid_worker_budget = budget;
+        invalid_worker_budget.max_image_pixels = 100_000_000;
+        assert!(accepted
+            .validate(MediaKind::Text, invalid_worker_budget)
+            .is_err());
+    }
+
+    #[test]
+    fn warning_limits_include_serialized_json_escaping_and_overhead() {
+        let budget = ExtractionBudget::for_media(MediaKind::Pdf);
+        for warning in ["ordinary warning".to_string(), "x".repeat(16_380)] {
+            let output = SourceOutput::Pdf {
+                page_count: 1,
+                pages: vec![(1, "evidence".into())],
+                warnings: vec![warning],
+            };
+            output.validate(MediaKind::Pdf, budget).unwrap();
+            output
+                .validate_with_limits(MediaKind::Pdf, 2_048, 100_000_000)
+                .unwrap();
+        }
+        for warning in ["x".repeat(16_381), "\u{0}".repeat(3_000)] {
+            let output = SourceOutput::Pdf {
+                page_count: 1,
+                pages: vec![(1, "evidence".into())],
+                warnings: vec![warning],
+            };
+            assert_eq!(
+                output.validate(MediaKind::Pdf, budget),
+                Err(ExtractionError::OutputLimit)
+            );
+            assert_eq!(
+                output.validate_with_limits(MediaKind::Pdf, 2_048, 100_000_000),
+                Err(ExtractionError::OutputLimit)
+            );
+        }
     }
 
     #[test]

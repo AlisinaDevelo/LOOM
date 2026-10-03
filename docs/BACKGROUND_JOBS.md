@@ -44,6 +44,13 @@ Ordinary opening does not migrate an existing runtime. Records, policy, sequence
 accounting survive upgrade; invalid legacy diagnostics roll back without dropping jobs.
 Unknown layouts are refused. Old binaries can still read canonical schema-10 evidence but must
 refuse v4 queue commands. Upgrade is operational, not a portable schema migration.
+Artifact/root/OCR deletion applies the same recovery gate: validated v2 or unversioned legacy
+runtimes contain no file targets and may continue, while a recognized v3 runtime must complete
+the owned upgrade before deletion. An unknown future marker or malformed current layout/state
+requires a compatible LOOM release or reviewed migration. The deletion transaction fails closed before
+canonical changes and reports that no data was deleted. Future-compatible erasure is an unresolved
+design gate; no binary may claim complete deletion until it has a reviewed mapping for that
+runtime's operational locators and diagnostics.
 The first shipped v3 target includes admission-time artifact identity; earlier development
 prototypes were not released as a separate supported runtime. A missing identity is not
 silently upgraded to the identity of existing evidence. Explicit `null` records absence at
@@ -87,8 +94,13 @@ missing-source behavior. This does not enroll foreground work in the queue or bo
 Artifact purge removes jobs for its exact file locators, not other artifacts sharing its root.
 Root purge also removes targeted jobs when no artifact exists. OCR purge removes image targets.
 This includes pending, running and terminal diagnostics, preventing resurrection and retained
-operational locators. Unknown runtime layouts block deletion before canonical changes commit;
-resolve the unsupported runtime rather than claiming a successful incomplete purge.
+operational locators. Unsupported or malformed runtime layouts block the complete deletion
+transaction before canonical changes commit; the actionable failure says that no data was deleted
+and names the compatible-release/owned-migration recovery gate. Resolve the runtime before
+claiming a successful purge; this is application-level deletion, not secure erasure.
+Current-runtime deletion requires exactly one slot-1 runtime row, a nonnegative epoch,
+a positive sequence and a 0–8 priority streak. Exhausted counters remain deletable;
+malformed scheduling policy alone does not block a structurally valid runtime's deletion.
 Purge selectors do not match unrelated malformed targets that have no locator/identity;
 these remain inspectable, fail on dispatch, and can be explicitly forgotten once terminal.
 
@@ -99,9 +111,10 @@ but use the current binary's purge (or terminal-record forgetting) to erase thos
 An older binary reporting a successful canonical purge does not prove v3 queue metadata is gone.
 
 Queued preparation limits extracted UTF-8 text to 2 MiB, PDF pages to 2,048, regions/passages
-to 8,192, warnings to 128/16 KiB and extractor metadata to 64 KiB. Passage settings require a
-minimum 256-character target-minus-overlap gap. JSON size checking does not allocate an
-unbounded serialized copy. These are **post-provider publication limits**, not proof of native
+to 8,192, warnings to 128 entries/16 KiB serialized JSON and extractor metadata to 64 KiB.
+Passage settings require a minimum 256-character target-minus-overlap gap. JSON size checking
+does not allocate an unbounded serialized copy. These are **post-provider publication limits**,
+not proof of native
 parser/OCR peak-memory guarantees by themselves. Queued providers now run in a one-shot
 `loom-extractor` process with finite wall/CPU/input/output/address-space budgets and sampled
 resident/physical-footprint enforcement. See [the process boundary](EXTRACTION_PROCESS.md)

@@ -20,6 +20,12 @@ cargo build --locked -p loom-extraction --bin loom-extractor
 cargo test --workspace --locked
 ~~~
 
+`cargo test --locked -p loom-core` also works without a production extractor prebuild:
+Cargo provisions the named test fixture, which uses the real extraction protocol. Keep the
+package's integration targets selected (do not add `--lib` to a clean focused invocation).
+This does not install or select a helper for the application; CLI installation still needs
+the explicit production build above.
+
 For retrieval changes, also run the rights-clean smoke fixture:
 
 ~~~text

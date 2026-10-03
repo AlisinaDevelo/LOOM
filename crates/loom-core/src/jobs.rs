@@ -339,6 +339,32 @@ pub(crate) fn reset_for_restore(connection: &Connection) -> Result<()> {
     Ok(())
 }
 
+fn purge_runtime_recovery_error() -> LoomError {
+    LoomError::JobQueue(
+        "deletion refused: no data was deleted because the durable job runtime is unsupported or malformed; use a compatible LOOM release or run the owned upgrade-job-runtime migration before retrying".into(),
+    )
+}
+
+fn validate_purge_runtime_row(connection: &Connection) -> Result<()> {
+    // Validate structural state, not scheduling policy: corrupt policy must not block deletion.
+    let state: Option<(i64, i64, i64)> = connection
+        .query_row(
+            "SELECT epoch, next_sequence, priority_streak FROM background_job_runtime
+             WHERE slot=1 AND (SELECT COUNT(*) FROM
+                (SELECT slot FROM background_job_runtime LIMIT 2))=1",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .optional()?;
+    if state.is_some_and(|(epoch, sequence, streak)| {
+        epoch >= 0 && sequence >= 1 && (0..=8).contains(&streak)
+    }) {
+        Ok(())
+    } else {
+        Err(purge_runtime_recovery_error())
+    }
+}
+
 /// Purge must also remove bounded operational locators/diagnostics and invalidate running claims.
 /// Known older runtimes contain no file targets; never silently migrate them during deletion.
 pub(crate) fn purge_file_targets(
@@ -353,21 +379,26 @@ pub(crate) fn purge_file_targets(
             [],
             |row| row.get(0),
         )
-        .optional()?;
-    if !matches!(version.as_deref(), Some("3" | "4")) {
+        .optional()
+        .map_err(|_| purge_runtime_recovery_error())?;
+    if version.as_deref() == Some("3") {
+        return Err(purge_runtime_recovery_error());
+    }
+    if version.as_deref() != Some("4") {
         if version.as_deref() == Some("2") {
-            validate_definitions(connection, RUNTIME_SCHEMA)?;
+            validate_definitions(connection, RUNTIME_SCHEMA)
+                .map_err(|_| purge_runtime_recovery_error())?;
         } else if version.is_none() {
             validate_definitions(connection, &legacy_runtime_schema())
-                .or_else(|_| validate_definitions(connection, RUNTIME_SCHEMA))?;
+                .or_else(|_| validate_definitions(connection, RUNTIME_SCHEMA))
+                .map_err(|_| purge_runtime_recovery_error())?;
         } else {
-            return Err(LoomError::JobQueue(
-                "purge refuses an unsupported runtime layout".into(),
-            ));
+            return Err(purge_runtime_recovery_error());
         }
         return Ok(());
     }
-    validate_runtime_layout(connection)?;
+    validate_runtime_layout(connection).map_err(|_| purge_runtime_recovery_error())?;
+    validate_purge_runtime_row(connection).map_err(|_| purge_runtime_recovery_error())?;
     connection.execute(
         "DELETE FROM background_jobs WHERE operation='index_file' AND (
             (?1 IS NOT NULL AND (
@@ -1253,16 +1284,25 @@ mod tests {
         (directory, library)
     }
 
-    // Unit race/state fixtures use the real helper, staged explicitly before cargo test.
-    // They never silently fall back to an in-process provider.
+    // Unit race/state fixtures use the Cargo-managed test helper. The
+    // extractor_helper integration test makes Cargo build it in this target
+    // directory/profile; never search PATH or fall back to an in-process
+    // provider.
     fn test_extractor_path() -> std::path::PathBuf {
-        std::env::current_exe()
+        let helper_name = format!("loom-core-test-extractor{}", std::env::consts::EXE_SUFFIX);
+        let path = std::env::current_exe()
             .unwrap()
             .parent()
             .unwrap()
             .parent()
             .unwrap()
-            .join("loom-extractor")
+            .join(helper_name);
+        assert!(
+            path.is_file(),
+            "Cargo did not build the core test extractor at {}; run cargo test -p loom-core without --lib",
+            path.display()
+        );
+        path
     }
 
     fn test_extractor() -> loom_extraction::ExtractionSupervisor {
@@ -2216,27 +2256,390 @@ mod tests {
     }
 
     #[test]
-    fn unsupported_runtime_blocks_purge_without_partial_canonical_deletion() {
+    fn invalid_scheduling_policy_does_not_block_known_layout_deletion() {
         let (_directory, library, source) = file_fixture();
         library
-            .enqueue_index_file(&source, "retain-unknown-runtime", JobPriority::Normal)
+            .enqueue_index_file(&source, "delete-despite-policy", JobPriority::Normal)
             .unwrap();
-        let before = library.export_portable().unwrap().digest;
-        library.lock().unwrap().execute("UPDATE schema_meta SET value='future-runtime' WHERE key='background_job_schema_version'", []).unwrap();
-        assert!(library
-            .purge_artifact(&file_identity(&library, &source).0)
-            .is_err());
-        assert!(library.purge_root(source.to_str().unwrap()).is_err());
-        assert_eq!(library.export_portable().unwrap().digest, before);
-        assert_eq!(
-            library
+        let artifact = file_identity(&library, &source).0;
+        library
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE background_job_runtime SET policy_json='invalid-policy' WHERE slot=1",
+                [],
+            )
+            .unwrap();
+        library.purge_artifact(&artifact).unwrap();
+        assert_eq!(library.stats().unwrap().artifacts, 0);
+        let retained: i64 = library
+            .lock()
+            .unwrap()
+            .query_row("SELECT COUNT(*) FROM background_jobs", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(retained, 0);
+    }
+
+    #[test]
+    fn exhausted_runtime_counters_do_not_block_known_layout_deletion() {
+        let (_directory, library, source) = file_fixture();
+        library
+            .enqueue_index_file(&source, "delete-exhausted-runtime", JobPriority::Normal)
+            .unwrap();
+        let artifact = file_identity(&library, &source).0;
+        library
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE background_job_runtime SET epoch=?1, next_sequence=?1, priority_streak=8 WHERE slot=1",
+                [i64::MAX],
+            )
+            .unwrap();
+        library.purge_artifact(&artifact).unwrap();
+        assert_eq!(library.stats().unwrap().artifacts, 0);
+        let retained: i64 = library
+            .lock()
+            .unwrap()
+            .query_row("SELECT COUNT(*) FROM background_jobs", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(retained, 0);
+    }
+
+    fn assert_purge_runtime_recovery(error: LoomError, raw_fixture_marker: &str) {
+        let reason = match error {
+            LoomError::JobQueue(reason) => reason,
+            other => panic!("expected a bounded queue diagnostic, got {other:?}"),
+        };
+        assert!(reason.contains("no data was deleted"), "{reason}");
+        assert!(reason.contains("compatible LOOM release"), "{reason}");
+        assert!(reason.contains("upgrade-job-runtime"), "{reason}");
+        assert!(
+            !reason.contains(raw_fixture_marker),
+            "diagnostic must not reflect fixture details: {reason}"
+        );
+    }
+
+    fn raw_job(library: &Library, id: &str) -> BackgroundJob {
+        let connection = library.lock().unwrap();
+        get_job(&connection, id).unwrap()
+    }
+
+    fn corrupt_runtime_row(library: &Library, fixture: &str) {
+        let sql = match fixture {
+            "missing-row" => "DELETE FROM background_job_runtime",
+            "invalid-epoch" => "UPDATE background_job_runtime SET epoch=-1",
+            "invalid-sequence" => "UPDATE background_job_runtime SET next_sequence=0",
+            "invalid-streak" => "UPDATE background_job_runtime SET priority_streak=9",
+            "extra-row" => "INSERT INTO background_job_runtime SELECT 2, epoch, next_sequence, priority_streak, policy_json FROM background_job_runtime WHERE slot=1",
+            _ => unreachable!(),
+        };
+        let connection = library.lock().unwrap();
+        // Fixture-only corruption keeps the exact STRICT schema definition intact.
+        connection
+            .execute_batch("PRAGMA ignore_check_constraints=ON")
+            .unwrap();
+        connection.execute(sql, []).unwrap();
+        connection
+            .execute_batch("PRAGMA ignore_check_constraints=OFF")
+            .unwrap();
+    }
+
+    fn raw_runtime_rows(library: &Library) -> Vec<(i64, i64, i64, i64, String)> {
+        let connection = library.lock().unwrap();
+        let mut statement = connection
+            .prepare("SELECT slot, epoch, next_sequence, priority_streak, policy_json FROM background_job_runtime ORDER BY slot")
+            .unwrap();
+        statement
+            .query_map([], |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                ))
+            })
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap()
+    }
+
+    #[test]
+    fn unsupported_or_malformed_runtime_blocks_purge_without_partial_deletion() {
+        for fixture in [
+            "future",
+            "v3",
+            "malformed",
+            "missing-row",
+            "invalid-epoch",
+            "invalid-sequence",
+            "invalid-streak",
+            "extra-row",
+        ] {
+            let (_directory, library, source) = file_fixture();
+            let job = library
+                .enqueue_index_file(&source, "retain-runtime-fixture", JobPriority::Normal)
+                .unwrap();
+            let artifact = file_identity(&library, &source).0;
+            let before_digest = library.export_portable().unwrap().digest;
+            let before_roots = library.source_roots().unwrap();
+            let before_job = raw_job(&library, &job.id);
+            let before_payload: String = library
                 .lock()
                 .unwrap()
-                .query_row("SELECT COUNT(*) FROM background_jobs", [], |row| row
-                    .get::<_, i64>(0))
-                .unwrap(),
-            1
-        );
+                .query_row(
+                    "SELECT target_json FROM background_jobs WHERE id=?1",
+                    [&job.id],
+                    |row| row.get(0),
+                )
+                .unwrap();
+
+            let raw_marker = match fixture {
+                "future" => {
+                    library
+                        .lock()
+                        .unwrap()
+                        .execute(
+                            "UPDATE schema_meta SET value='future-runtime-marker' WHERE key='background_job_schema_version'",
+                            [],
+                        )
+                        .unwrap();
+                    "future-runtime-marker"
+                }
+                "v3" => {
+                    library
+                        .lock()
+                        .unwrap()
+                        .execute(
+                            "UPDATE schema_meta SET value='3' WHERE key='background_job_schema_version'",
+                            [],
+                        )
+                        .unwrap();
+                    "3"
+                }
+                "malformed" => {
+                    library
+                        .lock()
+                        .unwrap()
+                        .execute(
+                            "ALTER TABLE background_jobs ADD COLUMN unexpected_fixture TEXT",
+                            [],
+                        )
+                        .unwrap();
+                    "unexpected_fixture"
+                }
+                _ => {
+                    corrupt_runtime_row(&library, fixture);
+                    fixture
+                }
+            };
+            let before_runtime = raw_runtime_rows(&library);
+
+            assert_purge_runtime_recovery(
+                library.purge_artifact(&artifact).unwrap_err(),
+                raw_marker,
+            );
+            assert_eq!(library.export_portable().unwrap().digest, before_digest);
+            assert_eq!(library.source_roots().unwrap(), before_roots);
+            assert_eq!(raw_job(&library, &job.id), before_job);
+            assert_eq!(raw_runtime_rows(&library), before_runtime);
+            assert_eq!(
+                library
+                    .lock()
+                    .unwrap()
+                    .query_row(
+                        "SELECT target_json FROM background_jobs WHERE id=?1",
+                        [&job.id],
+                        |row| row.get::<_, String>(0),
+                    )
+                    .unwrap(),
+                before_payload
+            );
+
+            assert_purge_runtime_recovery(
+                library.purge_root(source.to_str().unwrap()).unwrap_err(),
+                raw_marker,
+            );
+            assert_eq!(library.export_portable().unwrap().digest, before_digest);
+            assert_eq!(library.source_roots().unwrap(), before_roots);
+            assert_eq!(raw_job(&library, &job.id), before_job);
+            assert_eq!(raw_runtime_rows(&library), before_runtime);
+        }
+    }
+
+    fn insert_synthetic_ocr_derivative(library: &Library, source: &Path) {
+        let (artifact_id, _) = file_identity(library, source);
+        let version_id = Uuid::new_v4().to_string();
+        let now = Utc::now().to_rfc3339();
+        let mut connection = library.lock().unwrap();
+        let transaction = connection.transaction().unwrap();
+        transaction
+            .execute(
+                "INSERT INTO artifact_versions(
+                    id, artifact_id, content_hash, hash_algorithm, byte_size, source_modified_ns,
+                    extractor_id, extractor_version, parse_warnings_json, page_count,
+                    extraction_metadata_json, status, created_at
+                 ) VALUES (?1, ?2, ?3, 'blake3', 12, NULL, ?4, ?5, '[]', NULL, '{}', 'ready', ?6)",
+                params![
+                    version_id,
+                    artifact_id,
+                    "blake3:synthetic-ocr-purge",
+                    crate::ocr::IMAGE_OCR_EXTRACTOR_ID,
+                    crate::ocr::IMAGE_OCR_EXTRACTOR_VERSION,
+                    now,
+                ],
+            )
+            .unwrap();
+        transaction
+            .execute(
+                "INSERT INTO passages(
+                    id, artifact_version_id, ordinal, text, text_hash, locator_json,
+                    char_start, char_end, line_start, line_end, created_at
+                 ) VALUES (?1, ?2, 0, 'synthetic OCR derivative', 'blake3:synthetic-ocr-passage', '{\"kind\":\"text\",\"char_start\":0,\"char_end\":23,\"line_start\":1,\"line_end\":1}', 0, 23, 1, 1, ?3)",
+                params![Uuid::new_v4().to_string(), version_id, now],
+            )
+            .unwrap();
+        transaction.commit().unwrap();
+    }
+
+    fn synthetic_ocr_rows(library: &Library) -> Vec<(String, String, String)> {
+        let connection = library.lock().unwrap();
+        let mut statement = connection
+            .prepare(
+                "SELECT id, content_hash, extractor_version FROM artifact_versions
+                 WHERE extractor_id=?1 ORDER BY id",
+            )
+            .unwrap();
+        statement
+            .query_map([crate::ocr::IMAGE_OCR_EXTRACTOR_ID], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+            })
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap()
+    }
+
+    #[test]
+    fn unsupported_runtime_blocks_ocr_policy_and_derived_purges_without_changes() {
+        for fixture in [
+            "future",
+            "v3",
+            "malformed",
+            "missing-row",
+            "invalid-epoch",
+            "invalid-sequence",
+            "invalid-streak",
+            "extra-row",
+        ] {
+            for disable in [false, true] {
+                let (_directory, library, source) = file_fixture();
+                insert_synthetic_ocr_derivative(&library, &source);
+                let job = library
+                    .enqueue_index_file(&source, "retain-ocr-runtime", JobPriority::Normal)
+                    .unwrap();
+                let before_digest = library.export_portable().unwrap().digest;
+                let before_roots = library.source_roots().unwrap();
+                let before_ocr = library.ocr_status().unwrap();
+                let before_ocr_rows = synthetic_ocr_rows(&library);
+                let before_ocr_revision: String = library
+                    .lock()
+                    .unwrap()
+                    .query_row(
+                        "SELECT value FROM schema_meta WHERE key='ocr_policy_revision'",
+                        [],
+                        |row| row.get(0),
+                    )
+                    .unwrap();
+                let before_job = raw_job(&library, &job.id);
+                let before_payload: String = library
+                    .lock()
+                    .unwrap()
+                    .query_row(
+                        "SELECT target_json FROM background_jobs WHERE id=?1",
+                        [&job.id],
+                        |row| row.get(0),
+                    )
+                    .unwrap();
+
+                let raw_marker = match fixture {
+                    "future" => {
+                        library
+                            .lock()
+                            .unwrap()
+                            .execute(
+                                "UPDATE schema_meta SET value='future-ocr-runtime-marker' WHERE key='background_job_schema_version'",
+                                [],
+                            )
+                            .unwrap();
+                        "future-ocr-runtime-marker"
+                    }
+                    "v3" => {
+                        library
+                            .lock()
+                            .unwrap()
+                            .execute(
+                                "UPDATE schema_meta SET value='3' WHERE key='background_job_schema_version'",
+                                [],
+                            )
+                            .unwrap();
+                        "3"
+                    }
+                    "malformed" => {
+                        library
+                            .lock()
+                            .unwrap()
+                            .execute(
+                                "ALTER TABLE background_jobs ADD COLUMN unexpected_ocr_fixture TEXT",
+                                [],
+                            )
+                            .unwrap();
+                        "unexpected_ocr_fixture"
+                    }
+                    _ => {
+                        corrupt_runtime_row(&library, fixture);
+                        fixture
+                    }
+                };
+                let before_runtime = raw_runtime_rows(&library);
+
+                let result = if disable {
+                    library.set_ocr_enabled(false).map(|_| ())
+                } else {
+                    library.purge_ocr_records().map(|_| ())
+                };
+                assert_purge_runtime_recovery(result.unwrap_err(), raw_marker);
+                assert_eq!(library.export_portable().unwrap().digest, before_digest);
+                assert_eq!(library.source_roots().unwrap(), before_roots);
+                assert_eq!(library.ocr_status().unwrap(), before_ocr);
+                assert_eq!(synthetic_ocr_rows(&library), before_ocr_rows);
+                assert_eq!(
+                    library
+                        .lock()
+                        .unwrap()
+                        .query_row(
+                            "SELECT value FROM schema_meta WHERE key='ocr_policy_revision'",
+                            [],
+                            |row| row.get::<_, String>(0),
+                        )
+                        .unwrap(),
+                    before_ocr_revision
+                );
+                assert_eq!(raw_job(&library, &job.id), before_job);
+                assert_eq!(raw_runtime_rows(&library), before_runtime);
+                assert_eq!(
+                    library
+                        .lock()
+                        .unwrap()
+                        .query_row(
+                            "SELECT target_json FROM background_jobs WHERE id=?1",
+                            [&job.id],
+                            |row| row.get::<_, String>(0),
+                        )
+                        .unwrap(),
+                    before_payload
+                );
+            }
+        }
     }
 
     #[test]

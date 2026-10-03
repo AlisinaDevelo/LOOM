@@ -100,6 +100,14 @@ class CiContractTests(unittest.TestCase):
         self.assertIn("cargo build --locked -q -p loom-cli -p loom-extraction --bins", DEVICE)
         self.assertIn('cp "$ROOT/target/debug/loom-extractor" "$EVIDENCE_DIR/loom-extractor"', DEVICE)
         self.assertIn('run_step queued-responsiveness env LOOM_TEST_RESPONSE_REPORT=', DEVICE)
+        self.assertIn(
+            'cargo test --locked -p loom-core jobs::tests::persistent_retrieval_during_native_queued_ocr',
+            DEVICE,
+        )
+        self.assertNotIn(
+            'cargo test --locked -p loom-core --lib jobs::tests::persistent_retrieval_during_native_queued_ocr',
+            DEVICE,
+        )
         self.assertIn('jobs::tests::persistent_retrieval_during_native_queued_ocr -- --exact --nocapture', DEVICE)
 
 
