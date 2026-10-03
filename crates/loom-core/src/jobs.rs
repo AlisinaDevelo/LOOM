@@ -240,7 +240,7 @@ fn validate_definitions(connection: &Connection, schema: &str) -> Result<()> {
 }
 
 /// Runtime version and definitions are independent of portable canonical schema.
-pub(crate) fn validate_schema(connection: &Connection) -> Result<()> {
+fn validate_runtime_layout(connection: &Connection) -> Result<()> {
     let version: Option<String> = connection
         .query_row(
             "SELECT value FROM schema_meta WHERE key = 'background_job_schema_version'",
@@ -255,6 +255,11 @@ pub(crate) fn validate_schema(connection: &Connection) -> Result<()> {
         ));
     }
     validate_definitions(connection, RUNTIME_SCHEMA)?;
+    Ok(())
+}
+
+pub(crate) fn validate_schema(connection: &Connection) -> Result<()> {
+    validate_runtime_layout(connection)?;
     load_policy(connection)?;
     Ok(())
 }
@@ -332,14 +337,20 @@ fn get_job(connection: &Connection, id: &str) -> Result<BackgroundJob> {
 }
 
 impl Library {
+    fn queue_connection(&self) -> Result<std::sync::MutexGuard<'_, Connection>> {
+        let connection = self.lock()?;
+        validate_runtime_layout(&connection)?;
+        Ok(connection)
+    }
+
     pub fn job_queue_policy(&self) -> Result<JobQueuePolicy> {
-        load_policy(&*self.lock()?)
+        load_policy(&*self.queue_connection()?)
     }
 
     /// Policy changes require no pending work and cannot lower the retained-record bound below use.
     pub fn set_job_queue_policy(&self, policy: JobQueuePolicy) -> Result<()> {
         let policy = policy.validate()?;
-        let mut connection = self.lock()?;
+        let mut connection = self.queue_connection()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let (records, pending): (u32, u32) = transaction.query_row(
             "SELECT COUNT(*), COALESCE(SUM(state IN ('queued','running','retryable')),0) FROM background_jobs",
@@ -369,7 +380,7 @@ impl Library {
                 "idempotency key must be 1–128 ASCII identifier bytes".into(),
             ));
         }
-        let mut connection = self.lock()?;
+        let mut connection = self.queue_connection()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let existing: Option<String> = transaction
             .query_row(
@@ -409,11 +420,11 @@ impl Library {
     }
 
     pub fn background_job(&self, id: &str) -> Result<BackgroundJob> {
-        get_job(&*self.lock()?, id)
+        get_job(&*self.queue_connection()?, id)
     }
 
     pub fn background_jobs(&self, limit: u32) -> Result<Vec<BackgroundJob>> {
-        let mut connection = self.lock()?;
+        let mut connection = self.queue_connection()?;
         let transaction = connection.transaction()?;
         let ids = {
             let mut statement = transaction
@@ -428,7 +439,7 @@ impl Library {
 
     /// Running cancellation is durable and acknowledged at the worker's next transaction boundary.
     pub fn cancel_background_job(&self, id: &str) -> Result<BackgroundJob> {
-        let mut connection = self.lock()?;
+        let mut connection = self.queue_connection()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         get_job(&transaction, id)?;
         transaction.execute(
@@ -444,7 +455,7 @@ impl Library {
 
     /// Explicitly forgets a terminal diagnostic record and its deduplication key. Never evicts work.
     pub fn forget_background_job(&self, id: &str) -> Result<BackgroundJob> {
-        let mut connection = self.lock()?;
+        let mut connection = self.queue_connection()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let job = get_job(&transaction, id)?;
         if !matches!(
@@ -1093,6 +1104,19 @@ mod tests {
                 |row| row.get::<_, bool>(0)
             )
             .unwrap());
+        drop(connection);
+        assert!(opened
+            .enqueue_fts_repair("must-not-admit", JobPriority::Normal)
+            .is_err());
+        assert!(opened.background_job(&job.id).is_err());
+        assert!(opened.background_jobs(128).is_err());
+        assert!(opened.cancel_background_job(&job.id).is_err());
+        assert!(opened.forget_background_job(&job.id).is_err());
+        assert!(opened.job_queue_policy().is_err());
+        assert!(opened
+            .set_job_queue_policy(JobQueuePolicy::default())
+            .is_err());
+        assert!(opened.stats().is_ok());
     }
 
     #[test]
