@@ -1499,11 +1499,9 @@ mod tests {
     fn provider_unavailability_is_failure_not_consent_cancellation_and_does_not_publish() {
         let (_directory, library, source) = file_fixture();
         let before = library.export_portable().unwrap().digest;
-        fs::write(
-            &source,
-            "Never publish this private-synthetic provider failure.",
-        )
-        .unwrap();
+        // An early rejecting helper never drains stdin. Fill more than a pipe can
+        // buffer so the request writer deterministically observes its shutdown.
+        fs::write(&source, vec![b'p'; loom_extraction::MAX_INPUT_BYTES]).unwrap();
         library
             .enqueue_index_file(&source, "provider-unavailable", JobPriority::Normal)
             .unwrap();

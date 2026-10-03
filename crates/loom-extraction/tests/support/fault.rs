@@ -8,6 +8,7 @@ fn response(body: &[u8]) {
     frame.extend((body.len() as u32).to_le_bytes());
     frame.extend(body);
     io::stdout().write_all(&frame).unwrap();
+    io::stdout().flush().unwrap();
 }
 
 fn main() {
@@ -49,12 +50,23 @@ fn main() {
             io::stdout().flush().unwrap();
             std::thread::sleep(Duration::from_secs(10));
         }
-        "unavailable" => {
+        "unavailable" | "unavailable-crash" | "unavailable-trailing" | "unavailable-hang" => {
             response(br#"{"kind":"failure","code":"ocr_unavailable"}"#);
+            if MODE == "unavailable-crash" {
+                std::process::exit(23);
+            }
+            if MODE == "unavailable-trailing" {
+                io::stdout().write_all(b"x").unwrap();
+            }
+            if MODE == "unavailable-hang" {
+                std::thread::sleep(Duration::from_secs(10));
+            }
         }
         "metrics-wall" | "metrics-cpu" | "metrics-memory" | "metrics-guard"
-        | "metrics-interval" | "metrics-zero" | "media-mismatch" => {
-            io::stdin().read_to_end(&mut Vec::new()).unwrap();
+        | "metrics-interval" | "metrics-zero" | "media-mismatch" | "early-success" => {
+            if MODE != "early-success" {
+                io::stdin().read_to_end(&mut Vec::new()).unwrap();
+            }
             let output = if MODE == "media-mismatch" {
                 r#"{"kind":"pdf","page_count":1,"pages":[[1,"fixture"]],"warnings":[]}"#
             } else {

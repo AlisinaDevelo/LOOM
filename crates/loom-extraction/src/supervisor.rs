@@ -184,13 +184,16 @@ impl ExtractionSupervisor {
                     return Err(rejected(error.clone()));
                 }
                 if status.is_some() && response.is_some() && input_result.is_some() {
-                    input_result.take().unwrap().map_err(rejected)?;
                     return match response.take().unwrap().map_err(rejected)? {
+                        // A helper may reject before consuming stdin. Its valid,
+                        // EOF-checked failure and successful exit are authoritative;
+                        // a broken request pipe must not replace that typed reason.
                         HelperResponse::Failure { code } => Err(rejected(code.error())),
                         HelperResponse::Success {
                             output,
                             mut metrics,
                         } => {
+                            input_result.take().unwrap().map_err(rejected)?;
                             output.validate(media, budget).map_err(rejected)?;
                             if metrics.sample_interval_ms != WATCH_INTERVAL_MS
                                 || !metrics.address_space_limit_installed
