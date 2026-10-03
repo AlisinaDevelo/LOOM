@@ -1253,16 +1253,25 @@ mod tests {
         (directory, library)
     }
 
-    // Unit race/state fixtures use the real helper, staged explicitly before cargo test.
-    // They never silently fall back to an in-process provider.
+    // Unit race/state fixtures use the Cargo-managed test helper. The
+    // extractor_helper integration test makes Cargo build it in this target
+    // directory/profile; never search PATH or fall back to an in-process
+    // provider.
     fn test_extractor_path() -> std::path::PathBuf {
-        std::env::current_exe()
+        let helper_name = format!("loom-core-test-extractor{}", std::env::consts::EXE_SUFFIX);
+        let path = std::env::current_exe()
             .unwrap()
             .parent()
             .unwrap()
             .parent()
             .unwrap()
-            .join("loom-extractor")
+            .join(helper_name);
+        assert!(
+            path.is_file(),
+            "Cargo did not build the core test extractor at {}; run cargo test -p loom-core without --lib",
+            path.display()
+        );
+        path
     }
 
     fn test_extractor() -> loom_extraction::ExtractionSupervisor {

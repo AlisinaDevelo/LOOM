@@ -8,6 +8,13 @@ authors.workspace = true
 repository.workspace = true
 rust-version.workspace = true
 
+# Cargo builds this explicitly named fixture when the integration test selects
+# it. It is not part of the application crates or runtime packaging.
+[[bin]]
+name = "loom-core-test-extractor"
+path = "tests/support/loom_core_test_extractor.rs"
+test = false
+
 [dependencies]
 argon2.workspace = true
 blake3.workspace = true
