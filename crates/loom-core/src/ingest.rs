@@ -8,8 +8,6 @@ use std::{
 #[cfg(unix)]
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 
-use walkdir::WalkDir;
-
 use crate::{
     domain::EvidenceAnchor,
     error::{io_error, LoomError, Result},
@@ -64,29 +62,11 @@ pub(crate) fn discover(path: &Path, max_files: usize) -> Result<Vec<PathBuf>> {
         )));
     }
 
-    let mut files = Vec::new();
-    for entry in WalkDir::new(path).follow_links(false).sort_by_file_name() {
-        let entry = entry.map_err(|error| {
-            let error_path = error.path().unwrap_or(path).to_path_buf();
-            io_error(
-                error_path,
-                error
-                    .into_io_error()
-                    .unwrap_or_else(|| std::io::Error::other("directory traversal failed")),
-            )
-        })?;
-        if entry.file_type().is_symlink() || !entry.file_type().is_file() {
-            continue;
-        }
-        files.push(entry.into_path());
-        if files.len() > max_files {
-            return Err(LoomError::InvalidPath(format!(
-                "source contains more than the {max_files}-file request limit: {}",
-                path.display()
-            )));
-        }
-    }
-    Ok(files)
+    crate::discovery::walk(
+        path,
+        crate::discovery::DiscoveryLimits::for_files(max_files),
+        |_| Ok(()),
+    )
 }
 
 pub(crate) fn supported_media_type(path: &Path) -> Option<&'static str> {
@@ -535,6 +515,22 @@ mod tests {
         let error = discover(directory.path(), 2).unwrap_err();
         assert!(matches!(error, LoomError::InvalidPath(_)));
         assert!(error.to_string().contains("2-file request limit"));
+    }
+
+    #[test]
+    fn discovery_fails_closed_when_directory_depth_is_exceeded() {
+        let directory = tempdir().unwrap();
+        let mut selected = directory.path().to_path_buf();
+        for _ in 0..33 {
+            selected.push("child");
+            fs::create_dir(&selected).unwrap();
+        }
+        let outcome = discover(directory.path(), 20_000);
+        assert!(
+            outcome.is_err(),
+            "unbounded empty-directory depth: {outcome:?}"
+        );
+        assert!(outcome.unwrap_err().to_string().contains("depth limit"));
     }
 
     #[test]

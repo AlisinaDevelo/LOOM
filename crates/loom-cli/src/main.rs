@@ -171,11 +171,15 @@ enum Command {
     Performance {
         #[arg(long)]
         corpus: PathBuf,
+        /// Explicit disjoint indexing roots inside the corpus; repeat for bounded batches.
+        #[arg(long)]
+        index_root: Vec<PathBuf>,
         #[arg(long)]
         query: String,
         #[arg(long, default_value_t = 31)]
         warm_queries: usize,
-        #[arg(long, default_value_t = 100_000)]
+        /// Per-request file bound, not the total library size.
+        #[arg(long, default_value_t = 20_000)]
         max_files: usize,
     },
 }
@@ -372,6 +376,12 @@ struct PerformanceIndexMetrics {
 }
 
 #[derive(Debug, Serialize)]
+struct PerformanceIndexBatch {
+    root: String,
+    report: loom_core::IndexReport,
+}
+
+#[derive(Debug, Serialize)]
 struct PerformanceRebuildMetrics {
     elapsed_ms: f64,
     report: loom_core::FtsRepairReport,
@@ -385,6 +395,7 @@ struct PerformanceReport {
     cache_conditions: &'static str,
     open_elapsed_ms: f64,
     index: PerformanceIndexMetrics,
+    index_batches: Vec<PerformanceIndexBatch>,
     query: PerformanceQueryMetrics,
     fts_rebuild: PerformanceRebuildMetrics,
     stats: loom_core::LibraryStats,
@@ -720,6 +731,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         Command::Benchmark { corpus, queries } => run_benchmark(&corpus, &queries)?,
         Command::Performance {
             corpus,
+            index_root,
             query,
             warm_queries,
             max_files,
@@ -729,6 +741,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             &query,
             warm_queries,
             max_files,
+            &index_root,
         )?,
     }
     Ok(())
@@ -793,12 +806,109 @@ fn read_backup_password(
     Ok(password)
 }
 
+fn performance_roots(corpus: &Path, selected: &[PathBuf]) -> Result<Vec<PathBuf>, Box<dyn Error>> {
+    if selected.len() > 4_096 {
+        return Err("performance accepts at most 4096 explicit indexing roots".into());
+    }
+    // Preserve the core's final-component no-follow policy before resolving
+    // a selected alias, including the default corpus selection.
+    for path in std::iter::once(corpus).chain(selected.iter().map(PathBuf::as_path)) {
+        if fs::symlink_metadata(path)?.file_type().is_symlink() {
+            return Err("performance selections must not be final-component symlinks".into());
+        }
+    }
+    let corpus = corpus.canonicalize()?;
+    if selected.is_empty() {
+        return Ok(vec![corpus]);
+    }
+    let mut roots = selected
+        .iter()
+        .map(|root| root.canonicalize())
+        .collect::<std::io::Result<Vec<_>>>()?;
+    if roots.iter().any(|root| !root.starts_with(&corpus)) {
+        return Err("performance indexing roots must be inside the selected corpus".into());
+    }
+    roots.sort_unstable();
+    if roots.windows(2).any(|pair| pair[1].starts_with(&pair[0])) {
+        return Err("performance indexing roots must not duplicate or overlap".into());
+    }
+    Ok(roots)
+}
+
+fn index_performance_roots(
+    library: &Library,
+    roots: &[PathBuf],
+) -> Result<Vec<PerformanceIndexBatch>, Box<dyn Error>> {
+    let mut batches = Vec::with_capacity(roots.len());
+    for root in roots {
+        let report = library.index_path(root)?;
+        if !report.failures.is_empty() || report.failed != 0 || report.cancelled != 0 {
+            return Err(format!(
+                "performance batch {} was incomplete: {:?}",
+                root.display(),
+                report
+            )
+            .into());
+        }
+        batches.push(PerformanceIndexBatch {
+            root: root.display().to_string(),
+            report,
+        });
+    }
+    Ok(batches)
+}
+
+fn summarize_performance_index(
+    batches: &[PerformanceIndexBatch],
+    elapsed_ms: f64,
+) -> Result<PerformanceIndexMetrics, Box<dyn Error>> {
+    let sum = |field: fn(&loom_core::IndexReport) -> u64| {
+        batches.iter().try_fold(0_u64, |total, batch| {
+            total
+                .checked_add(field(&batch.report))
+                .ok_or("performance batch count overflow")
+        })
+    };
+    let discovered = sum(|report| report.discovered)?;
+    let indexed = sum(|report| report.indexed)?;
+    let unchanged = sum(|report| report.unchanged)?;
+    let skipped = sum(|report| report.skipped)?;
+    let supported = discovered
+        .checked_sub(skipped)
+        .ok_or("invalid performance batch counts")?;
+    let recovered = indexed
+        .checked_add(unchanged)
+        .ok_or("performance batch count overflow")?;
+    if recovered != supported {
+        return Err("performance batches did not index every supported artifact".into());
+    }
+    Ok(PerformanceIndexMetrics {
+        discovered,
+        indexed,
+        unchanged,
+        skipped,
+        failures: batches
+            .iter()
+            .map(|batch| batch.report.failures.len())
+            .sum(),
+        source_bytes_read: sum(|report| report.bytes_read)?,
+        elapsed_ms,
+        artifacts_per_second: if elapsed_ms > 0.0 {
+            indexed as f64 / (elapsed_ms / 1_000.0)
+        } else {
+            0.0
+        },
+        completeness: 1.0,
+    })
+}
+
 fn run_performance(
     database: &Path,
     corpus: &Path,
     query: &str,
     warm_queries: usize,
     max_files: usize,
+    selected_roots: &[PathBuf],
 ) -> Result<(), Box<dyn Error>> {
     if query.trim().is_empty() {
         return Err("performance query must not be empty".into());
@@ -806,6 +916,8 @@ fn run_performance(
     if max_files == 0 {
         return Err("performance max-files must be greater than zero".into());
     }
+    // Validate all explicit selections before opening SQLite or indexing the first batch.
+    let roots = performance_roots(corpus, selected_roots)?;
     let corpus = corpus.canonicalize()?;
     let warm_queries = warm_queries.clamp(1, 1_000);
     let limits = LibraryLimits {
@@ -818,21 +930,9 @@ fn run_performance(
     let open_elapsed_ms = open_started.elapsed().as_secs_f64() * 1_000.0;
 
     let index_started = Instant::now();
-    let index = library.index_path(&corpus)?;
+    let index_batches = index_performance_roots(&library, &roots)?;
     let index_elapsed_ms = index_started.elapsed().as_secs_f64() * 1_000.0;
-    if !index.failures.is_empty() {
-        return Err(format!(
-            "performance corpus had indexing failures: {:?}",
-            index.failures
-        )
-        .into());
-    }
-    let supported = index.discovered.saturating_sub(index.skipped);
-    let completeness = if supported == 0 {
-        1.0
-    } else {
-        (index.indexed + index.unchanged) as f64 / supported as f64
-    };
+    let index = summarize_performance_index(&index_batches, index_elapsed_ms)?;
 
     // The first query is a cold-connection observation. We deliberately do not attempt to drop
     // the operating-system page cache: that would require privileged, destructive operations on
@@ -875,35 +975,21 @@ fn run_performance(
     let rebuild_elapsed_ms = rebuild_started.elapsed().as_secs_f64() * 1_000.0;
     let stats = library.stats()?;
     let database_bytes = database_size(database);
-    let database_bytes_per_source_byte = if index.bytes_read == 0 {
+    let database_bytes_per_source_byte = if index.source_bytes_read == 0 {
         0.0
     } else {
-        database_bytes as f64 / index.bytes_read as f64
-    };
-    let artifacts_per_second = if index_elapsed_ms <= 0.0 {
-        0.0
-    } else {
-        index.indexed as f64 / (index_elapsed_ms / 1_000.0)
+        database_bytes as f64 / index.source_bytes_read as f64
     };
 
     let report = PerformanceReport {
-        schema_version: 1,
+        schema_version: 2,
         corpus: corpus.display().to_string(),
         max_files,
         cache_conditions:
             "cold = first query after open/index; warm = repeated query; OS page cache not dropped",
         open_elapsed_ms,
-        index: PerformanceIndexMetrics {
-            discovered: index.discovered,
-            indexed: index.indexed,
-            unchanged: index.unchanged,
-            skipped: index.skipped,
-            failures: index.failures.len(),
-            source_bytes_read: index.bytes_read,
-            elapsed_ms: index_elapsed_ms,
-            artifacts_per_second,
-            completeness,
-        },
+        index,
+        index_batches,
         query: PerformanceQueryMetrics {
             query: query.to_string(),
             cold_connection_latency_ms,
@@ -1801,6 +1887,184 @@ mod tests {
             "--low",
         ])
         .is_err());
+    }
+
+    #[test]
+    fn performance_accepts_explicit_repeated_index_roots() {
+        let parsed = super::Arguments::try_parse_from([
+            "loom",
+            "performance",
+            "--corpus",
+            "/corpus",
+            "--query",
+            "marker",
+            "--index-root",
+            "/corpus/shard-001",
+            "--index-root",
+            "/corpus/shard-000",
+        ])
+        .unwrap();
+        let super::Command::Performance { index_root, .. } = parsed.command else {
+            panic!("not a performance command");
+        };
+        assert_eq!(
+            index_root,
+            vec![
+                PathBuf::from("/corpus/shard-001"),
+                PathBuf::from("/corpus/shard-000")
+            ]
+        );
+    }
+
+    #[test]
+    fn performance_roots_are_canonical_disjoint_and_bounded() {
+        let corpus = tempfile::tempdir().unwrap();
+        let root = corpus.path().canonicalize().unwrap();
+        let first = root.join("shard-000");
+        let second = root.join("shard-001");
+        std::fs::create_dir(&first).unwrap();
+        std::fs::create_dir(&second).unwrap();
+        assert_eq!(
+            super::performance_roots(&root, &[]).unwrap(),
+            vec![root.clone()]
+        );
+        assert_eq!(
+            super::performance_roots(&root, &[second.clone(), first.clone()]).unwrap(),
+            vec![first.clone(), second]
+        );
+        for invalid in [
+            vec![first.clone(), first.clone()],
+            vec![root.clone(), first.clone()],
+            vec![first; 4_097],
+        ] {
+            assert!(super::performance_roots(&root, &invalid).is_err());
+        }
+    }
+
+    #[test]
+    fn performance_rejects_outside_roots_before_creating_a_library() {
+        let corpus = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let database = corpus.path().join("not-created.sqlite3");
+        let result = super::run_performance(
+            &database,
+            corpus.path(),
+            "marker",
+            1,
+            1,
+            &[outside.path().to_owned()],
+        );
+        assert!(result.is_err());
+        assert!(!database.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn performance_rejects_a_root_linked_outside_the_corpus() {
+        let corpus = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let link = corpus.path().join("shard-escape");
+        std::os::unix::fs::symlink(outside.path(), &link).unwrap();
+        assert!(super::performance_roots(corpus.path(), &[link]).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn performance_rejects_inside_corpus_root_aliases_before_opening_sqlite() {
+        let corpus = tempfile::tempdir().unwrap();
+        let target = corpus.path().join("real-shard");
+        let alias = corpus.path().join("alias");
+        std::fs::create_dir(&target).unwrap();
+        std::os::unix::fs::symlink(&target, &alias).unwrap();
+        assert!(super::performance_roots(corpus.path(), std::slice::from_ref(&alias)).is_err());
+        let database = corpus.path().join("not-created.sqlite3");
+        assert!(super::run_performance(&database, &alias, "marker", 1, 1, &[]).is_err());
+        assert!(!database.exists());
+    }
+
+    #[test]
+    fn performance_batches_preserve_per_request_limits_and_count_the_whole_library() {
+        let corpus = tempfile::tempdir().unwrap();
+        let root = corpus.path().canonicalize().unwrap();
+        let first = root.join("shard-000");
+        let second = root.join("shard-001");
+        std::fs::create_dir(&first).unwrap();
+        std::fs::create_dir(&second).unwrap();
+        std::fs::write(first.join("first.md"), "first marker").unwrap();
+        std::fs::write(second.join("second.md"), "second marker").unwrap();
+        let database = tempfile::tempdir().unwrap();
+        let library = loom_core::Library::open_with_limits(
+            database.path().join("library.sqlite3"),
+            loom_core::LibraryLimits {
+                max_files_per_request: 1,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(library.index_path(&root).is_err());
+        let batches =
+            super::index_performance_roots(&library, &[first.clone(), second.clone()]).unwrap();
+        assert_eq!(batches.len(), 2);
+        assert_eq!(batches[0].root, first.to_string_lossy());
+        assert_eq!(batches[1].root, second.to_string_lossy());
+        assert!(batches
+            .iter()
+            .all(|batch| !batch.report.run_id.is_empty() && batch.report.indexed == 1));
+        let summary = super::summarize_performance_index(&batches, 1.0).unwrap();
+        assert_eq!(summary.discovered, 2);
+        assert_eq!(summary.indexed, 2);
+        assert_eq!(summary.completeness, 1.0);
+        assert_eq!(library.stats().unwrap().artifacts, 2);
+        let unchanged = super::index_performance_roots(&library, &[first, second]).unwrap();
+        let summary = super::summarize_performance_index(&unchanged, 1.0).unwrap();
+        assert_eq!(summary.indexed, 0);
+        assert_eq!(summary.unchanged, 2);
+        assert_eq!(summary.completeness, 1.0);
+    }
+
+    #[test]
+    fn performance_batch_failure_preserves_completed_batches_but_returns_no_summary() {
+        let corpus = tempfile::tempdir().unwrap();
+        let first = corpus.path().join("shard-000");
+        let second = corpus.path().join("shard-001");
+        std::fs::create_dir(&first).unwrap();
+        std::fs::create_dir(&second).unwrap();
+        std::fs::write(first.join("first.md"), "first marker").unwrap();
+        std::fs::write(second.join("second.md"), "second marker").unwrap();
+        std::fs::write(second.join("third.md"), "third marker").unwrap();
+        let database = tempfile::tempdir().unwrap();
+        let library = loom_core::Library::open_with_limits(
+            database.path().join("library.sqlite3"),
+            loom_core::LibraryLimits {
+                max_files_per_request: 1,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(super::index_performance_roots(&library, &[first, second]).is_err());
+        assert_eq!(library.stats().unwrap().artifacts, 1);
+    }
+
+    #[test]
+    fn performance_summary_rejects_partial_or_overflowing_counts() {
+        let mut batches = vec![super::PerformanceIndexBatch {
+            root: "fixture".into(),
+            report: loom_core::IndexReport {
+                discovered: 2,
+                indexed: 1,
+                ..Default::default()
+            },
+        }];
+        assert!(super::summarize_performance_index(&batches, 1.0).is_err());
+        batches[0].report.discovered = u64::MAX;
+        batches.push(super::PerformanceIndexBatch {
+            root: "other fixture".into(),
+            report: loom_core::IndexReport {
+                discovered: 1,
+                ..Default::default()
+            },
+        });
+        assert!(super::summarize_performance_index(&batches, 1.0).is_err());
     }
 
     #[test]

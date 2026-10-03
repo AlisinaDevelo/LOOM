@@ -144,7 +144,7 @@ def generate_corpus(root: Path, count: int) -> dict[str, Any]:
         "source_bytes": source_bytes,
         "content_sha256": digest.hexdigest(),
         "query": query_marker,
-        "selection": "one explicitly selected corpus root; no home-directory or passive capture",
+        "selection": "explicit disjoint 20k indexing roots inside the generated corpus; no home-directory or passive capture",
     }
     (root / f"manifest-{count}.json").write_text(
         json.dumps(manifest, indent=2) + "\n", encoding="utf-8"
@@ -202,8 +202,14 @@ def run_measurement(
         "--warm-queries",
         str(warm_queries),
         "--max-files",
-        str(count),
+        str(SHARD_SIZE),
     ]
+    roots = sorted(
+        corpus / f"shard-{number:03d}"
+        for number in range((count + SHARD_SIZE - 1) // SHARD_SIZE)
+    )
+    for root in roots:
+        command.extend(["--index-root", str(root)])
     started = time.perf_counter()
     completed = subprocess.run(
         ["/usr/bin/time", "-lp", *command],
@@ -226,6 +232,29 @@ def run_measurement(
     except json.JSONDecodeError as error:
         raise RuntimeError(f"performance output was not JSON: {stdout_path}") from error
     resources = parse_time(completed.stderr)
+    batches = report.get("index_batches")
+    if (
+        report.get("schema_version") != 2
+        or report.get("max_files") != SHARD_SIZE
+        or not isinstance(batches, list)
+        or len(batches) != len(roots)
+    ):
+        raise RuntimeError(f"invalid bounded performance batches: {stdout_path}")
+    for root, batch in zip(roots, batches):
+        number = int(root.name.removeprefix("shard-"))
+        expected = min(SHARD_SIZE, count - number * SHARD_SIZE)
+        detail = batch.get("report", {}) if isinstance(batch, dict) else {}
+        if (
+            not isinstance(batch, dict)
+            or not isinstance(detail, dict)
+            or batch.get("root") != str(root.resolve())
+            or not detail.get("run_id")
+            or detail.get("discovered") != expected
+            or detail.get("indexed") != expected
+            or any(detail.get(field) != 0 for field in ("unchanged", "skipped", "failed", "cancelled"))
+            or detail.get("failures") != []
+        ):
+            raise RuntimeError(f"incomplete or incorrect performance batch {number}: {stdout_path}")
     report["resource_profile"] = {
         **resources,
         "wall_seconds_python": elapsed_seconds,
@@ -410,7 +439,7 @@ def main() -> int:
             }
 
         report = {
-            "schema_version": 1,
+            "schema_version": 2,
             "generator": {
                 "version": GENERATOR_VERSION,
                 "seed": SEED,
@@ -429,13 +458,14 @@ def main() -> int:
                 "warm": "repeated query in the same process after the cold observation",
                 "runs_per_scale": args.runs,
                 "warm_queries": args.warm_queries,
+                "index_admission": "explicit disjoint shard roots, at most 20,000 files per request; production discovery bounds retained",
             },
             "pre_optimization_budgets": BUDGETS,
             "scales": per_scale,
             "release_gate": evaluate_budgets(reports),
             "limitations": [
                 "Synthetic local Markdown/plain-text artifacts; no user content is read or uploaded.",
-                "The 100k corpus is split into deterministic 20k shards only for fixture generation; one corpus root is selected and max-files is explicit.",
+                "The 100k library is indexed through five explicit disjoint 20k shard roots in one process; it is not one unbounded folder request or a durable directory job.",
                 "Cold means a new process/SQLite connection, not a privileged OS page-cache flush.",
                 "Maximum RSS and user/system CPU are a process-level proxy; battery energy is not measured.",
                 "This gate measures lexical FTS5 and canonical ingestion. OCR, PDFs, semantic vectors, and passive capture require separate corpus gates.",

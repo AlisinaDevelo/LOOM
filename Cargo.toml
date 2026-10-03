@@ -27,6 +27,7 @@ libc = "0.2"
 fs2 = "0.4.3"
 pdf-extract = "0.12.0"
 rusqlite = { version = "0.40.2", default-features = false, features = ["bundled", "cache"] }
+rustix = { version = "1.1.4", features = ["fs"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tempfile = "3"

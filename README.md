@@ -13,6 +13,8 @@ path, content hash, excerpt, and exact text or pixel-region anchor with every re
 ## Current supported slice
 
 - An explicitly selected file or directory is indexed; directory traversal does not follow symlinks.
+  Folder discovery bounds entries, depth and retained path storage before indexing;
+  an incomplete walk cannot publish or mark earlier sources missing.
   The desktop picker runs in the Rust backend, so the webview cannot submit an arbitrary path to the
   index command.
 - Supported inputs are UTF-8 .txt, .md, .markdown, bounded text-based .pdf files, and .png/.jpg/
@@ -20,6 +22,8 @@ path, content hash, excerpt, and exact text or pixel-region anchor with every re
   OCR unavailable rather than silently indexing an image without evidence. Files larger than 8 MiB,
   PDFs over 2,048 pages, and traversals larger than 20,000 files are rejected or reported with an
   explicit bounded outcome.
+  See [folder discovery limits](docs/DIRECTORY_DISCOVERY.md) for namespace, resource and
+  portability limits; this is not queued directory indexing or a filesystem snapshot.
 - SQLite is the canonical store. SQLite FTS5 provides lexical retrieval over indexed passages.
 - `loom-cli fts-health` compares canonical passage hashes and tokenizer vocabulary with the
   disposable FTS5 projection; `loom-cli fts-repair` rebuilds it transactionally and reports before/

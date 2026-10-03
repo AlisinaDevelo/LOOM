@@ -2,6 +2,7 @@
 
 mod backup;
 mod bookmarks;
+mod discovery;
 mod domain;
 mod error;
 mod ingest;
