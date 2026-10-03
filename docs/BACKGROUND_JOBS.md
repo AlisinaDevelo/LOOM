@@ -19,6 +19,9 @@ at most one due repair, returning its durable result or JSON `null` when no job 
 It does not wait for delayed retries or launch a daemon. Repair publishes its derived FTS5
 projection and `completed` result in the same epoch/token/cancellation-fenced transaction.
 Canonical originals, hashes, passages, and anchors are not rewritten.
+Queue commands require an existing initialized library; initialize or migrate it explicitly
+with an ordinary command such as `stats` first. Queue inspection/admission/cancellation/forgetting
+never implicitly rebuild FTS. An empty or contending `run-next-job` cannot repair the projection.
 
 ## Operational contract
 
@@ -66,6 +69,11 @@ epoch and recovers abandoned running jobs. An old claim cannot publish or comple
 recovery, even if the job ID is delivered again. Each delivery gets a fresh claim token.
 The worker connection does not run migrations or implicitly rebuild FTS on acquisition.
 Ordinary `Library::open` retains its existing migration/rebuild behavior.
+The worker locks before opening SQLite. A library remembers its canonical absolute path;
+Unix worker acquisition rejects a database file replaced since that library was opened.
+Runtime table/index definitions and persisted policy are validated before worker acquisition.
+Completion/failure captures its return value inside the settlement transaction, so concurrent
+terminal forgetting cannot turn completed work into a misleading “job not found” error.
 
 Running cancellation sets a durable flag. A transaction already publishing may complete
 before a later cancellation obtains the SQLite writer lock; that completion is not rewritten.
@@ -84,6 +92,9 @@ stale epoch/token writes, portable exclusion/restore rollback, malformed policy,
 diagnostics, symlink refusal, independent connection mutexes, and an actual killed subprocess
 whose lock is released and running job recovered. The real FTS fixture starts with a damaged
 derivative and verifies healthy publication plus an unchanged canonical export digest.
+The actual CLI fixture damages FTS, refuses a contending worker, then verifies the claimed
+repair observed unhealthy input. Empty/cancelled jobs and queue-only commands leave it damaged.
+Deterministic completion/failure-versus-forgetting tests retain their terminal return values.
 
 The first adapter still performs FTS repair as one SQLite transaction. This is not proof of
 bounded rebuild CPU/memory, power behavior, or interactive-search p95 under a large corpus.

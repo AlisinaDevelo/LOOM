@@ -9,7 +9,7 @@ use std::{
 
 use clap::{Parser, Subcommand};
 use loom_core::{
-    BackupOptions, EvidenceAnchor, JobPriority, Library, LibraryLimits, PortableExport,
+    BackupOptions, EvidenceAnchor, JobPriority, JobWorker, Library, LibraryLimits, PortableExport,
     SearchRequest,
 };
 use serde::{Deserialize, Serialize};
@@ -566,7 +566,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             println!("{}", serde_json::to_string_pretty(&library.repair_fts()?)?);
         }
         Command::Jobs { limit } => {
-            let library = Library::open(arguments.database)?;
+            let library = Library::open_for_jobs(arguments.database)?;
             println!(
                 "{}",
                 serde_json::to_string_pretty(&library.background_jobs(limit)?)?
@@ -577,7 +577,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             high,
             low,
         } => {
-            let library = Library::open(arguments.database)?;
+            let library = Library::open_for_jobs(arguments.database)?;
             let priority = if high {
                 JobPriority::High
             } else if low {
@@ -593,24 +593,23 @@ fn main() -> Result<(), Box<dyn Error>> {
             );
         }
         Command::CancelJob { id } => {
-            let library = Library::open(arguments.database)?;
+            let library = Library::open_for_jobs(arguments.database)?;
             println!(
                 "{}",
                 serde_json::to_string_pretty(&library.cancel_background_job(&id)?)?
             );
         }
         Command::ForgetJob { id } => {
-            let library = Library::open(arguments.database)?;
+            let library = Library::open_for_jobs(arguments.database)?;
             println!(
                 "{}",
                 serde_json::to_string_pretty(&library.forget_background_job(&id)?)?
             );
         }
         Command::RunNextJob => {
-            let library = Library::open(arguments.database)?;
             println!(
                 "{}",
-                serde_json::to_string_pretty(&library.acquire_job_worker()?.run_next()?)?
+                serde_json::to_string_pretty(&JobWorker::open(arguments.database)?.run_next()?)?
             );
         }
         Command::OcrStatus => {

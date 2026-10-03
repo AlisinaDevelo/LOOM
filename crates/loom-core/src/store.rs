@@ -144,6 +144,8 @@ pub struct Library {
     connection: Mutex<Connection>,
     limits: LibraryLimits,
     database_path: Option<PathBuf>,
+    #[cfg(unix)]
+    database_file_id: Option<(u64, u64)>,
 }
 
 impl Library {
@@ -159,7 +161,10 @@ impl Library {
             fs::create_dir_all(parent).map_err(|source| io_error(parent, source))?;
         }
         let connection = Connection::open(path)?;
-        Self::from_connection(connection, limits, Some(path.to_path_buf()))
+        let path = path
+            .canonicalize()
+            .map_err(|source| io_error(path, source))?;
+        Self::from_connection(connection, limits, Some(path))
     }
 
     /// Opens an isolated in-memory library for tests and evaluation.
@@ -203,10 +208,17 @@ impl Library {
         migrate(&mut connection)?;
         ensure_semantic_schema(&connection)?;
         crate::jobs::ensure_schema(&connection)?;
+        #[cfg(unix)]
+        let database_file_id = database_path
+            .as_deref()
+            .map(database_file_identity)
+            .transpose()?;
         Ok(Self {
             connection: Mutex::new(connection),
             limits,
             database_path,
+            #[cfg(unix)]
+            database_file_id,
         })
     }
 
@@ -3296,13 +3308,27 @@ impl Library {
             .database_path
             .as_ref()
             .ok_or_else(|| LoomError::JobQueue("a persistent library is required".into()))?;
-        path.canonicalize().map_err(|error| io_error(path, error))
+        #[cfg(unix)]
+        if Some(database_file_identity(path)?) != self.database_file_id {
+            return Err(LoomError::JobQueue(
+                "database identity changed since opening".into(),
+            ));
+        }
+        Ok(path.clone())
     }
 
-    /// The worker gets a separate SQLite connection without migration or implicit FTS rebuild.
-    /// It must only be created from an already-open, initialized library.
-    pub(crate) fn job_worker_library(&self) -> Result<Self> {
-        let path = self.job_database_path()?;
+    pub(crate) fn open_job_worker(&self) -> Result<crate::jobs::JobWorker> {
+        crate::jobs::JobWorker::open_with_limits(self.job_database_path()?, self.limits)
+    }
+
+    /// Opens an existing initialized queue without migration or an implicit FTS rebuild.
+    /// Initialize new or older libraries with `Library::open` explicitly first.
+    pub fn open_for_jobs(path: impl AsRef<Path>) -> Result<Self> {
+        Self::open_for_jobs_with_limits(path.as_ref(), LibraryLimits::default())
+    }
+
+    pub(crate) fn open_for_jobs_with_limits(path: &Path, limits: LibraryLimits) -> Result<Self> {
+        let path = path.canonicalize().map_err(|error| io_error(path, error))?;
         let connection =
             Connection::open_with_flags(&path, rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE)?;
         if stored_schema_version(&connection)? != Some(SCHEMA_VERSION) {
@@ -3311,16 +3337,22 @@ impl Library {
             ));
         }
         validate_schema_shape(&connection, SCHEMA_VERSION)?;
+        crate::jobs::validate_schema(&connection)?;
         configure(&connection)?;
         connection.execute_batch("PRAGMA trusted_schema = OFF;")?;
         Ok(Self {
             connection: Mutex::new(connection),
-            limits: self.limits,
+            limits,
+            #[cfg(unix)]
+            database_file_id: Some(database_file_identity(&path)?),
             database_path: Some(path),
         })
     }
 
-    pub(crate) fn job_repair_fts(&self, claim: &crate::jobs::JobClaim) -> Result<()> {
+    pub(crate) fn job_repair_fts(
+        &self,
+        claim: &crate::jobs::JobClaim,
+    ) -> Result<crate::jobs::BackgroundJob> {
         let mut connection = self.lock()?;
         let transaction =
             connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
@@ -3334,9 +3366,9 @@ impl Library {
             ));
         }
         let report = serde_json::to_string(&FtsRepairReport { before, after })?;
-        claim.complete(&transaction, &report)?;
+        let completed = claim.complete(&transaction, &report)?;
         transaction.commit()?;
-        Ok(())
+        Ok(completed)
     }
 
     fn finish_deletion(&self, report: DeletionReport) -> Result<DeletionReport> {
@@ -3357,6 +3389,13 @@ impl Library {
             .optional()
             .map_err(Into::into)
     }
+}
+
+#[cfg(unix)]
+fn database_file_identity(path: &Path) -> Result<(u64, u64)> {
+    use std::os::unix::fs::MetadataExt;
+    let metadata = fs::metadata(path).map_err(|error| io_error(path, error))?;
+    Ok((metadata.dev(), metadata.ino()))
 }
 
 fn canonical_selected_root(requested_path: &Path) -> Result<PathBuf> {

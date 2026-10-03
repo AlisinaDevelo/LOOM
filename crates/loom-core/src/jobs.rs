@@ -116,9 +116,7 @@ pub struct BackgroundJob {
     pub result: Option<serde_json::Value>,
 }
 
-pub(crate) fn ensure_schema(connection: &Connection) -> Result<()> {
-    connection.execute_batch(
-        "CREATE TABLE IF NOT EXISTS background_job_runtime(
+const RUNTIME_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS background_job_runtime(
             slot INTEGER PRIMARY KEY CHECK(slot = 1),
             epoch INTEGER NOT NULL CHECK(epoch >= 0),
             next_sequence INTEGER NOT NULL CHECK(next_sequence >= 1),
@@ -138,17 +136,55 @@ pub(crate) fn ensure_schema(connection: &Connection) -> Result<()> {
             epoch INTEGER,
             claim_token TEXT,
             cancel_requested INTEGER NOT NULL DEFAULT 0 CHECK(cancel_requested IN (0,1)),
-            last_error TEXT CHECK(length(last_error) <= 4096),
-            result_json TEXT CHECK(length(result_json) <= 65536),
+            last_error TEXT CHECK(length(CAST(last_error AS BLOB)) <= 4096),
+            result_json TEXT CHECK(length(CAST(result_json AS BLOB)) <= 65536 AND json_valid(result_json)),
             CHECK((state = 'running' AND epoch IS NOT NULL AND claim_token IS NOT NULL)
                 OR (state != 'running' AND epoch IS NULL AND claim_token IS NULL))
          ) STRICT;
-         CREATE INDEX IF NOT EXISTS background_jobs_ready ON background_jobs(state, ready_at_ms, sequence);",
-    )?;
+         CREATE INDEX IF NOT EXISTS background_jobs_ready ON background_jobs(state, ready_at_ms, sequence);";
+
+pub(crate) fn ensure_schema(connection: &Connection) -> Result<()> {
+    connection.execute_batch(RUNTIME_SCHEMA)?;
     connection.execute(
         "INSERT INTO background_job_runtime VALUES (1, 0, 1, 0, ?1) ON CONFLICT(slot) DO NOTHING",
         [serde_json::to_string(&JobQueuePolicy::default())?],
     )?;
+    Ok(())
+}
+
+/// Runtime tables are deliberately versioned independently of portable canonical schema.
+pub(crate) fn validate_schema(connection: &Connection) -> Result<()> {
+    fn normalized(sql: &str) -> String {
+        sql.split_whitespace()
+            .collect::<String>()
+            .to_ascii_lowercase()
+            .replace("ifnotexists", "")
+    }
+    for definition in RUNTIME_SCHEMA
+        .split(';')
+        .filter(|sql| !sql.trim().is_empty())
+    {
+        let name = if definition.contains("CREATE INDEX") {
+            "background_jobs_ready"
+        } else if definition.contains("background_job_runtime(") {
+            "background_job_runtime"
+        } else {
+            "background_jobs"
+        };
+        let actual: Option<String> = connection
+            .query_row(
+                "SELECT sql FROM sqlite_master WHERE name = ?1",
+                [name],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if actual.as_deref().map(normalized) != Some(normalized(definition)) {
+            return Err(LoomError::JobQueue(format!(
+                "missing or unsupported runtime schema: {name}"
+            )));
+        }
+    }
+    load_policy(connection)?;
     Ok(())
 }
 
@@ -360,7 +396,22 @@ impl Library {
     }
 
     pub fn acquire_job_worker(&self) -> Result<JobWorker> {
-        let database = self.job_database_path()?;
+        self.open_job_worker()
+    }
+}
+
+impl JobWorker {
+    /// Acquires ownership before opening SQLite; never creates or migrates the library.
+    pub fn open(path: impl AsRef<Path>) -> Result<Self> {
+        Self::open_with_limits(path, crate::LibraryLimits::default())
+    }
+
+    pub(crate) fn open_with_limits(
+        path: impl AsRef<Path>,
+        limits: crate::LibraryLimits,
+    ) -> Result<Self> {
+        let path = path.as_ref();
+        let database = path.canonicalize().map_err(|error| io_error(path, error))?;
         #[cfg(unix)]
         {
             use std::os::unix::fs::MetadataExt;
@@ -388,7 +439,7 @@ impl Library {
                 io_error(&lock_path, error)
             }
         })?;
-        let library = self.job_worker_library()?;
+        let library = Library::open_for_jobs_with_limits(&database, limits)?;
         let epoch = {
             let mut connection = library.lock()?;
             let transaction =
@@ -469,7 +520,7 @@ impl JobClaim {
         Ok(())
     }
 
-    pub(crate) fn complete(&self, connection: &Connection, result: &str) -> Result<()> {
+    pub(crate) fn complete(&self, connection: &Connection, result: &str) -> Result<BackgroundJob> {
         self.verify(connection)?;
         if result.len() > 65_536 {
             return Err(LoomError::JobQueue("job result exceeds 64 KiB".into()));
@@ -483,7 +534,7 @@ impl JobClaim {
         if changed != 1 {
             return Err(LoomError::JobClaimStale(self.id.clone()));
         }
-        Ok(())
+        get_job(connection, &self.id)
     }
 }
 
@@ -554,7 +605,7 @@ impl JobWorker {
         retryable: bool,
         reason: &str,
         now: i64,
-    ) -> Result<()> {
+    ) -> Result<BackgroundJob> {
         let mut connection = self.library.lock()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let valid: bool = transaction.query_row(
@@ -587,25 +638,34 @@ impl JobWorker {
              WHERE id = ?5",
             params![retryable, reason, due, sequence, claim.id],
         )?;
+        let settled = get_job(&transaction, &claim.id)?;
         transaction.commit()?;
-        Ok(())
+        Ok(settled)
     }
 
     /// Runs at most one real FTS rebuild. Derivative publication and completion share a fenced txn.
     pub fn run_next(&mut self) -> Result<Option<BackgroundJob>> {
+        self.run_next_inner(|_| {})
+    }
+
+    fn run_next_inner(
+        &mut self,
+        after_settlement: impl FnOnce(&BackgroundJob),
+    ) -> Result<Option<BackgroundJob>> {
         let Some(claim) = self.claim_at(Utc::now().timestamp_millis())? else {
             return Ok(None);
         };
-        if let Err(error) = self.library.job_repair_fts(&claim) {
-            let retryable = is_retryable(&error);
-            self.settle_failure(
+        let settled = match self.library.job_repair_fts(&claim) {
+            Ok(completed) => completed,
+            Err(error) => self.settle_failure(
                 &claim,
-                retryable,
+                is_retryable(&error),
                 &error.to_string(),
                 Utc::now().timestamp_millis(),
-            )?;
-        }
-        self.library.background_job(&claim.id).map(Some)
+            )?,
+        };
+        after_settlement(&settled);
+        Ok(Some(settled))
     }
 }
 
@@ -778,6 +838,99 @@ mod tests {
             finished
         );
         assert_eq!(library.cancel_background_job(&job.id).unwrap(), finished);
+    }
+
+    #[test]
+    fn completed_and_failed_results_survive_terminal_forgetting_before_return() {
+        let (_directory, library) = fixture();
+        let job = library
+            .enqueue_fts_repair("forget-after-publish", JobPriority::Normal)
+            .unwrap();
+        let mut worker = library.acquire_job_worker().unwrap();
+        let finished = worker
+            .run_next_inner(|snapshot| {
+                assert_eq!(snapshot.state, JobState::Completed);
+                library.forget_background_job(&snapshot.id).unwrap();
+            })
+            .unwrap()
+            .unwrap();
+        assert_eq!(finished.id, job.id);
+        assert!(finished.result.unwrap()["after"]["healthy"]
+            .as_bool()
+            .unwrap());
+        assert!(library.background_job(&job.id).is_err());
+
+        let failed = library
+            .enqueue_fts_repair("forget-after-failure", JobPriority::Normal)
+            .unwrap();
+        library
+            .lock()
+            .unwrap()
+            .execute("DROP TABLE passages_fts", [])
+            .unwrap();
+        let snapshot = worker
+            .run_next_inner(|snapshot| {
+                assert_eq!(snapshot.state, JobState::Failed);
+                library.forget_background_job(&snapshot.id).unwrap();
+            })
+            .unwrap()
+            .unwrap();
+        assert_eq!(snapshot.id, failed.id);
+        assert!(snapshot.last_error.is_some());
+        assert!(library.background_job(&failed.id).is_err());
+    }
+
+    #[test]
+    fn queue_open_refuses_uninitialized_or_malformed_runtime_without_migrating() {
+        let (directory, library) = fixture();
+        let missing = directory.path().join("missing.sqlite3");
+        assert!(Library::open_for_jobs(&missing).is_err());
+        assert!(JobWorker::open(&missing).is_err());
+        assert!(!missing.exists());
+        let database = library.job_database_path().unwrap();
+        library
+            .lock()
+            .unwrap()
+            .execute("ALTER TABLE background_jobs ADD COLUMN unexpected TEXT", [])
+            .unwrap();
+        assert!(matches!(
+            Library::open_for_jobs(&database),
+            Err(LoomError::JobQueue(_))
+        ));
+        assert!(matches!(
+            JobWorker::open(&database),
+            Err(LoomError::JobQueue(_))
+        ));
+        assert!(
+            library.stats().is_ok(),
+            "operational corruption must not hide canonical evidence"
+        );
+    }
+
+    #[test]
+    fn persisted_result_rejects_malformed_json_and_unicode_byte_overflow() {
+        let (_directory, library) = fixture();
+        let job = library
+            .enqueue_fts_repair("invalid-result", JobPriority::Normal)
+            .unwrap();
+        let connection = library.lock().unwrap();
+        for json in [
+            "not-json".to_owned(),
+            serde_json::to_string(&"🔥".repeat(20_000)).unwrap(),
+        ] {
+            assert!(connection
+                .execute(
+                    "UPDATE background_jobs SET result_json = ?1 WHERE id = ?2",
+                    params![json, job.id]
+                )
+                .is_err());
+        }
+        assert!(connection
+            .execute(
+                "UPDATE background_jobs SET last_error = ?1 WHERE id = ?2",
+                params!["🔥".repeat(4096), job.id]
+            )
+            .is_err());
     }
 
     #[test]
@@ -1042,6 +1195,9 @@ mod tests {
         let alias = directory.path().join("alias.sqlite3");
         std::os::unix::fs::symlink(directory.path().join("queue.sqlite3"), &alias).unwrap();
         let alias_library = Library::open(&alias).unwrap();
+        let different = Library::open(directory.path().join("different.sqlite3")).unwrap();
+        fs::remove_file(&alias).unwrap();
+        std::os::unix::fs::symlink(different.job_database_path().unwrap(), &alias).unwrap();
         let worker = library.acquire_job_worker().unwrap();
         assert!(matches!(
             alias_library.acquire_job_worker(),
@@ -1055,6 +1211,23 @@ mod tests {
         .unwrap();
         assert!(
             matches!(library.acquire_job_worker(), Err(LoomError::JobQueue(reason)) if reason.contains("hard-linked"))
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn worker_refuses_database_file_replacement_since_original_open() {
+        let (directory, library) = fixture();
+        let path = library.job_database_path().unwrap();
+        assert!(path.is_absolute());
+        fs::rename(&path, directory.path().join("original.sqlite3")).unwrap();
+        fs::write(&path, "replacement must not be opened").unwrap();
+        assert!(
+            matches!(library.acquire_job_worker(), Err(LoomError::JobQueue(reason)) if reason.contains("identity changed"))
+        );
+        assert_eq!(
+            fs::read_to_string(path).unwrap(),
+            "replacement must not be opened"
         );
     }
 
