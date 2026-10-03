@@ -1511,15 +1511,48 @@ mod tests {
                 [&job.id],
             )
             .unwrap();
-        let cancelled = library
+        let failed = library
             .acquire_job_worker()
             .unwrap()
             .run_next()
             .unwrap()
             .unwrap();
-        assert_eq!(cancelled.id, job.id);
-        assert_eq!(cancelled.state, JobState::Cancelled);
+        assert_eq!(failed.id, job.id);
+        assert_eq!(failed.state, JobState::Failed);
         assert_eq!(library.export_portable().unwrap().digest, before);
+    }
+
+    #[test]
+    fn missing_admission_identity_after_deletion_cannot_recreate_evidence() {
+        let (_directory, library, source) = file_fixture();
+        let job = library
+            .enqueue_index_file(&source, "deleted-missing-identity", JobPriority::Normal)
+            .unwrap();
+        let artifact = file_identity(&library, &source).0;
+        {
+            let connection = library.lock().unwrap();
+            connection
+                .execute(
+                    "UPDATE background_jobs SET target_json=json_remove(target_json,'$.artifact_id') WHERE id=?1",
+                    [&job.id],
+                )
+                .unwrap();
+            // Simulate a canonical-only old binary's deletion without erasing its queue record.
+            connection
+                .execute("DELETE FROM artifacts WHERE id=?1", [&artifact])
+                .unwrap();
+        }
+        let before = library.export_portable().unwrap().digest;
+        let failed = library
+            .acquire_job_worker()
+            .unwrap()
+            .run_next()
+            .unwrap()
+            .unwrap();
+        assert_eq!(failed.id, job.id);
+        assert_eq!(failed.state, JobState::Failed);
+        assert_eq!(library.export_portable().unwrap().digest, before);
+        assert_eq!(library.stats().unwrap().artifacts, 0);
     }
 
     #[test]

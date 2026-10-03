@@ -45,7 +45,8 @@ Unknown layouts are refused. Old binaries can still read canonical schema-10 evi
 refuse v3 queue commands. Upgrade is operational, not a portable schema migration.
 The first shipped v3 target includes admission-time artifact identity; earlier development
 prototypes were not released as a separate supported runtime. A missing identity is not
-silently upgraded to the identity of existing evidence.
+silently upgraded to the identity of existing evidence. Explicit `null` records absence at
+admission; omitting that field is invalid and permanently fails dispatch, even after deletion.
 
 ## Approved-file contract
 

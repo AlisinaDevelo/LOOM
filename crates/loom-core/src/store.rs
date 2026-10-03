@@ -3800,7 +3800,19 @@ pub(crate) struct IndexFileTarget {
     pub(crate) locator: String,
     media_type: String,
     authorization: SourceAuthorization,
+    // Explicit null means admission saw no artifact. A missing field must not acquire that
+    // meaning after a later deletion. deserialize_with makes the field required in Serde.
+    #[serde(deserialize_with = "required_artifact_identity")]
     artifact_id: Option<String>,
+}
+
+fn required_artifact_identity<'de, D>(
+    deserializer: D,
+) -> std::result::Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    serde::Deserialize::deserialize(deserializer)
 }
 
 pub(crate) fn canonical_queue_file(path: &Path, max_bytes: u64) -> Result<String> {
