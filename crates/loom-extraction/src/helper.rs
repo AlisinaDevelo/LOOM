@@ -265,9 +265,7 @@ mod tests {
         }
         if mode == "memory" {
             let mut memory = vec![0u8; 96 * 1024 * 1024];
-            for byte in &mut memory {
-                *byte = 42;
-            }
+            memory.fill(42);
             std::hint::black_box(&memory);
             thread::sleep(Duration::from_secs(10));
             return;

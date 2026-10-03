@@ -117,6 +117,8 @@ jobs:
       - run: cargo clippy --locked -p loom --all-targets -- -D warnings
       - name: Check full workspace at MSRV on macOS
         run: cargo +1.88.0 check --workspace --all-targets --locked
+      - name: Build trusted extraction helper for macOS process tests
+        run: cargo build --locked -p loom-extraction --bin loom-extractor
       - run: cargo test --workspace --locked
       - run: npm run build
       - run: npm run tauri build -- --debug --no-bundle

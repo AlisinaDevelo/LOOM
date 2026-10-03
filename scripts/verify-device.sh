@@ -135,6 +135,7 @@ run_step python-contract python3 -m unittest discover -s tests -v
 run_step browser-protocol python3 scripts/test-browser-capture-protocol.py
 run_step clippy cargo clippy --workspace --all-targets --locked -- -D warnings
 run_step clear-clippy-target clear_rust_outputs
+run_step rust-workspace-helper cargo build --locked -p loom-extraction --bin loom-extractor
 run_step rust-workspace cargo test --workspace --locked
 run_step clear-stable-target clear_rust_outputs
 run_step rust-msrv-check cargo +1.88.0 check --workspace --all-targets --locked

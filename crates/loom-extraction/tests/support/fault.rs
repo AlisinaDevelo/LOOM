@@ -33,7 +33,7 @@ fn main() {
         "crash" => std::process::exit(23),
         "memory" => {
             let mut memory = vec![0u8; 320 * 1024 * 1024];
-            for byte in &mut memory { *byte = 42; }
+            memory.fill(42);
             std::hint::black_box(&memory);
             std::thread::sleep(Duration::from_secs(10));
         }

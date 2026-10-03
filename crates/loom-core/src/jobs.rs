@@ -1124,6 +1124,13 @@ mod tests {
         };
         assert!(running_claim().is_none());
         let stop = AtomicBool::new(false);
+        let cleanup_library =
+            Library::open_for_jobs(directory.path().join("queue.sqlite3")).unwrap();
+        cleanup_library
+            .lock()
+            .unwrap()
+            .busy_timeout(Duration::ZERO)
+            .unwrap();
         struct StopOnDrop<'a> {
             stop: &'a AtomicBool,
             library: &'a Library,
@@ -1132,14 +1139,18 @@ mod tests {
         impl Drop for StopOnDrop<'_> {
             fn drop(&mut self) {
                 self.stop.store(true, Ordering::Release);
+                let start = Instant::now();
                 for id in self.ids {
-                    if self.library.background_job(id).is_ok_and(|job| {
-                        matches!(
-                            job.state,
-                            JobState::Running | JobState::Queued | JobState::Retryable
-                        )
-                    }) {
-                        let _ = self.library.cancel_background_job(id);
+                    loop {
+                        match self.library.cancel_background_job(id) {
+                            Err(error)
+                                if is_retryable(&error)
+                                    && start.elapsed() < Duration::from_millis(500) =>
+                            {
+                                std::thread::sleep(Duration::from_millis(5));
+                            }
+                            _ => break,
+                        }
                     }
                 }
             }
@@ -1163,7 +1174,7 @@ mod tests {
             // revoke pending/running work so a failed test cannot strand helpers.
             let _cleanup = StopOnDrop {
                 stop: &stop,
-                library: &library,
+                library: &cleanup_library,
                 ids: &ids,
             };
             let start = Instant::now();
@@ -1265,12 +1276,16 @@ mod tests {
     }
 
     fn reacquire_after_deliberate_test_drop(library: &Library) -> Result<JobWorker> {
+        after_deliberate_test_drop(|| test_worker(library))
+    }
+
+    fn after_deliberate_test_drop<T>(mut operation: impl FnMut() -> Result<T>) -> Result<T> {
         // Other test threads can fork with a transient copy of the CLOEXEC lock
         // descriptor. This applies only after a known owner release; production
         // acquisition and all live-contention assertions remain immediate.
         let start = Instant::now();
         loop {
-            match test_worker(library) {
+            match operation() {
                 Err(LoomError::JobWorkerBusy) if start.elapsed() < Duration::from_millis(500) => {
                     std::thread::sleep(Duration::from_millis(5));
                 }
@@ -1612,8 +1627,8 @@ mod tests {
             Err(LoomError::JobWorkerBusy)
         ));
         drop(worker);
-        assert!(library.acquire_job_worker().is_err());
-        library.upgrade_job_runtime().unwrap();
+        assert!(after_deliberate_test_drop(|| library.acquire_job_worker()).is_err());
+        after_deliberate_test_drop(|| library.upgrade_job_runtime()).unwrap();
         assert_eq!(library.background_job(&queued.id).unwrap(), queued);
         library.upgrade_job_runtime().unwrap();
         assert_eq!(library.background_job(&queued.id).unwrap(), queued);
@@ -2006,7 +2021,11 @@ mod tests {
             )
             .unwrap();
         drop(worker);
-        let failed = test_worker(&library).unwrap().run_next().unwrap().unwrap();
+        let failed = reacquire_after_deliberate_test_drop(&library)
+            .unwrap()
+            .run_next()
+            .unwrap()
+            .unwrap();
         assert_eq!(failed.state, JobState::Failed);
         assert!(failed.target_locator.is_none());
         assert_eq!(library.export_portable().unwrap().digest, before);
@@ -2056,7 +2075,7 @@ mod tests {
             .prepare_file_job(&claim, &json, Some(&test_extractor()))
             .unwrap();
         drop(old);
-        let mut new = test_worker(&library).unwrap();
+        let mut new = reacquire_after_deliberate_test_drop(&library).unwrap();
         assert!(matches!(
             new.library.publish_file_job(&claim, &prepared),
             Err(LoomError::JobClaimStale(_))
@@ -2235,7 +2254,9 @@ mod tests {
             .execute("DELETE FROM artifacts WHERE id=?1", [&artifact])
             .unwrap();
         assert_eq!(library.background_jobs(128).unwrap().len(), 1);
-        let cancelled = test_worker(&library).unwrap().run_next().unwrap().unwrap();
+        let mut worker = test_worker(&library).unwrap();
+        let cancelled = worker.run_next().unwrap().unwrap();
+        drop(worker);
         assert_eq!(cancelled.state, JobState::Cancelled);
         assert_eq!(library.stats().unwrap().artifacts, 0);
         assert_eq!(fs::read(&source).unwrap(), original);
@@ -2243,7 +2264,11 @@ mod tests {
         library
             .enqueue_index_file(&source, "post-old-purge", JobPriority::Normal)
             .unwrap();
-        let completed = test_worker(&library).unwrap().run_next().unwrap().unwrap();
+        let completed = reacquire_after_deliberate_test_drop(&library)
+            .unwrap()
+            .run_next()
+            .unwrap()
+            .unwrap();
         assert_eq!(completed.state, JobState::Completed);
         assert_eq!(
             library
@@ -2285,7 +2310,7 @@ mod tests {
         let queued = library
             .enqueue_index_file(&source, "post-restore-file", JobPriority::Normal)
             .unwrap();
-        let completed = test_worker(&library)
+        let completed = reacquire_after_deliberate_test_drop(&library)
             .unwrap()
             .run_next_inner(|completed| {
                 library.forget_background_job(&completed.id).unwrap();
@@ -2624,7 +2649,7 @@ mod tests {
         ));
         claim.verify(&worker.library.lock().unwrap()).unwrap();
         drop(worker);
-        migrated.upgrade_job_runtime().unwrap();
+        after_deliberate_test_drop(|| migrated.upgrade_job_runtime()).unwrap();
         validate_schema(&migrated.lock().unwrap()).unwrap();
         let upgraded_rows = migrated.background_jobs(128).unwrap();
         for row in rows {
@@ -2899,7 +2924,7 @@ mod tests {
             Err(LoomError::JobWorkerBusy)
         ));
         drop(old);
-        let mut new = test_worker(&library).unwrap();
+        let mut new = reacquire_after_deliberate_test_drop(&library).unwrap();
         assert_eq!(
             library.background_job(&job.id).unwrap().state,
             JobState::Retryable

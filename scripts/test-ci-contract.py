@@ -93,6 +93,8 @@ class CiContractTests(unittest.TestCase):
 
     def test_real_extractor_is_built_tested_and_staged_beside_the_cli(self) -> None:
         self.assertIn("cargo build --locked -p loom-extraction --bin loom-extractor", CI)
+        self.assertEqual(CI.count("cargo build --locked -p loom-extraction --bin loom-extractor"), 2)
+        self.assertIn("run_step rust-workspace-helper cargo build --locked -p loom-extraction --bin loom-extractor", DEVICE)
         self.assertIn("cargo test --locked -p loom-core -p loom-cli -p loom-extraction", CI)
         self.assertIn("run_step rust-msrv-helper cargo +1.88.0 build --locked -p loom-extraction", DEVICE)
         self.assertIn("cargo build --locked -q -p loom-cli -p loom-extraction --bins", DEVICE)

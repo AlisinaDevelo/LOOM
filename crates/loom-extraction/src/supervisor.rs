@@ -234,32 +234,6 @@ fn finalize_output(
     Ok(SupervisedOutput { source, metrics })
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn a_validated_success_response_cannot_cross_the_final_wall_deadline() {
-        let deadline = Duration::from_millis(25);
-        let start = Instant::now().checked_sub(deadline).unwrap();
-        let result = finalize_output(
-            SourceOutput::Text {
-                text: "validated source".into(),
-            },
-            ExtractionMetrics {
-                wall_ms: 1,
-                ..Default::default()
-            },
-            start,
-            deadline,
-        );
-        assert!(
-            matches!(result, Err(ExtractionError::WallTime)),
-            "{result:?}"
-        );
-    }
-}
-
 fn exit_error(status: ExitStatus) -> ExtractionError {
     match status.code() {
         Some(crate::helper::EXIT_WALL) => ExtractionError::WallTime,
@@ -306,5 +280,31 @@ impl Drop for OwnedChild {
     fn drop(&mut self) {
         let _ = self.0.kill();
         let _ = self.0.wait();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_validated_success_response_cannot_cross_the_final_wall_deadline() {
+        let deadline = Duration::from_millis(25);
+        let start = Instant::now().checked_sub(deadline).unwrap();
+        let result = finalize_output(
+            SourceOutput::Text {
+                text: "validated source".into(),
+            },
+            ExtractionMetrics {
+                wall_ms: 1,
+                ..Default::default()
+            },
+            start,
+            deadline,
+        );
+        assert!(
+            matches!(result, Err(ExtractionError::WallTime)),
+            "{result:?}"
+        );
     }
 }

@@ -16,6 +16,7 @@ and should not imply support for features that are not implemented.
 ~~~text
 npm ci
 npm run check
+cargo build --locked -p loom-extraction --bin loom-extractor
 cargo test --workspace --locked
 ~~~
 

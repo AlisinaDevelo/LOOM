@@ -14,6 +14,7 @@ lint: fmt-check
 	npm run lint
 
 test:
+	cargo build --locked -p loom-extraction --bin loom-extractor
 	cargo test --workspace --locked
 	npm run test
 
