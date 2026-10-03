@@ -1,0 +1,35 @@
+[package]
+name = "loom-extraction"
+description = "Byte-only local extraction and supervised process boundary for LOOM"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "loom-extractor"
+path = "src/main.rs"
+
+[dependencies]
+image.workspace = true
+kamadak-exif.workspace = true
+libc.workspace = true
+loom-ocr-macos = { path = "../loom-ocr-macos" }
+pdf-extract.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+# The only unsafe operations are the reviewed OS guard in platform.rs. The
+# canonical core retains its stronger forbid policy; all other modules deny it.
+[lints.rust]
+unsafe_code = "deny"
+
+[lints.clippy]
+dbg_macro = "deny"
+todo = "deny"

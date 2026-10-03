@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import os
 import platform
 import re
@@ -228,8 +229,9 @@ def run_measurement(
     report["resource_profile"] = {
         **resources,
         "wall_seconds_python": elapsed_seconds,
-        "cpu_seconds": (resources["user_seconds"] or 0.0)
-        + (resources["system_seconds"] or 0.0),
+        "cpu_seconds": None
+        if resources["user_seconds"] is None or resources["system_seconds"] is None
+        else resources["user_seconds"] + resources["system_seconds"],
         "time_command": "/usr/bin/time -lp",
     }
     report["run_number"] = run_number
@@ -259,9 +261,29 @@ def median(values: list[float]) -> float:
     return statistics.median(values) if values else 0.0
 
 
-def metric_summary(reports: list[dict[str, Any]], getter: Any) -> dict[str, float]:
-    values = [float(getter(report)) for report in reports]
+def metric_summary(
+    reports: list[dict[str, Any]], getter: Any, *, require_positive: bool = False
+) -> dict[str, Any]:
+    values = []
+    for report in reports:
+        try:
+            value = getter(report)
+            if (isinstance(value, bool) or not isinstance(value, (int, float))
+                    or not math.isfinite(value) or value < 0
+                    or (require_positive and value == 0)):
+                continue
+            values.append(float(value))
+        except (KeyError, TypeError, ValueError, OverflowError):
+            continue
+    availability = {
+        "measurements_available": len(values),
+        "measurements_expected": len(reports),
+        "complete": bool(values) and len(values) == len(reports),
+    }
+    if not availability["complete"]:
+        return availability
     return {
+        **availability,
         "min": min(values),
         "median": median(values),
         "max": max(values),
@@ -270,39 +292,66 @@ def metric_summary(reports: list[dict[str, Any]], getter: Any) -> dict[str, floa
 
 
 def evaluate_budgets(all_reports: list[dict[str, Any]]) -> dict[str, Any]:
-    largest = max(all_reports, key=lambda report: report["artifact_count"])
-    resources = largest["resource_profile"]
-    count = largest["artifact_count"]
-    observed = {
-        "index_throughput_artifacts_per_second_min": largest["index"]["artifacts_per_second"],
-        "warm_query_p95_ms_max": largest["query"]["warm_p95_latency_ms"],
-        "max_rss_bytes_max": resources["max_rss"] or 0,
-        "database_amplification_max": largest["database_bytes_per_source_byte"],
-        "cpu_seconds_per_1000_artifacts_max": ((resources["cpu_seconds"] or 0.0) / count) * 1000,
-        "fts_rebuild_seconds_max": largest["fts_rebuild"]["elapsed_ms"] / 1000,
+    count = max(report["artifact_count"] for report in all_reports)
+    if isinstance(count, bool) or not isinstance(count, int) or count <= 0:
+        raise ValueError("performance gate requires a positive artifact count")
+    largest = [report for report in all_reports if report["artifact_count"] == count]
+    getters = {
+        "index_throughput_artifacts_per_second_min": lambda r: r["index"]["artifacts_per_second"],
+        "warm_query_p95_ms_max": lambda r: r["query"]["warm_p95_latency_ms"],
+        "max_rss_bytes_max": lambda r: r["resource_profile"]["max_rss"],
+        "database_amplification_max": lambda r: r["database_bytes_per_source_byte"],
+        "cpu_seconds_per_1000_artifacts_max": lambda r: r["resource_profile"]["cpu_seconds"],
+        "fts_rebuild_seconds_max": lambda r: r["fts_rebuild"]["elapsed_ms"],
     }
     checks: list[dict[str, Any]] = []
     for name, budget in BUDGETS.items():
-        value = observed[name]
-        passed = value >= budget if name.endswith("_min") else value <= budget
+        values = []
+        for report in largest:
+            try:
+                value = getters[name](report)
+                if (isinstance(value, bool) or not isinstance(value, (int, float))
+                        or not math.isfinite(value) or value < 0
+                        or (name == "max_rss_bytes_max" and value == 0)):
+                    continue
+                if name == "cpu_seconds_per_1000_artifacts_max":
+                    value = (value / count) * 1000
+                elif name == "fts_rebuild_seconds_max":
+                    value /= 1000
+                if math.isfinite(value):
+                    values.append(value)
+            except (KeyError, TypeError, ValueError, OverflowError):
+                # An absent/malformed observation is not a zero-cost measurement.
+                continue
+        complete = len(values) == len(largest)
+        value = (min(values) if name.endswith("_min") else max(values)) if complete else None
+        passed = complete and (value >= budget if name.endswith("_min") else value <= budget)
+        status = "pass" if passed else "exceeded" if complete else "unavailable"
         checks.append(
             {
                 "name": name,
                 "budget": budget,
                 "observed": value,
-                "status": "pass" if passed else "exceeded",
+                "measurements_available": len(values),
+                "status": status,
                 "disposition": "within pre-optimization budget"
                 if passed
-                else "remediation required before the v0.2 release gate; no exception is silently accepted",
+                else "remediation required before the v0.2 release gate; no exception is silently accepted"
+                if complete
+                else "measure every largest-scale repeat before the release gate; unavailable data is not zero",
             }
         )
     exceeded = [check for check in checks if check["status"] == "exceeded"]
+    unavailable = [check for check in checks if check["status"] == "unavailable"]
     return {
         "scale_used_for_gate": count,
+        "runs_evaluated": len(largest),
         "checks": checks,
-        "status": "pass" if not exceeded else "conditional",
+        "status": "conditional" if exceeded or unavailable else "pass",
         "exceeded_count": len(exceeded),
+        "unavailable_count": len(unavailable),
         "all_exceedances_have_disposition": all(bool(item["disposition"]) for item in exceeded),
+        "all_unavailable_have_disposition": all(bool(item["disposition"]) for item in unavailable),
     }
 
 
@@ -348,7 +397,8 @@ def main() -> int:
                         scale_reports, lambda item: item["query"]["warm_p95_latency_ms"]
                     ),
                     "max_rss_bytes": metric_summary(
-                        scale_reports, lambda item: item["resource_profile"]["max_rss"] or 0
+                        scale_reports, lambda item: item["resource_profile"]["max_rss"],
+                        require_positive=True,
                     ),
                     "database_bytes_per_source_byte": metric_summary(
                         scale_reports, lambda item: item["database_bytes_per_source_byte"]

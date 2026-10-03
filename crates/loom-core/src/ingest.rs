@@ -1,7 +1,6 @@
 use std::{
     fs::{self, File, Metadata, OpenOptions},
     io::Read,
-    panic::{catch_unwind, AssertUnwindSafe},
     path::{Path, PathBuf},
     time::SystemTime,
 };
@@ -14,7 +13,7 @@ use walkdir::WalkDir;
 use crate::{
     domain::EvidenceAnchor,
     error::{io_error, LoomError, Result},
-    ocr::{self, ImageOcrRegion},
+    ocr::ImageOcrRegion,
 };
 
 pub(crate) const EXTRACTOR_ID: &str = "loom.text";
@@ -133,70 +132,82 @@ pub(crate) fn read_stable_with_limits_and_ocr(
 ) -> Result<StableDocument> {
     let media_type = supported_media_type(path)
         .ok_or_else(|| LoomError::UnsupportedSource(path.display().to_string()))?;
-
+    if media_type.starts_with("image/") && !ocr_enabled {
+        return Err(LoomError::OcrDisabled);
+    }
     let stable = read_stable_bytes(path, root, max_bytes)?;
+    // Foreground indexing retains its existing 100M-pixel limit. The queue uses
+    // a separate 16M-pixel process budget, but the extraction implementation is shared.
+    let output = loom_extraction::extract_bytes(
+        loom_extraction::MediaKind::from_mime(media_type)?,
+        &stable.bytes,
+        max_pdf_pages,
+        100_000_000,
+    )?;
+    Ok(stable_document_from_output(
+        stable,
+        media_type,
+        output,
+        capture_metadata,
+    ))
+}
+
+/// Source identity/hash and capture context come only from parent-owned bytes.
+pub(crate) fn stable_document_from_output(
+    stable: StableBytes,
+    media_type: &'static str,
+    output: loom_extraction::SourceOutput,
+    capture_metadata: Option<&serde_json::Value>,
+) -> StableDocument {
     let raw_hash = format!("blake3:{}", blake3::hash(&stable.bytes).to_hex());
-    if media_type == "application/pdf" {
-        let extraction = extract_pdf_pages(&stable.bytes, path, max_pdf_pages)?;
-        let normalized_text = extraction
-            .pages
-            .iter()
-            .map(|(_, text)| text.as_str())
-            .collect::<Vec<_>>()
-            .join("\n\n");
-        return Ok(StableDocument {
-            raw_hash,
-            byte_size: stable.bytes.len() as u64,
-            modified_ns: stable.modified_ns,
-            normalized_text,
-            media_type,
-            page_count: Some(extraction.page_count),
-            pdf_pages: Some(extraction.pages),
-            parse_warnings: extraction.warnings,
-            image_regions: None,
-            extraction_metadata: serde_json::json!({}),
-        });
-    }
-    if media_type.starts_with("image/") {
-        if !ocr_enabled {
-            return Err(LoomError::OcrDisabled);
-        }
-        let extraction = ocr::extract_image(&stable.bytes)?;
-        let mut extraction_metadata = with_capture_metadata(extraction.metadata, capture_metadata);
-        if let Some(object) = extraction_metadata.as_object_mut() {
-            object.insert("image_hash".into(), serde_json::json!(raw_hash.clone()));
-        }
-        return Ok(StableDocument {
-            raw_hash,
-            byte_size: stable.bytes.len() as u64,
-            modified_ns: stable.modified_ns,
-            normalized_text: extraction.normalized_text,
-            media_type,
-            pdf_pages: None,
-            page_count: None,
-            parse_warnings: extraction.warnings,
-            image_regions: Some(extraction.regions),
-            extraction_metadata,
-        });
-    }
-    let text = String::from_utf8(stable.bytes).map_err(|_| {
-        LoomError::InvalidPath(format!("source is not UTF-8 text: {}", path.display()))
-    })?;
-    let normalized_text = text.replace("\r\n", "\n").replace('\r', "\n");
-    Ok(StableDocument {
+    let mut document = StableDocument {
         raw_hash,
-        byte_size: text.len() as u64,
+        byte_size: stable.bytes.len() as u64,
         modified_ns: stable.modified_ns,
-        normalized_text,
+        normalized_text: String::new(),
         media_type,
         pdf_pages: None,
         page_count: None,
         parse_warnings: Vec::new(),
         image_regions: None,
         extraction_metadata: serde_json::json!({}),
-    })
+    };
+    match output {
+        loom_extraction::SourceOutput::Text { text } => document.normalized_text = text,
+        loom_extraction::SourceOutput::Pdf {
+            page_count,
+            pages,
+            warnings,
+        } => {
+            document.normalized_text = pages
+                .iter()
+                .map(|(_, text)| text.as_str())
+                .collect::<Vec<_>>()
+                .join("\n\n");
+            document.pdf_pages = Some(pages);
+            document.page_count = Some(page_count);
+            document.parse_warnings = warnings;
+        }
+        loom_extraction::SourceOutput::Image {
+            regions,
+            metadata,
+            warnings,
+        } => {
+            document.normalized_text = regions
+                .iter()
+                .map(|region| region.text.as_str())
+                .collect::<Vec<_>>()
+                .join("\n");
+            document.image_regions = Some(regions);
+            document.parse_warnings = warnings;
+            document.extraction_metadata = with_capture_metadata(metadata, capture_metadata);
+            if let Some(object) = document.extraction_metadata.as_object_mut() {
+                object.insert("image_hash".into(), serde_json::json!(document.raw_hash));
+            }
+        }
+    }
+    document
 }
-
 fn with_capture_metadata(
     mut extraction_metadata: serde_json::Value,
     capture_metadata: Option<&serde_json::Value>,
@@ -213,91 +224,6 @@ fn with_capture_metadata(
             "capture": capture_metadata,
         })
     }
-}
-
-struct PdfExtraction {
-    page_count: u32,
-    pages: Vec<(u32, String)>,
-    warnings: Vec<String>,
-}
-
-fn extract_pdf_pages(bytes: &[u8], path: &Path, max_pdf_pages: usize) -> Result<PdfExtraction> {
-    let extraction = catch_unwind(AssertUnwindSafe(|| {
-        if bytes
-            .windows(b"/Encrypt".len())
-            .any(|window| window == b"/Encrypt")
-        {
-            return Err(LoomError::PdfExtraction(format!(
-                "encrypted PDF requires an explicit password and was not indexed: {}",
-                path.display()
-            )));
-        }
-        let document = pdf_extract::Document::load_mem(bytes).map_err(|error| {
-            LoomError::PdfExtraction(format!("malformed PDF at {}: {error}", path.display()))
-        })?;
-        if document.is_encrypted() {
-            return Err(LoomError::PdfExtraction(format!(
-                "encrypted PDF requires an explicit password and was not indexed: {}",
-                path.display()
-            )));
-        }
-        let page_numbers = document.get_pages().keys().copied().collect::<Vec<_>>();
-        if page_numbers.is_empty() {
-            return Err(LoomError::PdfExtraction(format!(
-                "PDF has no pages: {}",
-                path.display()
-            )));
-        }
-        if page_numbers.len() > max_pdf_pages {
-            return Err(LoomError::PdfExtraction(format!(
-                "PDF has {} pages, exceeding the {max_pdf_pages}-page limit: {}",
-                page_numbers.len(),
-                path.display()
-            )));
-        }
-
-        let mut pages = Vec::with_capacity(page_numbers.len());
-        let mut warnings = Vec::new();
-        for page in page_numbers {
-            let mut text = String::new();
-            let mut output = pdf_extract::PlainTextOutput::new(&mut text);
-            if let Err(error) = pdf_extract::output_doc_page(&document, &mut output, page) {
-                warnings.push(format!("page {page} extraction failed: {error}"));
-                pages.push((page, String::new()));
-                continue;
-            }
-            let text = normalize_pdf_text(&text);
-            if text.trim().is_empty() {
-                warnings.push(format!("page {page} contains no extractable text"));
-            }
-            pages.push((page, text));
-        }
-        if pages.iter().all(|(_, text)| text.trim().is_empty()) {
-            return Err(LoomError::PdfExtraction(format!(
-                "PDF contains no extractable text (image-only or unsupported fonts): {}",
-                path.display()
-            )));
-        }
-        Ok(PdfExtraction {
-            page_count: pages.len() as u32,
-            pages,
-            warnings,
-        })
-    }))
-    .map_err(|_| {
-        LoomError::PdfExtraction(format!(
-            "PDF parser rejected malformed input without a recoverable error: {}",
-            path.display()
-        ))
-    })?;
-    extraction
-}
-
-fn normalize_pdf_text(text: &str) -> String {
-    text.replace("\r\n", "\n")
-        .replace('\r', "\n")
-        .trim_matches('\n')
-        .to_string()
 }
 
 /// Reads a source through a no-follow descriptor and verifies that it stayed within `root`.
@@ -323,9 +249,9 @@ pub(crate) fn read_stable_selected_file(path: &Path, max_bytes: u64) -> Result<V
     Ok(read_stable_bytes(path, root, max_bytes)?.bytes)
 }
 
-struct StableBytes {
-    bytes: Vec<u8>,
-    modified_ns: Option<i64>,
+pub(crate) struct StableBytes {
+    pub(crate) bytes: Vec<u8>,
+    pub(crate) modified_ns: Option<i64>,
 }
 
 /// Revalidate source bytes after extraction without invoking a parser/OCR provider again.
@@ -338,7 +264,7 @@ pub(crate) fn verify_stable_hash(path: &Path, max_bytes: u64, expected: &str) ->
     Ok(())
 }
 
-fn read_stable_bytes(path: &Path, root: &Path, max_bytes: u64) -> Result<StableBytes> {
+pub(crate) fn read_stable_bytes(path: &Path, root: &Path, max_bytes: u64) -> Result<StableBytes> {
     for _ in 0..3 {
         match read_stable_bytes_once(path, root, max_bytes) {
             Err(LoomError::SourceChanged(_)) => continue,

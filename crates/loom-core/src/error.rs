@@ -40,6 +40,9 @@ pub enum LoomError {
     #[error("OCR is unavailable: {0}")]
     OcrUnavailable(String),
 
+    #[error("background extraction failed: {0}")]
+    Extraction(loom_extraction::ExtractionError),
+
     #[error("source changed while it was being read: {0}")]
     SourceChanged(String),
 
@@ -93,6 +96,20 @@ pub enum LoomError {
 
     #[error("serialization error: {0}")]
     Serialization(#[from] serde_json::Error),
+}
+
+impl From<loom_extraction::ExtractionError> for LoomError {
+    fn from(error: loom_extraction::ExtractionError) -> Self {
+        use loom_extraction::ExtractionError as E;
+        match error {
+            E::PdfExtraction(message) => Self::PdfExtraction(message),
+            E::ImageExtraction(message) => Self::ImageExtraction(message),
+            E::OcrExtraction(message) => Self::OcrExtraction(message),
+            E::OcrUnavailable(message) => Self::OcrUnavailable(message),
+            E::InvalidText => Self::InvalidPath("source is not UTF-8 text".into()),
+            other => Self::Extraction(other),
+        }
+    }
 }
 
 pub(crate) fn io_error(path: impl Into<PathBuf>, source: std::io::Error) -> LoomError {

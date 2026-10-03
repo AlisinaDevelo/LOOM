@@ -38,9 +38,11 @@ jobs:
       - name: Format
         run: cargo fmt --all --check
       - name: Clippy
-        run: cargo clippy --locked -p loom-core -p loom-cli --all-targets -- -D warnings
+        run: cargo clippy --locked -p loom-core -p loom-cli -p loom-extraction --all-targets -- -D warnings
+      - name: Build trusted extraction helper for process tests
+        run: cargo build --locked -p loom-extraction --bin loom-extractor
       - name: Test
-        run: cargo test --locked -p loom-core -p loom-cli
+        run: cargo test --locked -p loom-core -p loom-cli -p loom-extraction
       - name: Retrieval smoke benchmark
         run: >-
           cargo run --locked -q -p loom-cli -- benchmark
@@ -62,7 +64,7 @@ jobs:
       - name: Install declared minimum Rust
         run: rustup toolchain install 1.88.0 --profile minimal
       - name: Check portable core and CLI at MSRV
-        run: cargo +1.88.0 check -p loom-core -p loom-cli --all-targets --locked
+        run: cargo +1.88.0 check -p loom-core -p loom-cli -p loom-extraction --all-targets --locked
 
   rust-advisories:
     name: Rust security advisories
@@ -115,6 +117,8 @@ jobs:
       - run: cargo clippy --locked -p loom --all-targets -- -D warnings
       - name: Check full workspace at MSRV on macOS
         run: cargo +1.88.0 check --workspace --all-targets --locked
+      - name: Build trusted extraction helper for macOS process tests
+        run: cargo build --locked -p loom-extraction --bin loom-extractor
       - run: cargo test --workspace --locked
       - run: npm run build
       - run: npm run tauri build -- --debug --no-bundle

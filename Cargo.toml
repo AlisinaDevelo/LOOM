@@ -3,6 +3,7 @@ members = [
     "crates/loom-browser-capture",
     "crates/loom-cli",
     "crates/loom-core",
+    "crates/loom-extraction",
     "crates/loom-ocr-macos",
     "src-tauri",
 ]

@@ -91,6 +91,17 @@ class CiContractTests(unittest.TestCase):
         self.assertIn("run_step queued-indexing python3 scripts/test-queued-indexing.py", DEVICE)
         self.assertIn("python3 scripts/test-queued-indexing.py --loom target/debug/loom", CI)
 
+    def test_real_extractor_is_built_tested_and_staged_beside_the_cli(self) -> None:
+        self.assertIn("cargo build --locked -p loom-extraction --bin loom-extractor", CI)
+        self.assertEqual(CI.count("cargo build --locked -p loom-extraction --bin loom-extractor"), 2)
+        self.assertIn("run_step rust-workspace-helper cargo build --locked -p loom-extraction --bin loom-extractor", DEVICE)
+        self.assertIn("cargo test --locked -p loom-core -p loom-cli -p loom-extraction", CI)
+        self.assertIn("run_step rust-msrv-helper cargo +1.88.0 build --locked -p loom-extraction", DEVICE)
+        self.assertIn("cargo build --locked -q -p loom-cli -p loom-extraction --bins", DEVICE)
+        self.assertIn('cp "$ROOT/target/debug/loom-extractor" "$EVIDENCE_DIR/loom-extractor"', DEVICE)
+        self.assertIn('run_step queued-responsiveness env LOOM_TEST_RESPONSE_REPORT=', DEVICE)
+        self.assertIn('jobs::tests::persistent_retrieval_during_native_queued_ocr -- --exact --nocapture', DEVICE)
+
 
 if __name__ == "__main__":
     unittest.main()

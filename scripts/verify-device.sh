@@ -24,6 +24,7 @@ if [[ $# -eq 1 ]]; then
 else
   EVIDENCE_DIR=$(mktemp -d /tmp/loom-device-verify.XXXXXX)
 fi
+EVIDENCE_DIR=$(cd "$EVIDENCE_DIR" && pwd)
 
 COMMANDS="$EVIDENCE_DIR/commands.txt"
 SUMMARY="$EVIDENCE_DIR/summary.txt"
@@ -103,7 +104,9 @@ clear_rust_outputs() {
 stage_cli_binary() {
   local staged_binary="$EVIDENCE_DIR/loom"
   cp "$ROOT/target/debug/loom" "$staged_binary"
+  cp "$ROOT/target/debug/loom-extractor" "$EVIDENCE_DIR/loom-extractor"
   chmod +x "$staged_binary"
+  chmod +x "$EVIDENCE_DIR/loom-extractor"
   export LOOM_BINARY="$staged_binary"
   printf 'staged=%s\n' "$staged_binary"
 }
@@ -132,16 +135,19 @@ run_step python-contract python3 -m unittest discover -s tests -v
 run_step browser-protocol python3 scripts/test-browser-capture-protocol.py
 run_step clippy cargo clippy --workspace --all-targets --locked -- -D warnings
 run_step clear-clippy-target clear_rust_outputs
+run_step rust-workspace-helper cargo build --locked -p loom-extraction --bin loom-extractor
 run_step rust-workspace cargo test --workspace --locked
 run_step clear-stable-target clear_rust_outputs
 run_step rust-msrv-check cargo +1.88.0 check --workspace --all-targets --locked
 run_step clear-msrv-check-target clear_rust_outputs
-run_step rust-msrv-tests cargo +1.88.0 test -p loom-core --lib --tests -- --nocapture
+run_step rust-msrv-helper cargo +1.88.0 build --locked -p loom-extraction --bin loom-extractor
+run_step rust-msrv-tests cargo +1.88.0 test --locked -p loom-core -p loom-extraction --lib --tests -- --nocapture
 run_step clear-msrv-test-target clear_rust_outputs
-run_step performance-build cargo build --locked -q -p loom-cli
+run_step performance-build cargo build --locked -q -p loom-cli -p loom-extraction --bins
 run_step stage-cli-binary stage_cli_binary
 run_step background-jobs python3 scripts/test-background-jobs.py --loom "$EVIDENCE_DIR/loom"
 run_step queued-indexing python3 scripts/test-queued-indexing.py --loom "$EVIDENCE_DIR/loom" --native-ocr
+run_step queued-responsiveness env LOOM_TEST_RESPONSE_REPORT="$EVIDENCE_DIR/queued-responsiveness.json" cargo test --locked -p loom-core --lib jobs::tests::persistent_retrieval_during_native_queued_ocr -- --exact --nocapture
 run_step clear-rust-target clear_rust_outputs
 run_step retrieval-benchmark "$EVIDENCE_DIR/loom" benchmark --corpus benchmarks/retrieval/v0/corpus --queries benchmarks/retrieval/v0/queries.jsonl
 run_step retrieval-benchmark-v1 "$EVIDENCE_DIR/loom" benchmark --corpus benchmarks/retrieval/v1/corpus --queries benchmarks/retrieval/v1/queries.jsonl

@@ -628,7 +628,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         }
         Command::UpgradeJobRuntime => {
             JobWorker::upgrade_runtime(arguments.database)?;
-            println!("{{\"background_job_schema_version\":3}}");
+            println!("{{\"background_job_schema_version\":4}}");
         }
         Command::CancelJob { id } => {
             let library = Library::open_for_jobs(arguments.database)?;
