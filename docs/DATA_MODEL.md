@@ -293,6 +293,9 @@ interrupted scan's checkpoint. Explicit re-selection advances the disabled root'
 and starts a full scan. Each ingestion, cleanup, and checkpoint write checks the captured root ID
 and generation inside its own transaction. An old extraction cannot reactivate revoked evidence,
 replace a new selection's version, or hide its sources, even through another SQLite connection.
+Authorization binds the selected file/directory kind and rejects missing, symlink, or wrong-kind
+roots before a write. A path replaced by the opposite kind requires explicit removal of the old
+scope before selecting the replacement; ordinary selection or bookmark retry cannot reuse it.
 Checkpoint and terminal updates require one running job belonging to that same root; a mismatched
 job ID or a late write to a completed job rolls back the entire canonical transaction.
 Startup and event reconciliation carry the already-approved generation instead of calling the

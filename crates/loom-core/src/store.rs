@@ -609,13 +609,13 @@ impl Library {
             connection
                 .query_row(
                     "SELECT i.source_locator, r.id, r.scope_generation,
-                        (SELECT value FROM schema_meta WHERE key = 'authorization_incarnation')
+                        (SELECT value FROM schema_meta WHERE key = 'authorization_incarnation'), r.kind
                      FROM bookmark_imports i JOIN source_roots r ON r.id = i.source_root_id
                      WHERE i.id = ?1 AND i.status <> 'revoked' AND r.enabled = 1
                         AND r.locator = i.source_locator AND r.kind = 'file'",
                     [import_id],
                     |row| Ok((row.get::<_, String>(0)?, SourceAuthorization {
-                        root_id: row.get(1)?, generation: row.get(2)?, incarnation: row.get(3)?,
+                        root_id: row.get(1)?, generation: row.get(2)?, incarnation: row.get(3)?, kind: row.get(4)?,
                     })),
                 )
                 .optional()?
@@ -2140,7 +2140,7 @@ impl Library {
         connection
             .query_row(
                 "SELECT id, scope_generation,
-                    (SELECT value FROM schema_meta WHERE key = 'authorization_incarnation')
+                    (SELECT value FROM schema_meta WHERE key = 'authorization_incarnation'), kind
                  FROM source_roots WHERE locator = ?1 AND enabled = 1",
                 [locator],
                 |row| {
@@ -2148,6 +2148,7 @@ impl Library {
                         root_id: row.get(0)?,
                         generation: row.get(1)?,
                         incarnation: row.get(2)?,
+                        kind: row.get(3)?,
                     })
                 },
             )
@@ -2172,6 +2173,7 @@ impl Library {
                     root_id: row.get(2)?,
                     generation: row.get(3)?,
                     incarnation: row.get(4)?,
+                    kind: row.get(1)?,
                 },
             ))
         })?;
@@ -3360,18 +3362,30 @@ struct SourceAuthorization {
     root_id: String,
     generation: i64,
     incarnation: String,
+    kind: String,
 }
 
 impl SourceAuthorization {
     fn verify(&self, connection: &Connection) -> Result<()> {
-        let authorized: bool = connection.query_row(
-            "SELECT EXISTS(SELECT 1 FROM source_roots
-                WHERE id = ?1 AND enabled = 1 AND scope_generation = ?2
-                    AND (SELECT value FROM schema_meta WHERE key = 'authorization_incarnation') = ?3)",
-            params![self.root_id, self.generation, self.incarnation],
+        let locator: Option<String> = connection.query_row(
+            "SELECT locator FROM source_roots
+                WHERE id = ?1 AND enabled = 1 AND scope_generation = ?2 AND kind = ?4
+                    AND (SELECT value FROM schema_meta WHERE key = 'authorization_incarnation') = ?3",
+            params![self.root_id, self.generation, self.incarnation, self.kind],
             |row| row.get(0),
-        )?;
-        if !authorized {
+        ).optional()?;
+        let locator = locator.ok_or_else(|| LoomError::SourceRevoked(self.root_id.clone()))?;
+        // Source shape is part of the selected capability. A replacement directory/file or
+        // symlink is not the same scope, even before a controller updates its persisted row.
+        let metadata = fs::symlink_metadata(&locator)
+            .map_err(|_| LoomError::SourceRevoked(self.root_id.clone()))?;
+        if metadata.file_type().is_symlink()
+            || match self.kind.as_str() {
+                "file" => !metadata.is_file(),
+                "directory" => !metadata.is_dir(),
+                _ => true,
+            }
+        {
             return Err(LoomError::SourceRevoked(self.root_id.clone()));
         }
         Ok(())
@@ -4358,16 +4372,17 @@ fn ensure_source_root(
          ON CONFLICT(locator) DO UPDATE SET
             scope_generation = source_roots.scope_generation + CASE WHEN source_roots.enabled = 0 THEN 1 ELSE 0 END,
             enabled = 1, last_seen_at = excluded.last_seen_at
+         WHERE source_roots.kind = excluded.kind
          RETURNING id, scope_generation,
-            (SELECT value FROM schema_meta WHERE key = 'authorization_incarnation')",
+            (SELECT value FROM schema_meta WHERE key = 'authorization_incarnation'), kind",
         params![
             Uuid::new_v4().to_string(),
             if directory { "directory" } else { "file" },
             locator,
             now
         ],
-        |row| Ok(SourceAuthorization { root_id: row.get(0)?, generation: row.get(1)?, incarnation: row.get(2)? }),
-    )?;
+        |row| Ok(SourceAuthorization { root_id: row.get(0)?, generation: row.get(1)?, incarnation: row.get(2)?, kind: row.get(3)? }),
+    ).optional()?.ok_or_else(|| LoomError::InvalidPath("selected source changed file/directory kind; explicitly purge its old scope before selecting the replacement".into()))?;
     Ok(authorization)
 }
 
@@ -5458,6 +5473,98 @@ mod tests {
             ),
             "versioned"
         );
+    }
+
+    #[test]
+    fn file_directory_replacements_cannot_reuse_selected_consent() {
+        for was_directory in [false, true] {
+            let directory = tempdir().unwrap();
+            let root = directory.path().join("selected.md");
+            let source = if was_directory {
+                fs::create_dir(&root).unwrap();
+                root.join("original.md")
+            } else {
+                root.clone()
+            };
+            fs::write(&source, "oldshapemarker").unwrap();
+            let library = Library::open_in_memory().unwrap();
+            library.index_path(&root).unwrap();
+            let root = root.canonicalize().unwrap();
+            let source = source.canonicalize().unwrap();
+            let authorization = library
+                .approved_root_authorization(root.to_str().unwrap())
+                .unwrap();
+            let prepared = ingest::read_stable(&source, &root, 8 * 1024 * 1024).unwrap();
+            let before = library.export_portable().unwrap().tables;
+            fs::remove_file(&source).unwrap();
+            if was_directory {
+                fs::remove_dir(&root).unwrap();
+                fs::write(&root, "replacementshapemarker").unwrap();
+            } else {
+                fs::create_dir(&root).unwrap();
+                fs::write(root.join("replacement.md"), "replacementshapemarker").unwrap();
+            }
+            assert!(matches!(
+                library.index_document_with_extractor(
+                    &authorization,
+                    &source,
+                    prepared,
+                    "loom.text",
+                    "changed"
+                ),
+                Err(LoomError::SourceRevoked(_))
+            ));
+            assert!(library.index_path(&root).is_err());
+            assert!(matches!(
+                library.index_path_with_options(
+                    &root,
+                    &Default::default(),
+                    None,
+                    None,
+                    None,
+                    Some(authorization)
+                ),
+                Err(LoomError::SourceRevoked(_))
+            ));
+            assert_eq!(library.export_portable().unwrap().tables, before);
+            library.purge_root(root.to_str().unwrap()).unwrap();
+            let replacement = library.index_path(&root).unwrap();
+            assert_eq!(replacement.indexed, 1);
+            assert_eq!(
+                library.source_roots().unwrap()[0].kind,
+                if was_directory { "file" } else { "directory" }
+            );
+        }
+    }
+
+    #[test]
+    fn bookmark_import_refuses_a_replaced_directory_scope_until_explicit_reset() {
+        let directory = tempdir().unwrap();
+        let root = directory.path().join("selected.html");
+        fs::create_dir(&root).unwrap();
+        let old = root.join("old.md");
+        fs::write(&old, "oldbookmarkscope").unwrap();
+        let library = Library::open_in_memory().unwrap();
+        library.index_path(&root).unwrap();
+        let root = root.canonicalize().unwrap();
+        let before = library.export_portable().unwrap().tables;
+        fs::remove_file(old).unwrap();
+        fs::remove_dir(&root).unwrap();
+        fs::write(
+            &root,
+            include_str!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/tests/fixtures/bookmarks/chrome.html"
+            )),
+        )
+        .unwrap();
+        assert!(library.import_bookmarks(&root).is_err());
+        assert_eq!(library.export_portable().unwrap().tables, before);
+        library.purge_root(root.to_str().unwrap()).unwrap();
+        let imported = library.import_bookmarks(&root).unwrap();
+        assert_eq!(imported.imported, 1);
+        assert!(library.retry_bookmark_import(&imported.import_id).is_ok());
+        super::validate_bookmark_scope_consistency(&library.lock().unwrap()).unwrap();
     }
 
     #[test]
