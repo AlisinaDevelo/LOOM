@@ -233,6 +233,14 @@ impl Library {
         &self,
         selected_path: impl AsRef<Path>,
     ) -> Result<BookmarkImportReport> {
+        self.import_bookmarks_with_authorization(selected_path, None)
+    }
+
+    fn import_bookmarks_with_authorization(
+        &self,
+        selected_path: impl AsRef<Path>,
+        approved_authorization: Option<SourceAuthorization>,
+    ) -> Result<BookmarkImportReport> {
         let requested_path = selected_path.as_ref();
         let metadata = fs::symlink_metadata(requested_path)
             .map_err(|source| io_error(requested_path, source))?;
@@ -246,6 +254,9 @@ impl Library {
             .canonicalize()
             .map_err(|source| io_error(requested_path, source))?;
         let source_uri = utf8_path(&path)?;
+        if let Some(authorization) = approved_authorization.as_ref() {
+            authorization.verify_locator(&*self.lock()?, &source_uri)?;
+        }
         let bytes = ingest::read_stable_selected_file(&path, self.limits.max_file_bytes)?;
         let content_hash = format!("blake3:{}", blake3::hash(&bytes).to_hex());
         let text = String::from_utf8(bytes).map_err(|_| {
@@ -260,19 +271,24 @@ impl Library {
         let export = detailed.export.clone();
         let authorization = {
             let mut connection = self.lock()?;
-            ensure_source_root(&mut connection, &source_uri, false)?
+            match approved_authorization {
+                Some(authorization) => authorization,
+                None => ensure_source_root(&mut connection, &source_uri, false)?,
+            }
         };
         let root_id = &authorization.root_id;
         let now = Utc::now().to_rfc3339();
         let mut connection = self.lock()?;
         let transaction = connection.transaction()?;
         authorization.verify(&transaction)?;
+        validate_bookmark_scope_consistency(&transaction)?;
         let existing: Option<(String, i64)> = transaction
             .query_row(
                 "SELECT id, (SELECT COUNT(*) FROM bookmark_import_items WHERE import_id = i.id)
                  FROM bookmark_imports i
-                 WHERE source_locator = ?1 AND format = ?2 AND content_hash = ?3",
-                params![source_uri, export.format, content_hash],
+                 WHERE source_locator = ?1 AND format = ?2 AND content_hash = ?3
+                     AND source_root_id = ?4",
+                params![source_uri, export.format, content_hash, root_id],
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .optional()?;
@@ -285,17 +301,17 @@ impl Library {
                         SELECT 1 FROM bookmark_import_failures
                         WHERE import_id = ?1 AND state = 'pending'
                      ) THEN 'partial' ELSE 'complete' END
-                 WHERE id = ?1 AND status = 'revoked'",
-                [&import_id],
+                 WHERE id = ?1 AND status = 'revoked' AND source_root_id = ?2",
+                params![import_id, root_id],
             )?;
             transaction.execute(
                 "UPDATE artifacts SET state = 'active', last_seen_at = ?2
-                 WHERE state = 'missing' AND id IN (
+                 WHERE state = 'missing' AND source_root_id = ?3 AND id IN (
                     SELECT r.artifact_id FROM bookmark_records r
                     JOIN bookmark_import_items item ON item.bookmark_id = r.id
                     WHERE item.import_id = ?1
                  )",
-                params![import_id, now],
+                params![import_id, now, root_id],
             )?;
             let failures = pending_import_failures(&transaction, &import_id)?;
             transaction.commit()?;
@@ -417,6 +433,15 @@ impl Library {
                     && old_added_at == entry.added_at
                     && old_modified_at == entry.modified_at;
                 if unchanged {
+                    upsert_bookmark_artifact(
+                        &transaction,
+                        root_id,
+                        &source_uri,
+                        &artifact_id,
+                        entry,
+                        &entry_hash,
+                        &now,
+                    )?;
                     report.unchanged += 1;
                     (bookmark_id, artifact_id, "unchanged")
                 } else {
@@ -579,25 +604,26 @@ impl Library {
     /// Re-reads the original export of a recorded import. A revoked export must be re-selected
     /// explicitly instead; retry never re-grants access that was withdrawn.
     pub fn retry_bookmark_import(&self, import_id: &str) -> Result<BookmarkImportReport> {
-        let (locator, status): (String, String) = {
+        let (locator, authorization) = {
             let connection = self.lock()?;
             connection
                 .query_row(
-                    "SELECT source_locator, status FROM bookmark_imports WHERE id = ?1",
+                    "SELECT i.source_locator, r.id, r.scope_generation,
+                        (SELECT value FROM schema_meta WHERE key = 'authorization_incarnation')
+                     FROM bookmark_imports i JOIN source_roots r ON r.id = i.source_root_id
+                     WHERE i.id = ?1 AND i.status <> 'revoked' AND r.enabled = 1
+                        AND r.locator = i.source_locator AND r.kind = 'file'",
                     [import_id],
-                    |row| Ok((row.get(0)?, row.get(1)?)),
+                    |row| Ok((row.get::<_, String>(0)?, SourceAuthorization {
+                        root_id: row.get(1)?, generation: row.get(2)?, incarnation: row.get(3)?,
+                    })),
                 )
                 .optional()?
                 .ok_or_else(|| {
-                    LoomError::InvalidPath(format!("unknown bookmark import: {import_id}"))
+                    LoomError::InvalidPath("bookmark import is unknown or its source is not enabled; explicitly re-select a revoked export".into())
                 })?
         };
-        if status == "revoked" {
-            return Err(LoomError::InvalidPath(
-                "this bookmark export was revoked; select it again to import it".into(),
-            ));
-        }
-        self.import_bookmarks(locator)
+        self.import_bookmarks_with_authorization(locator, Some(authorization))
     }
 
     /// Lists bounded current bookmark records with their original export provenance.
@@ -1583,7 +1609,7 @@ impl Library {
                 && projection.2 == extractor_version
         }) {
             if let Some((job_id, next_unit)) = checkpoint {
-                update_index_job_checkpoint(&transaction, job_id, next_unit, &now)?;
+                update_index_job_checkpoint(&transaction, authorization, job_id, next_unit, &now)?;
             }
             transaction.commit()?;
             return Ok(false);
@@ -1632,7 +1658,7 @@ impl Library {
             params![version_id, now, artifact_id],
         )?;
         if let Some((job_id, next_unit)) = checkpoint {
-            update_index_job_checkpoint(&transaction, job_id, next_unit, &now)?;
+            update_index_job_checkpoint(&transaction, authorization, job_id, next_unit, &now)?;
         }
         transaction.commit()?;
         Ok(true)
@@ -2172,7 +2198,7 @@ impl Library {
              )",
             params![authorization.root_id, locator],
         )?;
-        update_index_job_checkpoint(&transaction, job_id, next_unit, &now)?;
+        update_index_job_checkpoint(&transaction, authorization, job_id, next_unit, &now)?;
         transaction.commit()?;
         Ok(())
     }
@@ -2186,11 +2212,17 @@ impl Library {
         let connection = self.lock()?;
         let transaction = connection.unchecked_transaction()?;
         authorization.verify(&transaction)?;
-        transaction.execute(
+        let updated = transaction.execute(
             "UPDATE index_jobs SET state = 'interrupted', last_error = ?1, updated_at = ?2
-             WHERE id = ?3",
-            params![message, Utc::now().to_rfc3339(), job_id],
+             WHERE id = ?3 AND source_root_id = ?4 AND state = 'running'",
+            params![
+                message,
+                Utc::now().to_rfc3339(),
+                job_id,
+                authorization.root_id
+            ],
         )?;
+        require_job_update(updated, job_id)?;
         transaction.commit()?;
         Ok(())
     }
@@ -2204,11 +2236,17 @@ impl Library {
         let connection = self.lock()?;
         let transaction = connection.unchecked_transaction()?;
         authorization.verify(&transaction)?;
-        transaction.execute(
+        let updated = transaction.execute(
             "UPDATE index_jobs SET state = 'failed', last_error = ?1, updated_at = ?2
-             WHERE id = ?3",
-            params![message, Utc::now().to_rfc3339(), job_id],
+             WHERE id = ?3 AND source_root_id = ?4 AND state = 'running'",
+            params![
+                message,
+                Utc::now().to_rfc3339(),
+                job_id,
+                authorization.root_id
+            ],
         )?;
+        require_job_update(updated, job_id)?;
         transaction.commit()?;
         Ok(())
     }
@@ -2222,13 +2260,19 @@ impl Library {
         let connection = self.lock()?;
         let transaction = connection.unchecked_transaction()?;
         authorization.verify(&transaction)?;
-        transaction.execute(
+        let updated = transaction.execute(
             "UPDATE index_jobs
              SET state = 'completed', next_unit = total_units, last_error = ?1,
                  updated_at = ?2, completed_at = ?2
-             WHERE id = ?3",
-            params![last_error, Utc::now().to_rfc3339(), job_id],
+             WHERE id = ?3 AND source_root_id = ?4 AND state = 'running'",
+            params![
+                last_error,
+                Utc::now().to_rfc3339(),
+                job_id,
+                authorization.root_id
+            ],
         )?;
+        require_job_update(updated, job_id)?;
         transaction.commit()?;
         Ok(())
     }
@@ -2242,7 +2286,13 @@ impl Library {
         let connection = self.lock()?;
         let transaction = connection.unchecked_transaction()?;
         authorization.verify(&transaction)?;
-        update_index_job_checkpoint(&transaction, job_id, next_unit, &Utc::now().to_rfc3339())?;
+        update_index_job_checkpoint(
+            &transaction,
+            authorization,
+            job_id,
+            next_unit,
+            &Utc::now().to_rfc3339(),
+        )?;
         transaction.commit()?;
         Ok(())
     }
@@ -3343,16 +3393,63 @@ impl SourceAuthorization {
 
 fn update_index_job_checkpoint(
     transaction: &Transaction<'_>,
+    authorization: &SourceAuthorization,
     job_id: &str,
     next_unit: u64,
     now: &str,
 ) -> Result<()> {
-    transaction.execute(
+    let updated = transaction.execute(
         "UPDATE index_jobs
          SET next_unit = ?1, updated_at = ?2
-         WHERE id = ?3 AND state = 'running'",
-        params![sql_i64(next_unit, "index job progress")?, now, job_id],
+         WHERE id = ?3 AND source_root_id = ?4 AND state = 'running'",
+        params![
+            sql_i64(next_unit, "index job progress")?,
+            now,
+            job_id,
+            authorization.root_id
+        ],
     )?;
+    require_job_update(updated, job_id)
+}
+
+fn require_job_update(updated: usize, job_id: &str) -> Result<()> {
+    if updated != 1 {
+        return Err(LoomError::IndexJobStale(job_id.to_owned()));
+    }
+    Ok(())
+}
+
+/// A foreign-key-valid archive can still cross-link bookmark consent between different roots.
+pub(crate) fn validate_bookmark_scope_consistency(connection: &Connection) -> Result<()> {
+    let inconsistent: bool = connection.query_row(
+        "SELECT EXISTS(
+            SELECT 1 FROM bookmark_imports i JOIN source_roots r ON r.id = i.source_root_id
+            WHERE i.source_locator <> r.locator OR r.kind <> 'file'
+         ) OR EXISTS(
+            SELECT 1 FROM bookmark_records b
+            JOIN bookmark_imports i ON i.id = b.first_import_id
+            JOIN artifacts a ON a.id = b.artifact_id
+            WHERE i.source_root_id <> a.source_root_id
+         ) OR EXISTS(
+            SELECT 1 FROM bookmark_import_items item
+            JOIN bookmark_imports i ON i.id = item.import_id
+            JOIN bookmark_records b ON b.id = item.bookmark_id
+            JOIN artifacts a ON a.id = b.artifact_id
+            WHERE i.source_root_id <> a.source_root_id
+         ) OR EXISTS(
+            SELECT 1 FROM bookmark_import_failures f
+            JOIN bookmark_imports i ON i.id = f.import_id
+            JOIN bookmark_imports resolved ON resolved.id = f.resolved_by_import_id
+            WHERE i.source_root_id <> resolved.source_root_id
+         )",
+        [],
+        |row| row.get(0),
+    )?;
+    if inconsistent {
+        return Err(LoomError::PortableExport(
+            "bookmark scope ownership mismatch".into(),
+        ));
+    }
     Ok(())
 }
 
@@ -4419,8 +4516,9 @@ fn upsert_bookmark_artifact(
         hash == content_hash && version == BOOKMARK_EXTRACTOR_VERSION
     }) {
         transaction.execute(
-            "UPDATE artifacts SET title = ?1, last_seen_at = ?2 WHERE id = ?3",
-            params![entry.title, now, artifact_id],
+            "UPDATE artifacts SET title = ?1, state = 'active', last_seen_at = ?2
+             WHERE id = ?3 AND source_root_id = ?4",
+            params![entry.title, now, artifact_id, root_id],
         )?;
         return Ok(());
     }
@@ -5359,6 +5457,126 @@ mod tests {
                     .unwrap()[0]
             ),
             "versioned"
+        );
+    }
+
+    #[test]
+    fn a_pending_bookmark_retry_cannot_inherit_later_source_consent() {
+        for reselected in [false, true] {
+            let directory = tempdir().unwrap();
+            let source = directory.path().join("bookmarks.html");
+            let database = directory.path().join("library.sqlite3");
+            fs::write(
+                &source,
+                include_str!(concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/tests/fixtures/bookmarks/chrome.html"
+                )),
+            )
+            .unwrap();
+            let worker = Library::open(&database).unwrap();
+            let import = worker.import_bookmarks(&source).unwrap();
+            let authorization = worker
+                .approved_root_authorization(&import.source_uri)
+                .unwrap();
+            let controller = Library::open(&database).unwrap();
+            controller.revoke_source_root(&import.source_uri).unwrap();
+            if reselected {
+                controller.import_bookmarks(&source).unwrap();
+            }
+            assert!(matches!(
+                worker.import_bookmarks_with_authorization(&source, Some(authorization)),
+                Err(LoomError::SourceRevoked(_))
+            ));
+            assert_eq!(controller.source_roots().unwrap()[0].enabled, reselected);
+        }
+    }
+
+    #[test]
+    fn completed_jobs_refuse_late_checkpoint_and_terminal_updates() {
+        let directory = tempdir().unwrap();
+        let source = directory.path().join("completed.md");
+        fs::write(&source, "completedcheckpointcontent").unwrap();
+        let library = Library::open_in_memory().unwrap();
+        library.index_path(&source).unwrap();
+        let source = source.canonicalize().unwrap();
+        let authorization = library
+            .approved_root_authorization(source.to_str().unwrap())
+            .unwrap();
+        let before = library.index_checkpoint(&source).unwrap().unwrap();
+        for operation in [
+            library.advance_index_job(&authorization, &before.job_id, 0),
+            library.interrupt_index_job(&authorization, &before.job_id, "late"),
+            library.fail_index_job(&authorization, &before.job_id, "late"),
+            library.complete_index_job(&authorization, &before.job_id, None),
+        ] {
+            assert!(matches!(operation, Err(LoomError::IndexJobStale(_))));
+        }
+        assert_eq!(library.index_checkpoint(&source).unwrap().unwrap(), before);
+    }
+
+    #[test]
+    fn source_authorization_cannot_mutate_another_roots_job_or_artifact() {
+        let directory = tempdir().unwrap();
+        let first = directory.path().join("first.md");
+        let second = directory.path().join("second.md");
+        fs::write(&first, "firstcheckpointcontent").unwrap();
+        fs::write(&second, "secondcheckpointcontent").unwrap();
+        let library = Library::open_in_memory().unwrap();
+        library.index_path(&first).unwrap();
+        library.index_path(&second).unwrap();
+        let first = first.canonicalize().unwrap();
+        let second = second.canonicalize().unwrap();
+        let authorization = library
+            .approved_root_authorization(first.to_str().unwrap())
+            .unwrap();
+        let other = library
+            .approved_root_authorization(second.to_str().unwrap())
+            .unwrap();
+        let job = library
+            .start_index_job(&other, second.to_str().unwrap(), "other", 1)
+            .unwrap();
+        let before = library.index_checkpoint(&second).unwrap().unwrap();
+        let operations = [
+            library.advance_index_job(&authorization, &job.job_id, 1),
+            library.interrupt_index_job(&authorization, &job.job_id, "wrong-root"),
+            library.fail_index_job(&authorization, &job.job_id, "wrong-root"),
+            library.complete_index_job(&authorization, &job.job_id, None),
+            library.mark_locator_missing_and_advance(
+                &authorization,
+                first.to_str().unwrap(),
+                &job.job_id,
+                1,
+            ),
+        ];
+        for operation in operations {
+            assert!(operation.is_err());
+        }
+        assert_eq!(library.index_checkpoint(&second).unwrap().unwrap(), before);
+        let prepared = ingest::read_stable(&first, &first, 8 * 1024 * 1024).unwrap();
+        assert!(library
+            .index_document_with_extractor_and_checkpoint(
+                &authorization,
+                &first,
+                prepared,
+                "loom.text",
+                "new-version",
+                Some((&job.job_id, 1))
+            )
+            .is_err());
+        assert_eq!(
+            library.inspect_source(&first).unwrap().extractor_version,
+            "0.1.0"
+        );
+        assert_eq!(
+            library
+                .search(&SearchRequest {
+                    text: "firstcheckpointcontent".into(),
+                    limit: 10
+                })
+                .unwrap()
+                .len(),
+            1
         );
     }
 

@@ -67,6 +67,9 @@ pub enum LoomError {
     #[error("index job interrupted: {0}")]
     IndexInterrupted(String),
 
+    #[error("index job is not writable under this source authorization: {0}")]
+    IndexJobStale(String),
+
     #[error("library lock is unavailable")]
     LockPoisoned,
 

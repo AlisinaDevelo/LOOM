@@ -67,6 +67,119 @@ fn comparable(mut export: PortableExport) -> PortableExport {
 }
 
 #[test]
+fn scope_inconsistent_bookmark_exports_are_refused_transactionally() {
+    for mismatch in [
+        "import_root",
+        "import_locator",
+        "record_artifact",
+        "import_item",
+        "failure_resolution",
+    ] {
+        let (directory, library) = populated();
+        let extra = directory.path().join("second-bookmarks.html");
+        fs::write(
+            &extra,
+            CHROME_EXPORT.replace("https://", "https://second.example.test/"),
+        )
+        .unwrap();
+        library.import_bookmarks(&extra).unwrap();
+        let mut export = library.export_portable().unwrap();
+        let column = |table: &str, name: &str| {
+            export.tables[table]
+                .columns
+                .iter()
+                .position(|value| value == name)
+                .unwrap()
+        };
+        match mismatch {
+            "import_root" => {
+                let root_id = column("source_roots", "id");
+                let kind = column("source_roots", "kind");
+                let wrong_root = export.tables["source_roots"]
+                    .rows
+                    .iter()
+                    .find(|row| row[kind] == json!("directory"))
+                    .unwrap()[root_id]
+                    .clone();
+                let root_column = column("bookmark_imports", "source_root_id");
+                export.tables.get_mut("bookmark_imports").unwrap().rows[0][root_column] =
+                    wrong_root;
+            }
+            "record_artifact" => {
+                let artifact_id = column("artifacts", "id");
+                let media = column("artifacts", "media_type");
+                let wrong_artifact = export.tables["artifacts"]
+                    .rows
+                    .iter()
+                    .find(|row| row[media] == json!("text/markdown"))
+                    .unwrap()[artifact_id]
+                    .clone();
+                let artifact_column = column("bookmark_records", "artifact_id");
+                export.tables.get_mut("bookmark_records").unwrap().rows[0][artifact_column] =
+                    wrong_artifact;
+            }
+            "import_locator" => {
+                let locator = column("bookmark_imports", "source_locator");
+                export.tables.get_mut("bookmark_imports").unwrap().rows[0][locator] =
+                    json!("/unselected/export.html");
+            }
+            "failure_resolution" => {
+                let import_id = column("bookmark_imports", "id");
+                let first = export.tables["bookmark_imports"].rows[0][import_id].clone();
+                let second = export.tables["bookmark_imports"].rows[1][import_id].clone();
+                let failures = export.tables.get_mut("bookmark_import_failures").unwrap();
+                let row = failures
+                    .columns
+                    .iter()
+                    .map(|name| match name.as_str() {
+                        "import_id" => first.clone(),
+                        "resolved_by_import_id" => second.clone(),
+                        "ordinal" | "byte_offset" => json!(0),
+                        "state" => json!("resolved"),
+                        "code" => json!("synthetic_scope_conflict"),
+                        "detail" => json!("synthetic fixture"),
+                        "created_at" => json!("2026-10-03T00:00:00Z"),
+                        _ => panic!("unexpected failure column"),
+                    })
+                    .collect();
+                failures.rows.push(row);
+            }
+            _ => {
+                let import_id = column("bookmark_imports", "id");
+                let wrong_import = export.tables["bookmark_imports"].rows[1][import_id].clone();
+                let item_import = column("bookmark_import_items", "import_id");
+                let item_bookmark = column("bookmark_import_items", "bookmark_id");
+                let first_import = export.tables["bookmark_imports"].rows[0][import_id].clone();
+                let items = export.tables.get_mut("bookmark_import_items").unwrap();
+                let original_bookmark = items
+                    .rows
+                    .iter()
+                    .find(|row| row[item_import] == first_import)
+                    .unwrap()[item_bookmark]
+                    .clone();
+                let row = items
+                    .rows
+                    .iter_mut()
+                    .find(|row| row[item_import] == wrong_import)
+                    .unwrap();
+                row[item_bookmark] = original_bookmark;
+            }
+        }
+        export.seal().unwrap();
+        let target = Library::open_in_memory().unwrap();
+        let before = target.export_portable().unwrap();
+        assert!(
+            target.import_portable(&export).is_err(),
+            "accepted {mismatch}"
+        );
+        assert_eq!(
+            comparable(target.export_portable().unwrap()),
+            comparable(before)
+        );
+    }
+}
+
+#[test]
 fn export_import_round_trip_preserves_every_canonical_row_and_setting() {
     let (_directory, library) = populated();
     let export = library.export_portable().unwrap();

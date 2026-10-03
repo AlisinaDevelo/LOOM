@@ -409,6 +409,7 @@ impl Library {
                 "{violations} foreign-key violations"
             )));
         }
+        crate::store::validate_bookmark_scope_consistency(&transaction)?;
         let integrity: String =
             transaction.query_row("PRAGMA integrity_check", [], |row| row.get(0))?;
         if integrity != "ok" {

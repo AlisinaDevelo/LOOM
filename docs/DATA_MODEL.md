@@ -293,6 +293,8 @@ interrupted scan's checkpoint. Explicit re-selection advances the disabled root'
 and starts a full scan. Each ingestion, cleanup, and checkpoint write checks the captured root ID
 and generation inside its own transaction. An old extraction cannot reactivate revoked evidence,
 replace a new selection's version, or hide its sources, even through another SQLite connection.
+Checkpoint and terminal updates require one running job belonging to that same root; a mismatched
+job ID or a late write to a completed job rolls back the entire canonical transaction.
 Startup and event reconciliation carry the already-approved generation instead of calling the
 explicit selection path; they never re-enable a revoked root.
 
@@ -300,6 +302,12 @@ Authorizations also carry the library's operational `authorization_incarnation` 
 restore clears diagnostic checkpoints and rotates this value atomically with its import. Restoring
 the same canonical root IDs and generations cannot revive a pre-restore worker; the incarnation is
 not part of the portable archive or a source identity.
+
+Bookmark retries also carry existing consent rather than re-selecting an export. They require an
+enabled root even when an older import status says `complete`. Explicit re-selection restores
+unchanged entries after either identical or changed export bytes. Import/replay/portable restore
+reject scope-inconsistent bookmark import, record, item, or failure-resolution ownership even if
+its foreign keys are valid.
 
 ## References
 

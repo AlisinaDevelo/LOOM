@@ -56,6 +56,8 @@ is unencrypted at rest; use an encrypted backup for anything that leaves the mac
   to zero; schema 10 exports preserve it and the enabled state without re-authorizing revoked roots.
   Import clears runtime checkpoints and rotates the local authorization incarnation, so an old
   worker cannot inherit restored root IDs/generations. Neither runtime value is exported.
+  Foreign-key-valid bookmark rows must also agree on source-root ownership and export locator;
+  cross-scope imports, records, items, and failure-resolution links are refused with full rollback.
   Each new schema release keeps
   at least the previous schema's exports importable.
 - Every exported table and column must exist in the live schema, and every required column must
