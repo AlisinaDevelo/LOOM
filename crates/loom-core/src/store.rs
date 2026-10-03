@@ -6624,10 +6624,7 @@ mod tests {
             .unwrap()
             .is_empty());
 
-        let checkpoint = library
-            .index_checkpoint(directory.path())
-            .unwrap()
-            .unwrap();
+        let checkpoint = library.index_checkpoint(directory.path()).unwrap().unwrap();
         assert_eq!(checkpoint.state, "running");
         assert_eq!(checkpoint.next_unit, 1);
         assert_eq!(checkpoint.total_units, 2);
@@ -6655,7 +6652,7 @@ mod tests {
         let mut contender_connection = contender.lock().unwrap();
         contender_connection.busy_timeout(Duration::ZERO).unwrap();
         let result = contender_connection
-            .transaction_with_behavior(TransactionBehavior::Immediate);
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate);
         assert!(matches!(
             result,
             Err(rusqlite::Error::SqliteFailure(error, _))
