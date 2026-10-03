@@ -49,6 +49,11 @@ checked at return. Descriptor ownership is bounded by depth and released on all 
 Unix visited-directory records retain relative path payload; the path budget charges the bytes
 actually retained, not a fully qualified pathname for every directory.
 
+The initial root open still resolves ancestor path components. `O_NOFOLLOW` protects its final
+component, not a hostile ancestor swap before the root is pinned. Identity and canonical-binding
+checks detect some rebinding but do not make the current path-based foreground authorization a
+filesystem sandbox. The descriptor boundary applies to traversal after root pinning.
+
 These checks abort **detected** changes. Filesystem metadata semantics/granularity and changes
 after a final check can escape detection: there is no atomic filesystem snapshot. Regular-file
 contents are not read or frozen during discovery. The returned `Vec<PathBuf>` does not carry
