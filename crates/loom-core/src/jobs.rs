@@ -377,7 +377,7 @@ pub(crate) fn purge_file_targets(
         }
         return Ok(());
     }
-    validate_schema(connection).map_err(|_| purge_runtime_recovery_error())?;
+    validate_runtime_layout(connection).map_err(|_| purge_runtime_recovery_error())?;
     connection.execute(
         "DELETE FROM background_jobs WHERE operation='index_file' AND (
             (?1 IS NOT NULL AND (
@@ -2248,6 +2248,11 @@ mod tests {
         );
     }
 
+    fn raw_job(library: &Library, id: &str) -> BackgroundJob {
+        let connection = library.lock().unwrap();
+        get_job(&connection, id).unwrap()
+    }
+
     #[test]
     fn unsupported_or_malformed_runtime_blocks_purge_without_partial_deletion() {
         for fixture in ["future", "v3", "malformed"] {
@@ -2258,7 +2263,7 @@ mod tests {
             let artifact = file_identity(&library, &source).0;
             let before_digest = library.export_portable().unwrap().digest;
             let before_roots = library.source_roots().unwrap();
-            let before_job = library.background_job(&job.id).unwrap();
+            let before_job = raw_job(&library, &job.id);
             let before_payload: String = library
                 .lock()
                 .unwrap()
@@ -2312,7 +2317,7 @@ mod tests {
             );
             assert_eq!(library.export_portable().unwrap().digest, before_digest);
             assert_eq!(library.source_roots().unwrap(), before_roots);
-            assert_eq!(library.background_job(&job.id).unwrap(), before_job);
+            assert_eq!(raw_job(&library, &job.id), before_job);
             assert_eq!(
                 library
                     .lock()
@@ -2332,7 +2337,7 @@ mod tests {
             );
             assert_eq!(library.export_portable().unwrap().digest, before_digest);
             assert_eq!(library.source_roots().unwrap(), before_roots);
-            assert_eq!(library.background_job(&job.id).unwrap(), before_job);
+            assert_eq!(raw_job(&library, &job.id), before_job);
         }
     }
 
@@ -2364,7 +2369,7 @@ mod tests {
                 "INSERT INTO passages(
                     id, artifact_version_id, ordinal, text, text_hash, locator_json,
                     char_start, char_end, line_start, line_end, created_at
-                 ) VALUES (?1, ?2, 0, 'synthetic OCR derivative', 'blake3:synthetic-ocr-passage', '{}', 0, 23, 1, 1, ?3)",
+                 ) VALUES (?1, ?2, 0, 'synthetic OCR derivative', 'blake3:synthetic-ocr-passage', '{\"kind\":\"text\",\"char_start\":0,\"char_end\":23,\"line_start\":1,\"line_end\":1}', 0, 23, 1, 1, ?3)",
                 params![Uuid::new_v4().to_string(), version_id, now],
             )
             .unwrap();
@@ -2390,79 +2395,110 @@ mod tests {
 
     #[test]
     fn unsupported_runtime_blocks_ocr_policy_and_derived_purges_without_changes() {
-        for disable in [false, true] {
-            let (_directory, library, source) = file_fixture();
-            insert_synthetic_ocr_derivative(&library, &source);
-            let job = library
-                .enqueue_index_file(&source, "retain-ocr-runtime", JobPriority::Normal)
-                .unwrap();
-            let before_digest = library.export_portable().unwrap().digest;
-            let before_roots = library.source_roots().unwrap();
-            let before_ocr = library.ocr_status().unwrap();
-            let before_ocr_rows = synthetic_ocr_rows(&library);
-            let before_ocr_revision: String = library
-                .lock()
-                .unwrap()
-                .query_row(
-                    "SELECT value FROM schema_meta WHERE key='ocr_policy_revision'",
-                    [],
-                    |row| row.get(0),
-                )
-                .unwrap();
-            let before_job = library.background_job(&job.id).unwrap();
-            let before_payload: String = library
-                .lock()
-                .unwrap()
-                .query_row(
-                    "SELECT target_json FROM background_jobs WHERE id=?1",
-                    [&job.id],
-                    |row| row.get(0),
-                )
-                .unwrap();
-            library
-                .lock()
-                .unwrap()
-                .execute(
-                    "UPDATE schema_meta SET value='future-ocr-runtime-marker' WHERE key='background_job_schema_version'",
-                    [],
-                )
-                .unwrap();
-
-            let result = if disable {
-                library.set_ocr_enabled(false).map(|_| ())
-            } else {
-                library.purge_ocr_records().map(|_| ())
-            };
-            assert_purge_runtime_recovery(result.unwrap_err(), "future-ocr-runtime-marker");
-            assert_eq!(library.export_portable().unwrap().digest, before_digest);
-            assert_eq!(library.source_roots().unwrap(), before_roots);
-            assert_eq!(library.ocr_status().unwrap(), before_ocr);
-            assert_eq!(synthetic_ocr_rows(&library), before_ocr_rows);
-            assert_eq!(
-                library
+        for fixture in ["future", "v3", "malformed"] {
+            for disable in [false, true] {
+                let (_directory, library, source) = file_fixture();
+                insert_synthetic_ocr_derivative(&library, &source);
+                let job = library
+                    .enqueue_index_file(&source, "retain-ocr-runtime", JobPriority::Normal)
+                    .unwrap();
+                let before_digest = library.export_portable().unwrap().digest;
+                let before_roots = library.source_roots().unwrap();
+                let before_ocr = library.ocr_status().unwrap();
+                let before_ocr_rows = synthetic_ocr_rows(&library);
+                let before_ocr_revision: String = library
                     .lock()
                     .unwrap()
                     .query_row(
                         "SELECT value FROM schema_meta WHERE key='ocr_policy_revision'",
                         [],
-                        |row| row.get::<_, String>(0),
+                        |row| row.get(0),
                     )
-                    .unwrap(),
-                before_ocr_revision
-            );
-            assert_eq!(library.background_job(&job.id).unwrap(), before_job);
-            assert_eq!(
-                library
+                    .unwrap();
+                let before_job = raw_job(&library, &job.id);
+                let before_payload: String = library
                     .lock()
                     .unwrap()
                     .query_row(
                         "SELECT target_json FROM background_jobs WHERE id=?1",
                         [&job.id],
-                        |row| row.get::<_, String>(0),
+                        |row| row.get(0),
                     )
-                    .unwrap(),
-                before_payload
-            );
+                    .unwrap();
+
+                let raw_marker = match fixture {
+                    "future" => {
+                        library
+                            .lock()
+                            .unwrap()
+                            .execute(
+                                "UPDATE schema_meta SET value='future-ocr-runtime-marker' WHERE key='background_job_schema_version'",
+                                [],
+                            )
+                            .unwrap();
+                        "future-ocr-runtime-marker"
+                    }
+                    "v3" => {
+                        library
+                            .lock()
+                            .unwrap()
+                            .execute(
+                                "UPDATE schema_meta SET value='3' WHERE key='background_job_schema_version'",
+                                [],
+                            )
+                            .unwrap();
+                        "3"
+                    }
+                    "malformed" => {
+                        library
+                            .lock()
+                            .unwrap()
+                            .execute(
+                                "ALTER TABLE background_jobs ADD COLUMN unexpected_ocr_fixture TEXT",
+                                [],
+                            )
+                            .unwrap();
+                        "unexpected_ocr_fixture"
+                    }
+                    _ => unreachable!(),
+                };
+
+                let result = if disable {
+                    library.set_ocr_enabled(false).map(|_| ())
+                } else {
+                    library.purge_ocr_records().map(|_| ())
+                };
+                assert_purge_runtime_recovery(result.unwrap_err(), raw_marker);
+                assert_eq!(library.export_portable().unwrap().digest, before_digest);
+                assert_eq!(library.source_roots().unwrap(), before_roots);
+                assert_eq!(library.ocr_status().unwrap(), before_ocr);
+                assert_eq!(synthetic_ocr_rows(&library), before_ocr_rows);
+                assert_eq!(
+                    library
+                        .lock()
+                        .unwrap()
+                        .query_row(
+                            "SELECT value FROM schema_meta WHERE key='ocr_policy_revision'",
+                            [],
+                            |row| row.get::<_, String>(0),
+                        )
+                        .unwrap(),
+                    before_ocr_revision
+                );
+                assert_eq!(raw_job(&library, &job.id), before_job);
+                assert_eq!(
+                    library
+                        .lock()
+                        .unwrap()
+                        .query_row(
+                            "SELECT target_json FROM background_jobs WHERE id=?1",
+                            [&job.id],
+                            |row| row.get::<_, String>(0),
+                        )
+                        .unwrap(),
+                    before_payload
+                );
+            }
         }
     }
 
