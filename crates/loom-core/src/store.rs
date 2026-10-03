@@ -6653,6 +6653,29 @@ mod tests {
         assert_eq!(checkpoint.state, "running");
         assert_eq!(checkpoint.next_unit, 1);
         assert_eq!(checkpoint.total_units, 2);
+
+        library
+            .lock()
+            .unwrap()
+            .execute_batch("DROP TRIGGER reject_canonical_version_insert;")
+            .unwrap();
+        let resumed = library.index_path(directory.path()).unwrap();
+        assert_eq!(resumed.indexed, 1);
+        assert!(resumed.failures.is_empty());
+        let completed = library.index_checkpoint(directory.path()).unwrap().unwrap();
+        assert_eq!(completed.job_id, checkpoint.job_id);
+        assert_eq!(completed.state, "completed");
+        assert_eq!(completed.next_unit, 2);
+        assert_eq!(
+            library
+                .search(&SearchRequest {
+                    text: "second changed marker".into(),
+                    limit: 10,
+                })
+                .unwrap()
+                .len(),
+            1
+        );
     }
 
     #[test]
@@ -6689,6 +6712,13 @@ mod tests {
         drop(result);
         drop(contender_connection);
         transaction.commit().unwrap();
+        contender
+            .lock()
+            .unwrap()
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .unwrap()
+            .commit()
+            .unwrap();
     }
 
     #[test]
