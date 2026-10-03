@@ -118,9 +118,11 @@ pub(crate) fn read_stable_with_limits_and_ocr(
     let stable = read_stable_bytes(path, root, max_bytes)?;
     // Foreground indexing retains its existing 100M-pixel limit. The queue uses
     // a separate 16M-pixel process budget, but the extraction implementation is shared.
-    let output = loom_extraction::extract_bytes(
-        loom_extraction::MediaKind::from_mime(media_type)?,
-        &stable.bytes,
+    let media = loom_extraction::MediaKind::from_mime(media_type)?;
+    let output = loom_extraction::extract_bytes(media, &stable.bytes, max_pdf_pages, 100_000_000)?;
+    output.validate_with_limits(
+        media,
+        loom_extraction::ExtractionBudget::for_media(media),
         max_pdf_pages,
         100_000_000,
     )?;
