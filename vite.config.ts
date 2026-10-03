@@ -10,13 +10,13 @@ export default defineConfig(async () => ({
   test: {
     environment: "jsdom",
     setupFiles: ["./src/test/setup.ts"],
-    // The browser extension suite uses Node's built-in test runner and has
-    // its own npm script; keep Vitest from treating it as an empty suite.
+    // Node-only suites run through their own npm scripts, not the jsdom runner.
     exclude: [
       "**/node_modules/**",
       "**/target/**",
       "**/.git/**",
       "**/browser-extension/test/**",
+      "**/scripts/*.test.mjs",
     ],
   },
 
