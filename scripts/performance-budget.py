@@ -229,8 +229,9 @@ def run_measurement(
     report["resource_profile"] = {
         **resources,
         "wall_seconds_python": elapsed_seconds,
-        "cpu_seconds": (resources["user_seconds"] or 0.0)
-        + (resources["system_seconds"] or 0.0),
+        "cpu_seconds": None
+        if resources["user_seconds"] is None or resources["system_seconds"] is None
+        else resources["user_seconds"] + resources["system_seconds"],
         "time_command": "/usr/bin/time -lp",
     }
     report["run_number"] = run_number
@@ -260,9 +261,29 @@ def median(values: list[float]) -> float:
     return statistics.median(values) if values else 0.0
 
 
-def metric_summary(reports: list[dict[str, Any]], getter: Any) -> dict[str, float]:
-    values = [float(getter(report)) for report in reports]
+def metric_summary(
+    reports: list[dict[str, Any]], getter: Any, *, require_positive: bool = False
+) -> dict[str, Any]:
+    values = []
+    for report in reports:
+        try:
+            value = getter(report)
+            if (isinstance(value, bool) or not isinstance(value, (int, float))
+                    or not math.isfinite(value) or value < 0
+                    or (require_positive and value == 0)):
+                continue
+            values.append(float(value))
+        except (KeyError, TypeError, ValueError, OverflowError):
+            continue
+    availability = {
+        "measurements_available": len(values),
+        "measurements_expected": len(reports),
+        "complete": bool(values) and len(values) == len(reports),
+    }
+    if not availability["complete"]:
+        return availability
     return {
+        **availability,
         "min": min(values),
         "median": median(values),
         "max": max(values),
@@ -376,7 +397,8 @@ def main() -> int:
                         scale_reports, lambda item: item["query"]["warm_p95_latency_ms"]
                     ),
                     "max_rss_bytes": metric_summary(
-                        scale_reports, lambda item: item["resource_profile"]["max_rss"] or 0
+                        scale_reports, lambda item: item["resource_profile"]["max_rss"],
+                        require_positive=True,
                     ),
                     "database_bytes_per_source_byte": metric_summary(
                         scale_reports, lambda item: item["database_bytes_per_source_byte"]
