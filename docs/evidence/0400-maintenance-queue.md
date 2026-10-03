@@ -1,0 +1,119 @@
+# Durable maintenance queue: local verification
+
+## Tested scope
+
+Code head: `871936852c20037dc967374c7aa31feba5119f05`, based on merged main
+`7d67bf54715fd2c4cb0a7be74232568d6e029b4f`. Verified on 2026-10-03 on
+MacBookPro17,1, Apple M1 arm64 / 8 GiB, macOS 26.6.2 build 25G83; Rust 1.96.0
+and 1.88.0, Node 26.7.0, npm 11.19.0, Python 3.9.6. Rust used one build job,
+no incremental compilation, and no debug info.
+
+This is the first opt-in adapter for roadmap `0400` / GitHub #36: a durable queue that
+actually runs FTS repair. Source indexing, OCR, semantic rebuild, and desktop scheduling
+are not yet adapters. The operational contract and limitations are in
+[BACKGROUND_JOBS.md](../BACKGROUND_JOBS.md). No issue is complete merely from this slice.
+
+## Actual checks
+
+- Formatting, diff hygiene, all-target workspace Clippy with warnings denied: PASS.
+- Full workspace: 240 passed (184 core, 12 CLI, 28 browser protocol, 16 desktop).
+  The 21 new core test entries include a subprocess helper; the parent actually kills
+  that process and verifies kernel-lock release and recovery of its running job.
+- Full workspace/all-target MSRV check and 196 core/CLI MSRV tests: PASS.
+- Real staged CLI: enqueue, list, dedupe, conflicting input, real FTS completion/result,
+  queued cancellation, explicit terminal forgetting/reuse, source bytes/search anchor: PASS.
+- npm lint/typecheck/build, 39 UI / 12 extension / 6 tooling tests: PASS.
+- Python roadmap / CI / browser protocol / accessibility contracts: 24 / 8 / 10 / 9 passed.
+- v0 fixture: 3/3 exact sources; PDF fixture: 4 indexed / 3 expected unsupported,
+  seven expected outcomes with no unexpected failure.
+- Real native host: accepted capture, four deterministic refusals, three unpaired callers,
+  and recovery: PASS. No browser profile or user document was used.
+- Desktop development build: PASS (`--debug --no-bundle`); not a signed release.
+- Local security script: secret scan, zero npm findings, locked Cargo metadata: PASS.
+  This is not an independent security audit and does not resolve the separate Rust advisory #278.
+- Offline roadmap: 154 active / 4 retired / 20 quarters / 141 parents / 314 prerequisites valid.
+- Read-only live reconciliation: same counts, zero mutations and no warnings.
+
+CLI was built/staged separately before the desktop binary replaced `target/debug/loom`.
+Raw logs and binaries remain at `/tmp/loom-jobs-evidence.INpfja`.
+
+## Race, failure, and negative fixtures
+
+The core tests inspect actual persisted rows and derive a real repaired FTS projection:
+
+- two SQLite connections admit the same key concurrently and obtain one stable ID;
+- conflicting/invalid input cannot rewrite the prior request;
+- pending/retained bounds reject new work without eviction, while explicit terminal
+  forgetting frees capacity and deliberately forgets only that deduplication key;
+- queued/running cancellation, immutable completion, retry due-times and exhaustion;
+- priority bursts and oldest eligible dispatch across separately acquired workers;
+- stale epochs/tokens cannot publish or complete after recovery;
+- live ownership rejects a second worker; an actual killed process releases ownership;
+- portable export excludes the queue; valid restore clears/fences it, invalid restore rolls back;
+- worker acquisition does not implicitly rebuild a damaged derivative;
+- a separate worker connection runs while the interactive connection's Rust mutex is held;
+- symlink database aliases converge, hard-linked aliases and symlink lock files are refused;
+- unsupported changed schema, malformed queue policy, and permanent-vs-transient SQL errors;
+- diagnostics remain byte-bounded, and invalid operational policy does not hide canonical search.
+- completion/failure-versus-forgetting returns the transaction's terminal snapshot;
+- changed database file identity or runtime table shape is refused before worker execution;
+- malformed JSON and oversized UTF-8 diagnostics/results cannot be persisted.
+- a legacy queue upgrades without losing queued/running/completed rows, policy, epoch,
+  sequence or burst accounting; valid restore then clears/fences it;
+- invalid legacy result data rolls back runtime migration without dropping rows or
+  preventing canonical evidence access; all actual CLI queue commands refuse hard links.
+
+The newly added restart-fairness test failed against the first local queue implementation:
+worker acquisition reset burst accounting, allowing a new high-priority job to bypass the older
+low-priority job indefinitely across one-shot CLI runs. The counter now persists across
+acquisitions; the same regression passes in the full stable/MSRV suites. The failed log is retained.
+Initial compiler/Clippy errors and one Markdown line-length failure were also fixed before merge.
+
+Final review found two additional blockers in the first local implementation: ordinary CLI
+opening implicitly repaired FTS before worker ownership, and a post-settlement lookup raced
+explicit terminal forgetting. The real CLI corruption regression fails against the initial
+binary (`jobs-cli-ownership-before.log`), then passes with no-rebuild queue opening and ownership
+acquired before SQLite access. Empty/cancelled/contending work and queue-only commands leave FTS
+damaged; a claimed repair records `before.healthy = false`. Both completion and failure now
+return their snapshot captured inside settlement, with deterministic forgetting-before-return
+fixtures. Review also prompted stable canonical database identity and runtime-shape validation.
+Two initial harness mistakes (external-content FTS row counting and error-name case) were corrected
+before the genuine failing/passing comparison; they are not evidence of product failures.
+
+Re-review required transactional runtime migration instead of only rejecting the older DDL.
+The runtime-only version-2 marker and upgrade/rollback fixtures now cover that compatibility
+boundary. Hard-link admission is consistently refused, not just worker execution.
+
+The final stable capture suite took 91.20 seconds but passed without a restart. A retained
+three-second process sample during the delay shows Vision/CoreRecognition/ANE waits, not a
+queue SQLite lock. This observation does not establish a provider-time bound or diagnose the
+underlying OS cause; it reinforces the need for bounded extraction before the full engine closes.
+
+## Limits and next acceptance gates
+
+FTS repair is a single maintenance transaction. Cancellation that commits before publication
+prevents it; cancellation arriving after publication begins may observe completion. These tests
+do not establish bounded rebuild execution time/memory or interactive-search p95. Dispatch
+fairness is not a wall-clock guarantee while an unsliced maintenance operation runs.
+Existing foreground writers use their existing SQLite/scope contracts, not queue ownership.
+
+Before #36 can close, indexing/OCR must consume bounded slices and queue+scope+OCR fences,
+semantic/FTS work needs bounded staging/publication or measured maintenance limits, and the
+desktop must actually use durable admission/progress/cancellation/relaunch. Retain resource,
+search-responsiveness, extraction/crash, and merged-main proof for those adapters. No new source
+scope, ambient capture, networking, model download, external study, or signing credential was added.
+
+## Selected log hashes
+
+| Log | SHA-256 |
+| --- | --- |
+| `jobs-ship-workspace.log` | `f9d0621ba62274febacf5f5c5e5552db5a17121c22108d559ba3af3a86a87347` |
+| `jobs-ship-msrv-tests.log` | `7ba77df355ac2dcf15b20179a2906352ee30e0023981c59dafbbec643e89f436` |
+| `jobs-upgrade-cli-smoke.log` | `cd15b03cd5860d5b2c9391e10c64df8cc3b8648cdaab69932f2f878b444ed5f8` |
+| `jobs-fairness-before.log` | `eaefa669fec9a9d1104924795dfe7f99554502c7acf429510c04f09db5b92f69` |
+| `jobs-cli-ownership-before.log` | `ad865d9d05568847934269c99994077ec72526f43fb020f12b1691270f05fd01` |
+| `jobs-ship-frontend.log` | `a035cf1aaa628123000f828a53ffa9251b6fac591dea732c92c3bf2931f0d683` |
+| `jobs-ship-capture-sample.txt` | `e80cfe460f4731189e08ac0867c171cb68c2c13dafc7ae20bae3bd73df209a2b` |
+
+After merge, retain the exact main SHA/tree identity and rerun the queue, full workspace,
+CLI, and source-recovery checks on clean main. No hosted check is substituted for that proof.
