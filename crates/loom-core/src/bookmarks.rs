@@ -39,6 +39,9 @@ pub(crate) struct DetailedExport {
     pub(crate) export_version: &'static str,
     pub(crate) skipped_fields: Vec<String>,
     pub(crate) failures: Vec<RecordFailure>,
+    /// Record ordinal and byte offset of each entry in `export.bookmarks`, in the same order, so a
+    /// later per-entry failure shares the numbering of parser failures.
+    pub(crate) entry_positions: Vec<(u32, usize)>,
     /// True when parsing stopped early, so records after the failure point were not seen.
     pub(crate) truncated: bool,
 }
@@ -91,6 +94,7 @@ pub(crate) fn parse_bookmark_export_detailed(input: &str) -> Result<DetailedExpo
     let mut pending_folder: Option<String> = None;
     let mut bookmarks = Vec::new();
     let mut failures = Vec::new();
+    let mut entry_positions = Vec::new();
     let mut attribute_names = std::collections::BTreeSet::new();
     let mut ordinal = 0u32;
     let mut truncated = false;
@@ -174,6 +178,7 @@ pub(crate) fn parse_bookmark_export_detailed(input: &str) -> Result<DetailedExpo
             });
             continue;
         }
+        entry_positions.push((record, start));
         bookmarks.push(BookmarkEntry {
             folder_path: folders.join(" / "),
             title,
@@ -198,6 +203,7 @@ pub(crate) fn parse_bookmark_export_detailed(input: &str) -> Result<DetailedExpo
         export_version: "netscape-bookmark-file-1",
         skipped_fields,
         failures,
+        entry_positions,
         truncated,
     })
 }

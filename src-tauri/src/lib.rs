@@ -522,11 +522,35 @@ fn commit_capture(capture_root: &Path, temporary: &Path) -> CommandResult<Commit
 
 /// Once committed, a content-addressed capture may belong to a newer indexing attempt. A failed
 /// worker must not purge its rows or unlink its pixels; removal requires the explicit user command.
-fn capture_index_error(destination: &Path, reason: &str) -> String {
-    format!(
-        "capture could not be indexed: {reason}. Original pixels are retained at {}. Review the source or use Purge captures for explicit removal",
-        destination.display()
-    )
+/// Serializes captures so committing, indexing, and discarding one capture never interleave with
+/// another. Captures are content-addressed: without this, discarding a failed new capture could
+/// remove the file an identical concurrent capture had just indexed.
+static CAPTURE_LOCK: Mutex<()> = Mutex::new(());
+
+/// Explains a failed capture. A capture this call created is discarded so no unindexed pixels stay
+/// on disk; a duplicate belongs to an earlier capture, so its pixels are kept.
+fn capture_index_error(destination: &Path, reason: &str, discarded: bool) -> String {
+    if discarded {
+        format!("capture could not be indexed: {reason}. The new capture was discarded; nothing was kept")
+    } else {
+        format!(
+            "capture could not be indexed: {reason}. The earlier capture with identical pixels is kept at {}",
+            destination.display()
+        )
+    }
+}
+
+/// Removes a capture this call created, with any rows its failed indexing left. Returns whether
+/// it was discarded; a duplicate is never touched.
+fn discard_new_capture(library: &Library, destination: &Path, duplicate: bool) -> bool {
+    if duplicate {
+        return false;
+    }
+    if let Ok(locator) = destination.canonicalize() {
+        let _ = library.purge_source_root(&locator.to_string_lossy());
+    }
+    let _ = fs::remove_file(destination);
+    !destination.exists()
 }
 
 fn capture_native_image(
@@ -541,6 +565,9 @@ fn capture_native_image(
     {
         return Err(loom_core::LoomError::OcrDisabled.to_string());
     }
+    let _serialized = CAPTURE_LOCK
+        .lock()
+        .map_err(|_| "capture lock is unavailable".to_string())?;
     fs::create_dir_all(capture_root)
         .map_err(|error| format!("capture storage is unavailable: {error}"))?;
     let temporary = capture_root.join(format!(".loom-capture-{}.png", uuid::Uuid::new_v4()));
@@ -566,20 +593,27 @@ fn capture_native_image(
     let index = match library.index_captured_image(&destination, &context) {
         Ok(index) => index,
         Err(error) => {
-            return Err(capture_index_error(&destination, &error.to_string()));
+            let discarded = discard_new_capture(library, &destination, duplicate);
+            return Err(capture_index_error(
+                &destination,
+                &error.to_string(),
+                discarded,
+            ));
         }
     };
-    if let Some(failure) = index.failures.first() {
-        return Err(capture_index_error(&destination, &failure.reason));
-    }
-    if index.skipped > 0
-        || index.cancelled > 0
-        || index.indexed.saturating_add(index.unchanged) != 1
-    {
-        return Err(capture_index_error(
-            &destination,
-            "one exact image result is required",
-        ));
+    let failure = index
+        .failures
+        .first()
+        .map(|failure| failure.reason.clone())
+        .or_else(|| {
+            (index.skipped > 0
+                || index.cancelled > 0
+                || index.indexed.saturating_add(index.unchanged) != 1)
+                .then(|| "one exact image result is required".to_string())
+        });
+    if let Some(reason) = failure {
+        let discarded = discard_new_capture(library, &destination, duplicate);
+        return Err(capture_index_error(&destination, &reason, discarded));
     }
     Ok(CaptureReport {
         status: if duplicate || index.unchanged > 0 {
@@ -816,22 +850,28 @@ mod tests {
         assert_eq!(duplicate.destination, committed.destination);
         assert_eq!(png_files(root.path()), vec![expected]);
 
+        // A failed duplicate never touches the earlier capture's pixels.
         let original_bytes = fs::read(&committed.destination).unwrap();
-        let error = super::capture_index_error(&duplicate.destination, "OCR policy changed");
-        assert!(error.contains("Original pixels are retained at"));
+        let library = loom_core::Library::open_in_memory().unwrap();
+        let discarded = super::discard_new_capture(&library, &duplicate.destination, true);
+        assert!(!discarded);
+        let error =
+            super::capture_index_error(&duplicate.destination, "OCR policy changed", discarded);
+        assert!(error.contains("earlier capture with identical pixels is kept at"));
         assert!(error.contains(&duplicate.destination.to_string_lossy().to_string()));
-        assert!(error.contains("Purge captures"));
-        assert!(committed.destination.is_file());
-        let error = super::capture_index_error(&committed.destination, "index checkpoint is stale");
-        assert!(error.contains("index checkpoint is stale"));
         assert_eq!(fs::read(&committed.destination).unwrap(), original_bytes);
-        assert_eq!(
-            png_files(root.path()),
-            vec![format!(
-                "{}.png",
-                committed.content_hash.strip_prefix("blake3:").unwrap()
-            )]
+
+        // A failed new capture is discarded, so no unindexed pixels stay on disk.
+        let discarded = super::discard_new_capture(&library, &committed.destination, false);
+        assert!(discarded);
+        let error = super::capture_index_error(
+            &committed.destination,
+            "index checkpoint is stale",
+            discarded,
         );
+        assert!(error.contains("index checkpoint is stale"));
+        assert!(error.contains("discarded"));
+        assert!(png_files(root.path()).is_empty());
     }
 
     #[test]
