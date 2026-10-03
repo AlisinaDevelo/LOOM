@@ -1,4 +1,4 @@
-//! Operational, non-portable background work. This first adapter runs FTS repair only.
+//! Operational, non-portable background work with typed, source-fenced adapters.
 use std::{
     fs::{File, OpenOptions},
     path::Path,
@@ -106,6 +106,7 @@ pub struct BackgroundJob {
     pub id: String,
     pub idempotency_key: String,
     pub operation: String,
+    pub target_locator: Option<String>,
     pub state: JobState,
     pub priority: JobPriority,
     pub attempts: u32,
@@ -143,6 +144,18 @@ const RUNTIME_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS background_job_runtime(
          ) STRICT;
          CREATE INDEX IF NOT EXISTS background_jobs_ready ON background_jobs(state, ready_at_ms, sequence);";
 
+fn current_runtime_schema() -> String {
+    RUNTIME_SCHEMA
+        .replace("CHECK(operation = 'fts_repair')", "CHECK(operation IN ('fts_repair','index_file'))")
+        .replace(
+            "CHECK((state = 'running'",
+            "target_json TEXT CHECK(length(CAST(target_json AS BLOB)) <= 16384 AND json_valid(target_json)),
+            CHECK((operation = 'fts_repair' AND target_json IS NULL)
+                OR (operation = 'index_file' AND target_json IS NOT NULL)),
+            CHECK((state = 'running'",
+        )
+}
+
 pub(crate) fn ensure_schema(connection: &Connection) -> Result<()> {
     let transaction =
         rusqlite::Transaction::new_unchecked(connection, TransactionBehavior::Immediate)?;
@@ -162,41 +175,67 @@ pub(crate) fn ensure_schema(connection: &Connection) -> Result<()> {
         [],
         |row| row.get(0),
     )?;
-    if existing && validate_definitions(&transaction, RUNTIME_SCHEMA).is_err() {
-        let legacy = legacy_runtime_schema();
-        if validate_definitions(&transaction, &legacy).is_err() {
-            return Ok(());
-        }
-        transaction.execute_batch(
-            "ALTER TABLE background_jobs RENAME TO background_jobs_v1;
-             DROP INDEX background_jobs_ready;",
-        )?;
-        transaction.execute_batch(RUNTIME_SCHEMA)?;
-        // Invalid legacy diagnostics/results leave the old runtime intact and unavailable;
-        // never truncate, silently drop jobs, or hide canonical evidence.
-        if transaction
-            .execute(
-                "INSERT INTO background_jobs SELECT * FROM background_jobs_v1",
-                [],
-            )
-            .is_err()
-        {
-            return Ok(());
-        }
-        transaction.execute("DROP TABLE background_jobs_v1", [])?;
-    } else {
-        transaction.execute_batch(RUNTIME_SCHEMA)?;
+    if existing {
+        // Existing runtimes migrate only through an explicit kernel-owned upgrade.
+        return Ok(());
     }
+    transaction.execute_batch(&current_runtime_schema())?;
     transaction.execute(
         "INSERT INTO background_job_runtime VALUES (1, 0, 1, 0, ?1) ON CONFLICT(slot) DO NOTHING",
         [serde_json::to_string(&JobQueuePolicy::default())?],
     )?;
     transaction.execute(
-        "INSERT INTO schema_meta(key,value) VALUES ('background_job_schema_version','2')",
+        "INSERT INTO schema_meta(key,value) VALUES ('background_job_schema_version','3')",
         [],
     )?;
     transaction.commit()?;
     Ok(())
+}
+
+/// Called only inside the worker owner's acquisition transaction. Unknown layouts and
+/// invalid copied rows abort the whole upgrade, including epoch rotation and recovery.
+fn upgrade_runtime(connection: &Connection) -> Result<()> {
+    let version: Option<String> = connection
+        .query_row(
+            "SELECT value FROM schema_meta WHERE key = 'background_job_schema_version'",
+            [],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if version.as_deref() == Some("3") {
+        return validate_schema(connection);
+    }
+    let recognized = match version.as_deref() {
+        Some("2") => validate_definitions(connection, RUNTIME_SCHEMA),
+        None => validate_definitions(connection, RUNTIME_SCHEMA)
+            .or_else(|_| validate_definitions(connection, &legacy_runtime_schema())),
+        _ => Err(LoomError::JobQueue("unsupported runtime upgrade".into())),
+    };
+    recognized?;
+    let policy = load_policy(connection)?;
+    let count: u32 =
+        connection.query_row("SELECT COUNT(*) FROM background_jobs", [], |row| row.get(0))?;
+    if count > policy.max_records {
+        return Err(LoomError::JobQueue(
+            "runtime upgrade exceeds its retained-record budget".into(),
+        ));
+    }
+    connection.execute_batch(
+        "ALTER TABLE background_jobs RENAME TO background_jobs_v2;
+        DROP INDEX background_jobs_ready;",
+    )?;
+    connection.execute_batch(&current_runtime_schema())?;
+    connection.execute(
+        "INSERT INTO background_jobs SELECT *, NULL FROM background_jobs_v2",
+        [],
+    )?;
+    connection.execute("DROP TABLE background_jobs_v2", [])?;
+    connection.execute(
+        "INSERT INTO schema_meta(key,value) VALUES ('background_job_schema_version','3')
+         ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+        [],
+    )?;
+    validate_schema(connection)
 }
 
 fn legacy_runtime_schema() -> String {
@@ -248,13 +287,12 @@ fn validate_runtime_layout(connection: &Connection) -> Result<()> {
             |row| row.get(0),
         )
         .optional()?;
-    if version.as_deref() != Some("2") {
+    if version.as_deref() != Some("3") {
         return Err(LoomError::JobQueue(
-            "unsupported or unmigrated runtime schema; explicitly initialize with Library::open"
-                .into(),
+            "unsupported or unmigrated runtime schema; explicitly run upgrade-job-runtime".into(),
         ));
     }
-    validate_definitions(connection, RUNTIME_SCHEMA)?;
+    validate_definitions(connection, &current_runtime_schema())?;
     Ok(())
 }
 
@@ -297,6 +335,48 @@ pub(crate) fn reset_for_restore(connection: &Connection) -> Result<()> {
     Ok(())
 }
 
+/// Purge must also remove bounded operational locators/diagnostics and invalidate running claims.
+/// Known older runtimes contain no file targets; never silently migrate them during deletion.
+pub(crate) fn purge_file_targets(
+    connection: &Connection,
+    locator: Option<&str>,
+    artifact_id: Option<&str>,
+    images: bool,
+) -> Result<()> {
+    let version: Option<String> = connection
+        .query_row(
+            "SELECT value FROM schema_meta WHERE key='background_job_schema_version'",
+            [],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if version.as_deref() != Some("3") {
+        if version.as_deref() == Some("2") {
+            validate_definitions(connection, RUNTIME_SCHEMA)?;
+        } else if version.is_none() {
+            validate_definitions(connection, &legacy_runtime_schema())
+                .or_else(|_| validate_definitions(connection, RUNTIME_SCHEMA))?;
+        } else {
+            return Err(LoomError::JobQueue(
+                "purge refuses an unsupported runtime layout".into(),
+            ));
+        }
+        return Ok(());
+    }
+    validate_runtime_layout(connection)?;
+    connection.execute(
+        "DELETE FROM background_jobs WHERE operation='index_file' AND (
+            json_extract(target_json,'$.locator') IS ?1
+            OR json_extract(target_json,'$.authorization.root_id') IN
+                (SELECT id FROM source_roots WHERE locator=?1)
+            OR json_extract(target_json,'$.locator') IN
+                (SELECT locator FROM artifact_locators WHERE artifact_id=?2 AND kind='file')
+            OR (?3=1 AND json_extract(target_json,'$.media_type') LIKE 'image/%'))",
+        params![locator, artifact_id, images],
+    )?;
+    Ok(())
+}
+
 fn advance_epoch(connection: &Connection) -> Result<i64> {
     connection
         .query_row(
@@ -312,16 +392,23 @@ fn advance_epoch(connection: &Connection) -> Result<i64> {
 fn get_job(connection: &Connection, id: &str) -> Result<BackgroundJob> {
     let raw = connection.query_row(
         "SELECT id, idempotency_key, operation, state, priority, attempts, max_attempts,
-            cancel_requested, ready_at_ms, last_error, result_json FROM background_jobs WHERE id = ?1",
+            cancel_requested, ready_at_ms, last_error, result_json, target_json FROM background_jobs WHERE id = ?1",
         [id], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?,
             row.get::<_, String>(2)?, row.get::<_, String>(3)?, row.get::<_, i64>(4)?,
             row.get::<_, u32>(5)?, row.get::<_, u32>(6)?, row.get::<_, bool>(7)?,
-            row.get::<_, i64>(8)?, row.get::<_, Option<String>>(9)?, row.get::<_, Option<String>>(10)?)),
+            row.get::<_, i64>(8)?, row.get::<_, Option<String>>(9)?, row.get::<_, Option<String>>(10)?,
+            row.get::<_, Option<String>>(11)?)),
     ).optional()?.ok_or_else(|| LoomError::JobQueue(format!("job not found: {id}")))?;
     Ok(BackgroundJob {
         id: raw.0,
         idempotency_key: raw.1,
         operation: raw.2,
+        // Invalid typed payloads must remain inspectable after a failed dispatch.
+        target_locator: raw.11.as_deref().and_then(|json| {
+            serde_json::from_str::<crate::store::IndexFileTarget>(json)
+                .ok()
+                .map(|target| target.locator)
+        }),
         state: JobState::parse(&raw.3)?,
         priority: JobPriority::parse(raw.4)?,
         attempts: raw.5,
@@ -370,51 +457,28 @@ impl Library {
 
     /// Identical key/priority returns the original row, even when terminal. Conflicts never rewrite it.
     pub fn enqueue_fts_repair(&self, key: &str, priority: JobPriority) -> Result<BackgroundJob> {
-        if key.is_empty()
-            || key.len() > 128
-            || !key
-                .bytes()
-                .all(|byte| byte.is_ascii_alphanumeric() || b"-_.:".contains(&byte))
-        {
-            return Err(LoomError::JobQueue(
-                "idempotency key must be 1–128 ASCII identifier bytes".into(),
-            ));
-        }
+        validate_key(key)?;
         let mut connection = self.queue_connection()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let existing: Option<String> = transaction
-            .query_row(
-                "SELECT id FROM background_jobs WHERE idempotency_key = ?1",
-                [key],
-                |row| row.get(0),
-            )
-            .optional()?;
-        if let Some(id) = existing {
-            let job = get_job(&transaction, &id)?;
-            if job.operation != "fts_repair" || job.priority != priority {
-                return Err(LoomError::JobQueue(
-                    "idempotency key has conflicting input".into(),
-                ));
-            }
-            return Ok(job);
-        }
-        let policy = load_policy(&transaction)?;
-        let (records, pending): (u32, u32) = transaction.query_row(
-            "SELECT COUNT(*), COALESCE(SUM(state IN ('queued','running','retryable')),0) FROM background_jobs",
-            [], |row| Ok((row.get(0)?, row.get(1)?)))?;
-        if records >= policy.max_records || pending >= policy.max_pending {
-            return Err(LoomError::JobQueue(
-                "admission capacity reached; existing jobs were not evicted".into(),
-            ));
-        }
-        let sequence = next_sequence(&transaction)?;
-        let id = Uuid::new_v4().to_string();
-        transaction.execute(
-            "INSERT INTO background_jobs(id,idempotency_key,operation,priority,state,attempts,
-                max_attempts,sequence,ready_at_ms) VALUES (?1,?2,'fts_repair',?3,'queued',0,?4,?5,?6)",
-            params![id, key, priority.number(), policy.max_attempts, sequence, Utc::now().timestamp_millis()],
-        )?;
-        let job = get_job(&transaction, &id)?;
+        let job = admit(&transaction, key, priority, "fts_repair", None)?;
+        transaction.commit()?;
+        Ok(job)
+    }
+
+    /// Queue one already-approved regular file. Admission never selects a new source or extracts it.
+    pub fn enqueue_index_file(
+        &self,
+        path: impl AsRef<Path>,
+        key: &str,
+        priority: JobPriority,
+    ) -> Result<BackgroundJob> {
+        validate_key(key)?;
+        let locator = self.queue_file_locator(path.as_ref())?;
+        let mut connection = self.queue_connection()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let target = crate::store::IndexFileTarget::capture(&transaction, &locator)?;
+        let json = serde_json::to_string(&target)?;
+        let job = admit(&transaction, key, priority, "index_file", Some(&json))?;
         transaction.commit()?;
         Ok(job)
     }
@@ -480,9 +544,18 @@ impl Library {
     pub fn acquire_job_worker(&self) -> Result<JobWorker> {
         self.open_job_worker()
     }
+
+    /// Upgrade only operational queue data while holding exclusive worker ownership.
+    pub fn upgrade_job_runtime(&self) -> Result<()> {
+        JobWorker::upgrade_runtime(self.job_database_path()?)
+    }
 }
 
 impl JobWorker {
+    #[cfg(test)]
+    pub(crate) fn claim_for_test(&mut self) -> Result<Option<JobClaim>> {
+        self.claim_at(Utc::now().timestamp_millis())
+    }
     /// Acquires ownership before opening SQLite; never creates or migrates the library.
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
         Self::open_with_limits(path, crate::LibraryLimits::default())
@@ -491,6 +564,20 @@ impl JobWorker {
     pub(crate) fn open_with_limits(
         path: impl AsRef<Path>,
         limits: crate::LibraryLimits,
+    ) -> Result<Self> {
+        Self::open_with_mode(path, limits, false)
+    }
+
+    /// Explicitly migrates a recognized operational layout under exclusive worker ownership.
+    /// Canonical schema must already be current; unknown layouts and invalid rows roll back.
+    pub fn upgrade_runtime(path: impl AsRef<Path>) -> Result<()> {
+        Self::open_with_mode(path, crate::LibraryLimits::default(), true).map(drop)
+    }
+
+    fn open_with_mode(
+        path: impl AsRef<Path>,
+        limits: crate::LibraryLimits,
+        upgrade: bool,
     ) -> Result<Self> {
         let path = path.as_ref();
         let database = path.canonicalize().map_err(|error| io_error(path, error))?;
@@ -529,7 +616,7 @@ impl JobWorker {
                 "database identity changed during acquisition".into(),
             ));
         }
-        let library = Library::open_for_jobs_with_limits(&database, limits)?;
+        let library = Library::open_existing_job_library(&database, limits, !upgrade)?;
         #[cfg(unix)]
         if crate::store::database_file_identity(&database)? != identity {
             return Err(LoomError::JobQueue(
@@ -540,6 +627,10 @@ impl JobWorker {
             let mut connection = library.lock()?;
             let transaction =
                 connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            if upgrade {
+                upgrade_runtime(&transaction)?;
+            }
+            validate_schema(&transaction)?;
             load_policy(&transaction)?;
             let epoch = advance_epoch(&transaction)?;
             // No timeout takeover. Only a holder of the kernel lock can recover abandoned work.
@@ -559,6 +650,65 @@ impl JobWorker {
             _ownership: ownership,
         })
     }
+}
+
+fn validate_key(key: &str) -> Result<()> {
+    if key.is_empty()
+        || key.len() > 128
+        || !key
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"-_.:".contains(&byte))
+    {
+        return Err(LoomError::JobQueue(
+            "idempotency key must be 1–128 ASCII identifier bytes".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn admit(
+    connection: &Connection,
+    key: &str,
+    priority: JobPriority,
+    operation: &str,
+    target: Option<&str>,
+) -> Result<BackgroundJob> {
+    let existing: Option<(String, Option<String>)> = connection
+        .query_row(
+            "SELECT id, target_json FROM background_jobs WHERE idempotency_key = ?1",
+            [key],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?;
+    if let Some((id, existing_target)) = existing {
+        let job = get_job(connection, &id)?;
+        if job.operation != operation
+            || job.priority != priority
+            || existing_target.as_deref() != target
+        {
+            return Err(LoomError::JobQueue(
+                "idempotency key has conflicting input".into(),
+            ));
+        }
+        return Ok(job);
+    }
+    let policy = load_policy(connection)?;
+    let (records, pending): (u32, u32) = connection.query_row(
+        "SELECT COUNT(*), COALESCE(SUM(state IN ('queued','running','retryable')),0) FROM background_jobs",
+        [], |row| Ok((row.get(0)?, row.get(1)?)))?;
+    if records >= policy.max_records || pending >= policy.max_pending {
+        return Err(LoomError::JobQueue(
+            "admission capacity reached; existing jobs were not evicted".into(),
+        ));
+    }
+    let sequence = next_sequence(connection)?;
+    let id = Uuid::new_v4().to_string();
+    connection.execute(
+        "INSERT INTO background_jobs(id,idempotency_key,operation,priority,state,attempts,
+            max_attempts,sequence,ready_at_ms,target_json) VALUES (?1,?2,?3,?4,'queued',0,?5,?6,?7,?8)",
+        params![id, key, operation, priority.number(), policy.max_attempts, sequence,
+            Utc::now().timestamp_millis(), target])?;
+    get_job(connection, &id)
 }
 
 fn open_worker_lock(path: &Path) -> Result<File> {
@@ -602,6 +752,22 @@ pub(crate) struct JobClaim {
 }
 
 impl JobClaim {
+    pub(crate) fn verify_operation(
+        &self,
+        connection: &Connection,
+        operation: &str,
+        target: Option<&str>,
+    ) -> Result<()> {
+        self.verify(connection)?;
+        let valid: bool = connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM background_jobs WHERE id=?1 AND operation=?2 AND target_json IS ?3)",
+            params![self.id, operation, target], |row| row.get(0))?;
+        if !valid {
+            return Err(LoomError::JobClaimStale(self.id.clone()));
+        }
+        Ok(())
+    }
+
     pub(crate) fn verify(&self, connection: &Connection) -> Result<()> {
         let valid: bool = connection.query_row(
             "SELECT EXISTS(SELECT 1 FROM background_jobs j, background_job_runtime r
@@ -695,10 +861,22 @@ impl JobWorker {
         Ok(Some(JobClaim { id, epoch, token }))
     }
 
+    #[cfg(test)]
     fn settle_failure(
         &mut self,
         claim: &JobClaim,
         retryable: bool,
+        reason: &str,
+        now: i64,
+    ) -> Result<BackgroundJob> {
+        self.settle_outcome(claim, retryable, false, reason, now)
+    }
+
+    fn settle_outcome(
+        &mut self,
+        claim: &JobClaim,
+        retryable: bool,
+        cancelled: bool,
         reason: &str,
         now: i64,
     ) -> Result<BackgroundJob> {
@@ -728,18 +906,18 @@ impl JobWorker {
             .checked_add(i64::from(policy.retry_delay_seconds) * 1000)
             .ok_or_else(|| LoomError::JobQueue("retry deadline overflow".into()))?;
         transaction.execute(
-            "UPDATE background_jobs SET state = CASE WHEN cancel_requested = 1 THEN 'cancelled'
+            "UPDATE background_jobs SET state = CASE WHEN cancel_requested = 1 OR ?6 = 1 THEN 'cancelled'
                 WHEN ?1 = 1 AND attempts < max_attempts THEN 'retryable' ELSE 'failed' END,
                 epoch = NULL, claim_token = NULL, last_error = ?2, ready_at_ms = ?3, sequence = ?4
              WHERE id = ?5",
-            params![retryable, reason, due, sequence, claim.id],
+            params![retryable, reason, due, sequence, claim.id, cancelled],
         )?;
         let settled = get_job(&transaction, &claim.id)?;
         transaction.commit()?;
         Ok(settled)
     }
 
-    /// Runs at most one real FTS rebuild. Derivative publication and completion share a fenced txn.
+    /// Runs at most one due typed unit. Publication and completion share a fenced transaction.
     pub fn run_next(&mut self) -> Result<Option<BackgroundJob>> {
         self.run_next_inner(|_| {})
     }
@@ -751,11 +929,34 @@ impl JobWorker {
         let Some(claim) = self.claim_at(Utc::now().timestamp_millis())? else {
             return Ok(None);
         };
-        let settled = match self.library.job_repair_fts(&claim) {
+        let execution = (|| {
+            let (operation, target): (String, Option<String>) = {
+                let connection = self.library.lock()?;
+                claim.verify(&connection)?;
+                connection.query_row(
+                    "SELECT operation, target_json FROM background_jobs WHERE id=?1",
+                    [&claim.id],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )?
+            };
+            match (operation.as_str(), target.as_deref()) {
+                ("fts_repair", None) => self.library.job_repair_fts(&claim),
+                ("index_file", Some(json)) => self.library.job_index_file(&claim, json),
+                _ => Err(LoomError::JobQueue("invalid operation or target".into())),
+            }
+        })();
+        let settled = match execution {
             Ok(completed) => completed,
-            Err(error) => self.settle_failure(
+            Err(error) => self.settle_outcome(
                 &claim,
                 is_retryable(&error),
+                matches!(
+                    error,
+                    LoomError::SourceRevoked(_)
+                        | LoomError::OcrPolicyChanged
+                        | LoomError::OcrDisabled
+                        | LoomError::OcrUnavailable(_)
+                ),
                 &error.to_string(),
                 Utc::now().timestamp_millis(),
             )?,
@@ -767,6 +968,7 @@ impl JobWorker {
 
 fn is_retryable(error: &LoomError) -> bool {
     match error {
+        LoomError::SourceChanged(_) => true,
         LoomError::Database(rusqlite::Error::SqliteFailure(code, _)) => matches!(
             code.code,
             rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked
@@ -809,6 +1011,561 @@ mod tests {
             .unwrap();
         claim.complete(&transaction, "{}").unwrap();
         transaction.commit().unwrap();
+    }
+
+    fn file_fixture() -> (TempDir, Library, std::path::PathBuf) {
+        let (directory, library) = fixture();
+        let source = directory.path().join("approved.md");
+        fs::write(&source, "Original exact evidence marker.").unwrap();
+        library.index_path(&source).unwrap();
+        (directory, library, source.canonicalize().unwrap())
+    }
+
+    fn claim_file(worker: &mut JobWorker) -> (JobClaim, String) {
+        let claim = worker.claim_at(now()).unwrap().unwrap();
+        let json = worker
+            .library
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT target_json FROM background_jobs WHERE id=?1",
+                [&claim.id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        (claim, json)
+    }
+
+    fn file_identity(library: &Library, source: &Path) -> (String, String) {
+        library
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT a.id, a.active_version_id FROM artifacts a JOIN artifact_locators l
+             ON l.artifact_id=a.id WHERE l.kind='file' AND l.locator=?1",
+                [source.to_str().unwrap()],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap()
+    }
+
+    #[test]
+    fn approved_file_admission_is_bounded_atomic_and_never_grants_scope() {
+        let (directory, library, source) = file_fixture();
+        let before = library.export_portable().unwrap().digest;
+        let unknown = directory.path().join("unapproved.md");
+        fs::write(&unknown, "private unapproved marker").unwrap();
+        assert!(matches!(
+            library.enqueue_index_file(&unknown, "unapproved", JobPriority::Normal),
+            Err(LoomError::SourceRevoked(_))
+        ));
+        assert!(library
+            .enqueue_index_file(directory.path(), "directory", JobPriority::Normal)
+            .is_err());
+        #[cfg(unix)]
+        {
+            let alias = directory.path().join("alias.md");
+            std::os::unix::fs::symlink(&source, &alias).unwrap();
+            assert!(library
+                .enqueue_index_file(alias, "alias", JobPriority::Normal)
+                .is_err());
+        }
+        let other = Library::open(directory.path().join("queue.sqlite3")).unwrap();
+        let other_source = source.clone();
+        let barrier = Arc::new(Barrier::new(2));
+        let second_barrier = Arc::clone(&barrier);
+        let task = std::thread::spawn(move || {
+            second_barrier.wait();
+            other
+                .enqueue_index_file(other_source, "one-file", JobPriority::Normal)
+                .unwrap()
+        });
+        barrier.wait();
+        let first = library
+            .enqueue_index_file(&source, "one-file", JobPriority::Normal)
+            .unwrap();
+        assert_eq!(first, task.join().unwrap());
+        assert_eq!(first.target_locator.as_deref(), source.to_str());
+        assert_eq!(library.background_jobs(128).unwrap().len(), 1);
+        assert!(library
+            .enqueue_fts_repair("one-file", JobPriority::Normal)
+            .is_err());
+        assert!(library
+            .enqueue_index_file(&source, "one-file", JobPriority::High)
+            .is_err());
+        assert_eq!(library.export_portable().unwrap().digest, before);
+    }
+
+    #[test]
+    fn real_file_adapter_has_one_parent_authority_and_stable_artifact_identity() {
+        let (_directory, library, source) = file_fixture();
+        let before = file_identity(&library, &source);
+        let checkpoints: i64 = library
+            .lock()
+            .unwrap()
+            .query_row("SELECT COUNT(*) FROM index_jobs", [], |row| row.get(0))
+            .unwrap();
+        fs::write(&source, "Refreshed queued evidence marker.").unwrap();
+        let queued = library
+            .enqueue_index_file(&source, "refresh", JobPriority::Normal)
+            .unwrap();
+        let mut worker = library.acquire_job_worker().unwrap();
+        let completed = worker.run_next().unwrap().unwrap();
+        assert_eq!(completed.id, queued.id);
+        assert_eq!(completed.state, JobState::Completed);
+        assert_eq!(completed.result.as_ref().unwrap()["indexed"], true);
+        let after = file_identity(&library, &source);
+        assert_eq!(before.0, after.0);
+        assert_ne!(before.1, after.1);
+        assert_eq!(
+            library
+                .lock()
+                .unwrap()
+                .query_row("SELECT COUNT(*) FROM index_jobs", [], |row| row
+                    .get::<_, i64>(0))
+                .unwrap(),
+            checkpoints
+        );
+        assert_eq!(
+            library
+                .enqueue_index_file(&source, "refresh", JobPriority::Normal)
+                .unwrap(),
+            completed
+        );
+        library
+            .enqueue_index_file(&source, "unchanged", JobPriority::Normal)
+            .unwrap();
+        assert_eq!(
+            worker.run_next().unwrap().unwrap().result.unwrap()["indexed"],
+            false
+        );
+        assert_eq!(file_identity(&library, &source).1, after.1);
+        assert_eq!(
+            fs::read_to_string(source).unwrap(),
+            "Refreshed queued evidence marker."
+        );
+    }
+
+    #[test]
+    fn file_publication_and_parent_completion_roll_back_together() {
+        let (_directory, library, source) = file_fixture();
+        let before = library.export_portable().unwrap().digest;
+        fs::write(&source, "Atomic publication marker.").unwrap();
+        library
+            .enqueue_index_file(&source, "atomic", JobPriority::Normal)
+            .unwrap();
+        let mut worker = library.acquire_job_worker().unwrap();
+        let (claim, json) = claim_file(&mut worker);
+        let prepared = worker.library.prepare_file_job(&claim, &json).unwrap();
+        library.lock().unwrap().execute_batch("CREATE TRIGGER fail_job_completion BEFORE UPDATE OF state ON background_jobs WHEN NEW.state='completed' BEGIN SELECT RAISE(ABORT,'fixture rollback'); END;").unwrap();
+        assert!(worker.library.publish_file_job(&claim, &prepared).is_err());
+        assert_eq!(library.export_portable().unwrap().digest, before);
+        assert_eq!(
+            library.background_job(&claim.id).unwrap().state,
+            JobState::Running
+        );
+        library
+            .lock()
+            .unwrap()
+            .execute_batch("DROP TRIGGER fail_job_completion;")
+            .unwrap();
+        assert_eq!(
+            worker
+                .library
+                .publish_file_job(&claim, &prepared)
+                .unwrap()
+                .state,
+            JobState::Completed
+        );
+        assert_ne!(library.export_portable().unwrap().digest, before);
+    }
+
+    #[test]
+    fn prepared_file_cancellation_cannot_publish_and_is_durably_acknowledged() {
+        let (_directory, library, source) = file_fixture();
+        fs::write(&source, "Cancelled prepared evidence.").unwrap();
+        let before = library.export_portable().unwrap().digest;
+        let job = library
+            .enqueue_index_file(&source, "cancel-prepared", JobPriority::Normal)
+            .unwrap();
+        let mut worker = library.acquire_job_worker().unwrap();
+        let (claim, json) = claim_file(&mut worker);
+        let prepared = worker.library.prepare_file_job(&claim, &json).unwrap();
+        library.cancel_background_job(&job.id).unwrap();
+        assert!(matches!(
+            worker.library.publish_file_job(&claim, &prepared),
+            Err(LoomError::JobClaimStale(_))
+        ));
+        let settled = worker
+            .settle_failure(&claim, true, "cancelled fixture", now())
+            .unwrap();
+        assert_eq!(settled.state, JobState::Cancelled);
+        assert_eq!(library.export_portable().unwrap().digest, before);
+    }
+
+    #[test]
+    fn reselected_file_does_not_reauthorize_an_admitted_capability() {
+        let (_directory, library, source) = file_fixture();
+        let job = library
+            .enqueue_index_file(&source, "old-capability", JobPriority::Normal)
+            .unwrap();
+        library
+            .revoke_source_root(source.to_str().unwrap())
+            .unwrap();
+        fs::write(&source, "New selected source evidence.").unwrap();
+        library.index_path(&source).unwrap();
+        let before = library.export_portable().unwrap().digest;
+        assert!(library
+            .enqueue_index_file(&source, "old-capability", JobPriority::Normal)
+            .is_err());
+        let mut worker = library.acquire_job_worker().unwrap();
+        let cancelled = worker.run_next().unwrap().unwrap();
+        assert_eq!(cancelled.id, job.id);
+        assert_eq!(cancelled.state, JobState::Cancelled);
+        assert_eq!(library.export_portable().unwrap().digest, before);
+        library
+            .enqueue_index_file(&source, "new-capability", JobPriority::Normal)
+            .unwrap();
+        assert_eq!(
+            worker.run_next().unwrap().unwrap().state,
+            JobState::Completed
+        );
+    }
+
+    #[test]
+    fn source_hash_and_foreground_cas_both_fence_prepared_file_publication() {
+        let (_directory, library, source) = file_fixture();
+        fs::write(&source, "Prepared older source.").unwrap();
+        library
+            .enqueue_index_file(&source, "stale-source", JobPriority::Normal)
+            .unwrap();
+        let mut worker = library.acquire_job_worker().unwrap();
+        let (claim, json) = claim_file(&mut worker);
+        let prepared = worker.library.prepare_file_job(&claim, &json).unwrap();
+        let before = library.export_portable().unwrap().digest;
+        fs::write(&source, "Foreground newer source.").unwrap();
+        assert!(matches!(
+            worker.library.publish_file_job(&claim, &prepared),
+            Err(LoomError::SourceChanged(_))
+        ));
+        assert_eq!(library.export_portable().unwrap().digest, before);
+        library.index_path(&source).unwrap();
+        let foreground = library.export_portable().unwrap().digest;
+        // Restore the earlier bytes so this refusal comes from canonical CAS, not the hash fence.
+        fs::write(&source, "Prepared older source.").unwrap();
+        assert!(matches!(
+            worker.library.publish_file_job(&claim, &prepared),
+            Err(LoomError::SourceChanged(_))
+        ));
+        assert_eq!(library.export_portable().unwrap().digest, foreground);
+        assert!(is_retryable(&LoomError::SourceChanged("fixture".into())));
+        assert_eq!(
+            worker
+                .settle_failure(&claim, true, "CAS changed", now())
+                .unwrap()
+                .state,
+            JobState::Retryable
+        );
+    }
+
+    #[test]
+    fn file_hash_change_while_waiting_for_sqlite_writer_cannot_publish() {
+        let (directory, library, source) = file_fixture();
+        fs::write(&source, "Prepared before lock contention.").unwrap();
+        library
+            .enqueue_index_file(&source, "writer-contention", JobPriority::Normal)
+            .unwrap();
+        let mut worker = library.acquire_job_worker().unwrap();
+        let (claim, json) = claim_file(&mut worker);
+        let prepared = worker.library.prepare_file_job(&claim, &json).unwrap();
+        let before = library.export_portable().unwrap().digest;
+        let database = directory.path().join("queue.sqlite3");
+        let changed_source = source.clone();
+        let barrier = Arc::new(Barrier::new(2));
+        let writer_barrier = Arc::clone(&barrier);
+        let writer = std::thread::spawn(move || {
+            let mut connection = Connection::open(database).unwrap();
+            let transaction = connection
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .unwrap();
+            writer_barrier.wait();
+            std::thread::sleep(Duration::from_millis(150));
+            fs::write(changed_source, "Changed while waiting for writer.").unwrap();
+            transaction.rollback().unwrap();
+        });
+        barrier.wait();
+        let result = worker.library.publish_file_job(&claim, &prepared);
+        writer.join().unwrap();
+        assert!(matches!(result, Err(LoomError::SourceChanged(_))));
+        assert_eq!(library.export_portable().unwrap().digest, before);
+    }
+
+    #[test]
+    fn typed_payload_tampering_cannot_redirect_a_prepared_result() {
+        let (_directory, library, source) = file_fixture();
+        fs::write(&source, "Prepared authentic result.").unwrap();
+        library
+            .enqueue_index_file(&source, "typed", JobPriority::Normal)
+            .unwrap();
+        let mut worker = library.acquire_job_worker().unwrap();
+        let (claim, json) = claim_file(&mut worker);
+        let prepared = worker.library.prepare_file_job(&claim, &json).unwrap();
+        let before = library.export_portable().unwrap().digest;
+        let mut changed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        changed["locator"] = serde_json::json!("/not-an-approved-source.md");
+        library
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE background_jobs SET target_json=?1 WHERE id=?2",
+                params![changed.to_string(), claim.id],
+            )
+            .unwrap();
+        assert!(matches!(
+            worker.library.publish_file_job(&claim, &prepared),
+            Err(LoomError::JobClaimStale(_))
+        ));
+        assert_eq!(library.export_portable().unwrap().digest, before);
+        library
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE background_jobs SET target_json='{}' WHERE id=?1",
+                [&claim.id],
+            )
+            .unwrap();
+        drop(worker);
+        let failed = library
+            .acquire_job_worker()
+            .unwrap()
+            .run_next()
+            .unwrap()
+            .unwrap();
+        assert_eq!(failed.state, JobState::Failed);
+        assert!(failed.target_locator.is_none());
+        assert_eq!(library.export_portable().unwrap().digest, before);
+    }
+
+    #[test]
+    fn purge_removes_target_diagnostics_and_prepared_claims_cannot_resurrect_evidence() {
+        let (_directory, library, source) = file_fixture();
+        fs::write(&source, "Purge prepared result.").unwrap();
+        let job = library
+            .enqueue_index_file(&source, "purge-prepared", JobPriority::Normal)
+            .unwrap();
+        let mut worker = library.acquire_job_worker().unwrap();
+        let (claim, json) = claim_file(&mut worker);
+        let prepared = worker.library.prepare_file_job(&claim, &json).unwrap();
+        let artifact = file_identity(&library, &source).0;
+        library.purge_artifact(&artifact).unwrap();
+        assert!(library.background_job(&job.id).is_err());
+        assert!(matches!(
+            worker.library.publish_file_job(&claim, &prepared),
+            Err(LoomError::JobClaimStale(_))
+        ));
+        assert_eq!(library.stats().unwrap().artifacts, 0);
+        // A selected file root may have no artifact (e.g. extraction failed). Root purge still removes work.
+        library
+            .enqueue_index_file(&source, "root-only", JobPriority::Normal)
+            .unwrap();
+        library.purge_root(source.to_str().unwrap()).unwrap();
+        assert!(library.background_jobs(128).unwrap().is_empty());
+        assert!(library.source_roots().unwrap().is_empty());
+    }
+
+    #[test]
+    fn worker_recovery_reextracts_file_under_new_claim_and_rejects_old_prepared_work() {
+        let (_directory, library, source) = file_fixture();
+        fs::write(&source, "Recovery exact source.").unwrap();
+        let job = library
+            .enqueue_index_file(&source, "recover-file", JobPriority::Normal)
+            .unwrap();
+        let mut old = library.acquire_job_worker().unwrap();
+        let (claim, json) = claim_file(&mut old);
+        let prepared = old.library.prepare_file_job(&claim, &json).unwrap();
+        drop(old);
+        let mut new = library.acquire_job_worker().unwrap();
+        assert!(matches!(
+            new.library.publish_file_job(&claim, &prepared),
+            Err(LoomError::JobClaimStale(_))
+        ));
+        let completed = new.run_next().unwrap().unwrap();
+        assert_eq!(completed.id, job.id);
+        assert_eq!(completed.attempts, 2);
+        assert_eq!(completed.state, JobState::Completed);
+    }
+
+    #[test]
+    fn excessive_extracted_text_fails_without_hiding_or_deleting_original_evidence() {
+        let (_directory, library, source) = file_fixture();
+        let before = library.export_portable().unwrap().digest;
+        fs::write(&source, "x".repeat(2 * 1024 * 1024 + 1)).unwrap();
+        library
+            .enqueue_index_file(&source, "output-limit", JobPriority::Normal)
+            .unwrap();
+        let failed = library
+            .acquire_job_worker()
+            .unwrap()
+            .run_next()
+            .unwrap()
+            .unwrap();
+        assert_eq!(failed.state, JobState::Failed);
+        assert!(failed.last_error.unwrap().contains("publication budget"));
+        assert_eq!(library.export_portable().unwrap().digest, before);
+        fs::write(&source, "x".repeat(8 * 1024 * 1024 + 1)).unwrap();
+        assert!(library
+            .enqueue_index_file(&source, "input-limit", JobPriority::Normal)
+            .is_err());
+        assert_eq!(library.background_jobs(128).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn artifact_purge_does_not_remove_other_file_targets_in_a_shared_canonical_root() {
+        let (directory, library, first) = file_fixture();
+        let second = directory.path().join("second.md");
+        fs::write(&second, "Second exact source.").unwrap();
+        library.index_path(&second).unwrap();
+        let second = second.canonicalize().unwrap();
+        let first_job = library
+            .enqueue_index_file(&first, "keep-other-target", JobPriority::Normal)
+            .unwrap();
+        let second_job = library
+            .enqueue_index_file(&second, "purge-only-target", JobPriority::Normal)
+            .unwrap();
+        let first_artifact = file_identity(&library, &first).0;
+        let second_artifact = file_identity(&library, &second).0;
+        // Canonical roots can contain multiple artifacts (e.g. directory/import records). Build
+        // the FK-valid shared-root shape to prove deletion is locator-scoped, not root-wide.
+        library.lock().unwrap().execute(
+            "UPDATE artifacts SET source_root_id=(SELECT source_root_id FROM artifacts WHERE id=?1) WHERE id=?2",
+            params![first_artifact, second_artifact]).unwrap();
+        library.purge_artifact(&second_artifact).unwrap();
+        assert!(library.background_job(&second_job.id).is_err());
+        assert_eq!(library.background_job(&first_job.id).unwrap(), first_job);
+        assert_eq!(library.stats().unwrap().artifacts, 1);
+    }
+
+    #[test]
+    fn unsupported_runtime_blocks_purge_without_partial_canonical_deletion() {
+        let (_directory, library, source) = file_fixture();
+        library
+            .enqueue_index_file(&source, "retain-unknown-runtime", JobPriority::Normal)
+            .unwrap();
+        let before = library.export_portable().unwrap().digest;
+        library.lock().unwrap().execute("UPDATE schema_meta SET value='future-runtime' WHERE key='background_job_schema_version'", []).unwrap();
+        assert!(library
+            .purge_artifact(&file_identity(&library, &source).0)
+            .is_err());
+        assert!(library.purge_root(source.to_str().unwrap()).is_err());
+        assert_eq!(library.export_portable().unwrap().digest, before);
+        assert_eq!(
+            library
+                .lock()
+                .unwrap()
+                .query_row("SELECT COUNT(*) FROM background_jobs", [], |row| row
+                    .get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+    }
+
+    #[test]
+    fn restore_invalidates_prepared_file_work_and_completed_return_survives_forgetting() {
+        let (_directory, library, source) = file_fixture();
+        let archive = library.export_portable().unwrap();
+        fs::write(&source, "Pre-restore prepared source.").unwrap();
+        library
+            .enqueue_index_file(&source, "restore-file", JobPriority::Normal)
+            .unwrap();
+        let mut worker = library.acquire_job_worker().unwrap();
+        let (claim, json) = claim_file(&mut worker);
+        let prepared = worker.library.prepare_file_job(&claim, &json).unwrap();
+        // Restore accepts only an empty canonical library. Preserve operational state here so
+        // this fixture isolates restore fencing rather than the separately tested purge fence.
+        library
+            .lock()
+            .unwrap()
+            .execute_batch("DELETE FROM artifacts; DELETE FROM source_roots;")
+            .unwrap();
+        library.import_portable(&archive).unwrap();
+        assert!(matches!(
+            worker.library.publish_file_job(&claim, &prepared),
+            Err(LoomError::JobClaimStale(_))
+        ));
+        assert!(library.background_jobs(128).unwrap().is_empty());
+        drop(worker);
+        let queued = library
+            .enqueue_index_file(&source, "post-restore-file", JobPriority::Normal)
+            .unwrap();
+        let completed = library
+            .acquire_job_worker()
+            .unwrap()
+            .run_next_inner(|completed| {
+                library.forget_background_job(&completed.id).unwrap();
+            })
+            .unwrap()
+            .unwrap();
+        assert_eq!(completed.id, queued.id);
+        assert_eq!(completed.state, JobState::Completed);
+        assert!(completed.result.is_some());
+        assert!(library.background_job(&completed.id).is_err());
+    }
+
+    #[test]
+    fn file_and_maintenance_jobs_share_one_admission_budget() {
+        let (_directory, library, source) = file_fixture();
+        library
+            .set_job_queue_policy(JobQueuePolicy {
+                max_pending: 1,
+                max_records: 2,
+                ..Default::default()
+            })
+            .unwrap();
+        let first = library
+            .enqueue_index_file(&source, "budget-file", JobPriority::Normal)
+            .unwrap();
+        assert!(library
+            .enqueue_fts_repair("budget-fts", JobPriority::Normal)
+            .is_err());
+        library.cancel_background_job(&first.id).unwrap();
+        library
+            .enqueue_fts_repair("budget-fts", JobPriority::Normal)
+            .unwrap();
+        assert!(library
+            .enqueue_index_file(&source, "another-file", JobPriority::Normal)
+            .is_err());
+        assert_eq!(library.background_jobs(128).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn image_admission_requires_enabled_policy_and_policy_rotation_cancels_before_extraction() {
+        let (directory, library) = fixture();
+        let image = directory.path().join("intentionally-invalid.png");
+        fs::write(&image, "not image bytes").unwrap();
+        library.set_ocr_enabled(false).unwrap();
+        library.index_path(&image).unwrap(); // explicit selection with OCR off
+        assert!(matches!(
+            library.enqueue_index_file(&image, "ocr-off", JobPriority::Normal),
+            Err(LoomError::OcrDisabled)
+        ));
+        library.set_ocr_enabled(true).unwrap();
+        library
+            .enqueue_index_file(&image, "old-ocr-policy", JobPriority::Normal)
+            .unwrap();
+        library.set_ocr_enabled(true).unwrap(); // same boolean, new explicit consent revision
+        let cancelled = library
+            .acquire_job_worker()
+            .unwrap()
+            .run_next()
+            .unwrap()
+            .unwrap();
+        assert_eq!(cancelled.state, JobState::Cancelled);
+        assert!(cancelled.last_error.unwrap().contains("policy changed"));
+        library
+            .enqueue_index_file(&image, "purged-ocr-policy", JobPriority::Normal)
+            .unwrap();
+        library.purge_ocr_records().unwrap();
+        assert!(library.background_jobs(128).unwrap().is_empty());
     }
 
     #[test]
@@ -977,12 +1734,26 @@ mod tests {
     }
 
     fn downgrade_runtime_for_fixture(library: &Library) {
+        downgrade_runtime_layout(library, false);
+    }
+
+    fn downgrade_runtime_layout(library: &Library, versioned: bool) {
         let mut connection = library.lock().unwrap();
         let transaction = connection.transaction().unwrap();
         transaction.execute_batch("ALTER TABLE background_jobs RENAME TO current_jobs; DROP INDEX background_jobs_ready;").unwrap();
-        transaction.execute_batch(&legacy_runtime_schema()).unwrap();
+        let schema = if versioned {
+            RUNTIME_SCHEMA.to_owned()
+        } else {
+            legacy_runtime_schema()
+        };
+        transaction.execute_batch(&schema).unwrap();
         transaction
-            .execute("INSERT INTO background_jobs SELECT * FROM current_jobs", [])
+            .execute(
+                "INSERT INTO background_jobs SELECT id,idempotency_key,operation,priority,state,
+                attempts,max_attempts,sequence,ready_at_ms,epoch,claim_token,cancel_requested,
+                last_error,result_json FROM current_jobs",
+                [],
+            )
             .unwrap();
         transaction.execute("DROP TABLE current_jobs", []).unwrap();
         transaction
@@ -992,6 +1763,39 @@ mod tests {
             )
             .unwrap();
         transaction.commit().unwrap();
+        drop(connection);
+        if versioned {
+            library.lock().unwrap().execute("INSERT INTO schema_meta(key,value) VALUES ('background_job_schema_version','2')", []).unwrap();
+        }
+    }
+
+    #[test]
+    fn versioned_v2_upgrade_is_explicit_preserves_records_and_can_be_repeated() {
+        let (directory, library) = fixture();
+        let job = library
+            .enqueue_fts_repair("v2-preserved", JobPriority::Normal)
+            .unwrap();
+        let canonical = library.export_portable().unwrap().digest;
+        downgrade_runtime_layout(&library, true);
+        let reader = Library::open(directory.path().join("queue.sqlite3")).unwrap();
+        assert_eq!(
+            reader
+                .lock()
+                .unwrap()
+                .query_row(
+                    "SELECT value FROM schema_meta WHERE key='background_job_schema_version'",
+                    [],
+                    |row| row.get::<_, String>(0)
+                )
+                .unwrap(),
+            "2"
+        );
+        assert!(reader.background_jobs(128).is_err());
+        reader.upgrade_job_runtime().unwrap();
+        assert_eq!(reader.background_job(&job.id).unwrap(), job);
+        reader.upgrade_job_runtime().unwrap();
+        assert_eq!(reader.background_job(&job.id).unwrap(), job);
+        assert_eq!(reader.export_portable().unwrap().digest, canonical);
     }
 
     #[test]
@@ -1031,8 +1835,28 @@ mod tests {
         downgrade_runtime_for_fixture(&library);
         assert!(Library::open_for_jobs(directory.path().join("queue.sqlite3")).is_err());
         let migrated = Library::open(directory.path().join("queue.sqlite3")).unwrap();
+        assert!(validate_schema(&migrated.lock().unwrap()).is_err());
+        assert!(matches!(
+            migrated.upgrade_job_runtime(),
+            Err(LoomError::JobWorkerBusy)
+        ));
+        claim.verify(&worker.library.lock().unwrap()).unwrap();
+        drop(worker);
+        migrated.upgrade_job_runtime().unwrap();
         validate_schema(&migrated.lock().unwrap()).unwrap();
-        assert_eq!(migrated.background_jobs(128).unwrap(), rows);
+        let upgraded_rows = migrated.background_jobs(128).unwrap();
+        for row in rows {
+            let upgraded = upgraded_rows
+                .iter()
+                .find(|upgraded| upgraded.id == row.id)
+                .unwrap();
+            if row.state == JobState::Running {
+                assert_eq!(upgraded.state, JobState::Retryable);
+                assert_eq!(upgraded.attempts, row.attempts);
+            } else {
+                assert_eq!(upgraded, &row);
+            }
+        }
         assert_eq!(migrated.job_queue_policy().unwrap(), policy);
         assert_eq!(
             migrated
@@ -1048,13 +1872,15 @@ mod tests {
                     )),
                 )
                 .unwrap(),
-            runtime
+            (runtime.0 + 1, runtime.1, runtime.2)
         );
         assert_eq!(migrated.export_portable().unwrap().digest, archive.digest);
         assert!(!archive
             .settings
             .contains_key("background_job_schema_version"));
-        claim.verify(&worker.library.lock().unwrap()).unwrap();
+        assert!(claim.verify(&migrated.lock().unwrap()).is_err());
+        let mut worker = migrated.acquire_job_worker().unwrap();
+        let claim = worker.claim_at(now()).unwrap().unwrap();
         migrated.import_portable(&archive).unwrap();
         assert!(migrated.background_jobs(128).unwrap().is_empty());
         assert!(claim.verify(&worker.library.lock().unwrap()).is_err());
@@ -1078,6 +1904,7 @@ mod tests {
             .unwrap();
         let opened = Library::open(directory.path().join("queue.sqlite3")).unwrap();
         assert!(opened.stats().is_ok());
+        assert!(opened.upgrade_job_runtime().is_err());
         assert!(Library::open_for_jobs(directory.path().join("queue.sqlite3")).is_err());
         let connection = opened.lock().unwrap();
         assert_eq!(
@@ -1099,7 +1926,7 @@ mod tests {
         );
         assert!(!connection
             .query_row(
-                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name = 'background_jobs_v1')",
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name = 'background_jobs_v2')",
                 [],
                 |row| row.get::<_, bool>(0)
             )
@@ -1517,9 +2344,22 @@ mod tests {
         let Some(database) = std::env::var_os("LOOM_TEST_JOB_LOCK_DATABASE") else {
             return;
         };
-        let library = Library::open(database).unwrap();
+        let library = Library::open_for_jobs(database).unwrap();
         let mut worker = library.acquire_job_worker().unwrap();
-        worker.claim_at(now()).unwrap().unwrap();
+        let claim = worker.claim_at(now()).unwrap().unwrap();
+        let target: Option<String> = worker
+            .library
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT target_json FROM background_jobs WHERE id=?1",
+                [&claim.id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let _prepared = target
+            .as_deref()
+            .map(|json| worker.library.prepare_file_job(&claim, json).unwrap());
         fs::write(
             std::env::var_os("LOOM_TEST_JOB_LOCK_READY").unwrap(),
             "ready",
@@ -1532,45 +2372,60 @@ mod tests {
 
     #[test]
     fn actual_process_death_releases_the_lock_and_recovers_running_work() {
-        let (directory, library) = fixture();
-        let job = library
-            .enqueue_fts_repair("process-crash", JobPriority::Normal)
-            .unwrap();
-        let ready = directory.path().join("child-ready");
-        let child = Command::new(std::env::current_exe().unwrap())
-            .args(["jobs::tests::process_lock_child", "--exact", "--nocapture"])
-            .env(
-                "LOOM_TEST_JOB_LOCK_DATABASE",
-                directory.path().join("queue.sqlite3"),
+        let (directory, library, source) = file_fixture();
+        for operation in ["fts_repair", "index_file"] {
+            fs::write(
+                &source,
+                format!("Killed-process {operation} recovery marker."),
             )
-            .env("LOOM_TEST_JOB_LOCK_READY", &ready)
-            .stdout(Stdio::null())
-            .spawn()
             .unwrap();
-        let mut child = ChildGuard(child);
-        let deadline = Instant::now() + Duration::from_secs(10);
-        while !ready.exists() && Instant::now() < deadline {
-            assert!(
-                child.0.try_wait().unwrap().is_none(),
-                "child exited before locking"
+            let job = if operation == "fts_repair" {
+                library
+                    .enqueue_fts_repair("process-crash", JobPriority::Normal)
+                    .unwrap()
+            } else {
+                library
+                    .enqueue_index_file(&source, "process-file-crash", JobPriority::Normal)
+                    .unwrap()
+            };
+            let canonical = library.export_portable().unwrap().digest;
+            let ready = directory.path().join(format!("child-ready-{operation}"));
+            let child = Command::new(std::env::current_exe().unwrap())
+                .args(["jobs::tests::process_lock_child", "--exact", "--nocapture"])
+                .env(
+                    "LOOM_TEST_JOB_LOCK_DATABASE",
+                    directory.path().join("queue.sqlite3"),
+                )
+                .env("LOOM_TEST_JOB_LOCK_READY", &ready)
+                .stdout(Stdio::null())
+                .spawn()
+                .unwrap();
+            let mut child = ChildGuard(child);
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while !ready.exists() && Instant::now() < deadline {
+                assert!(
+                    child.0.try_wait().unwrap().is_none(),
+                    "child exited before locking"
+                );
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            assert!(ready.exists(), "child did not acquire the worker lock");
+            assert!(matches!(
+                library.acquire_job_worker(),
+                Err(LoomError::JobWorkerBusy)
+            ));
+            assert_eq!(
+                library.background_job(&job.id).unwrap().state,
+                JobState::Running
             );
-            std::thread::sleep(Duration::from_millis(10));
+            assert_eq!(library.export_portable().unwrap().digest, canonical);
+            child.0.kill().unwrap();
+            child.0.wait().unwrap();
+            let mut recovered = library.acquire_job_worker().unwrap();
+            let completed = recovered.run_next().unwrap().unwrap();
+            assert_eq!(completed.state, JobState::Completed);
+            assert_eq!(completed.id, job.id);
+            assert_eq!(completed.attempts, 2);
         }
-        assert!(ready.exists(), "child did not acquire the worker lock");
-        assert!(matches!(
-            library.acquire_job_worker(),
-            Err(LoomError::JobWorkerBusy)
-        ));
-        assert_eq!(
-            library.background_job(&job.id).unwrap().state,
-            JobState::Running
-        );
-        child.0.kill().unwrap();
-        child.0.wait().unwrap();
-        let mut recovered = library.acquire_job_worker().unwrap();
-        let completed = recovered.run_next().unwrap().unwrap();
-        assert_eq!(completed.state, JobState::Completed);
-        assert_eq!(completed.id, job.id);
-        assert_eq!(completed.attempts, 2);
     }
 }
