@@ -15,6 +15,8 @@ def main():
     parser.add_argument("--before", type=Path, required=True)
     parser.add_argument("--after", type=Path, required=True)
     args = parser.parse_args()
+    if not __debug__:
+        parser.error("run without Python optimization; compatibility checks must remain enabled")
     before, after = args.before.resolve(), args.after.resolve()
     before_hash = hashlib.sha256(before.read_bytes()).hexdigest()
     after_hash = hashlib.sha256(after.read_bytes()).hexdigest()
