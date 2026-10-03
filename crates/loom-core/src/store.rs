@@ -3329,6 +3329,19 @@ impl Library {
 
     pub(crate) fn open_for_jobs_with_limits(path: &Path, limits: LibraryLimits) -> Result<Self> {
         let path = path.canonicalize().map_err(|error| io_error(path, error))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            if fs::metadata(&path)
+                .map_err(|error| io_error(&path, error))?
+                .nlink()
+                != 1
+            {
+                return Err(LoomError::JobQueue(
+                    "hard-linked database aliases are not supported by the queue".into(),
+                ));
+            }
+        }
         let connection =
             Connection::open_with_flags(&path, rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE)?;
         if stored_schema_version(&connection)? != Some(SCHEMA_VERSION) {
@@ -3392,7 +3405,7 @@ impl Library {
 }
 
 #[cfg(unix)]
-fn database_file_identity(path: &Path) -> Result<(u64, u64)> {
+pub(crate) fn database_file_identity(path: &Path) -> Result<(u64, u64)> {
     use std::os::unix::fs::MetadataExt;
     let metadata = fs::metadata(path).map_err(|error| io_error(path, error))?;
     Ok((metadata.dev(), metadata.ino()))

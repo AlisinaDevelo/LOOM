@@ -144,26 +144,78 @@ const RUNTIME_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS background_job_runtime(
          CREATE INDEX IF NOT EXISTS background_jobs_ready ON background_jobs(state, ready_at_ms, sequence);";
 
 pub(crate) fn ensure_schema(connection: &Connection) -> Result<()> {
-    connection.execute_batch(RUNTIME_SCHEMA)?;
-    connection.execute(
+    let transaction =
+        rusqlite::Transaction::new_unchecked(connection, TransactionBehavior::Immediate)?;
+    let version: Option<String> = transaction
+        .query_row(
+            "SELECT value FROM schema_meta WHERE key = 'background_job_schema_version'",
+            [],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if version.is_some() {
+        // Unsupported/corrupt runtime does not prevent opening canonical evidence.
+        return Ok(());
+    }
+    let existing: bool = transaction.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name = 'background_jobs')",
+        [],
+        |row| row.get(0),
+    )?;
+    if existing && validate_definitions(&transaction, RUNTIME_SCHEMA).is_err() {
+        let legacy = legacy_runtime_schema();
+        if validate_definitions(&transaction, &legacy).is_err() {
+            return Ok(());
+        }
+        transaction.execute_batch(
+            "ALTER TABLE background_jobs RENAME TO background_jobs_v1;
+             DROP INDEX background_jobs_ready;",
+        )?;
+        transaction.execute_batch(RUNTIME_SCHEMA)?;
+        // Invalid legacy diagnostics/results leave the old runtime intact and unavailable;
+        // never truncate, silently drop jobs, or hide canonical evidence.
+        if transaction
+            .execute(
+                "INSERT INTO background_jobs SELECT * FROM background_jobs_v1",
+                [],
+            )
+            .is_err()
+        {
+            return Ok(());
+        }
+        transaction.execute("DROP TABLE background_jobs_v1", [])?;
+    } else {
+        transaction.execute_batch(RUNTIME_SCHEMA)?;
+    }
+    transaction.execute(
         "INSERT INTO background_job_runtime VALUES (1, 0, 1, 0, ?1) ON CONFLICT(slot) DO NOTHING",
         [serde_json::to_string(&JobQueuePolicy::default())?],
     )?;
+    transaction.execute(
+        "INSERT INTO schema_meta(key,value) VALUES ('background_job_schema_version','2')",
+        [],
+    )?;
+    transaction.commit()?;
     Ok(())
 }
 
-/// Runtime tables are deliberately versioned independently of portable canonical schema.
-pub(crate) fn validate_schema(connection: &Connection) -> Result<()> {
+fn legacy_runtime_schema() -> String {
+    RUNTIME_SCHEMA
+        .replace("length(CAST(last_error AS BLOB))", "length(last_error)")
+        .replace(
+            "length(CAST(result_json AS BLOB)) <= 65536 AND json_valid(result_json)",
+            "length(result_json) <= 65536",
+        )
+}
+
+fn validate_definitions(connection: &Connection, schema: &str) -> Result<()> {
     fn normalized(sql: &str) -> String {
         sql.split_whitespace()
             .collect::<String>()
             .to_ascii_lowercase()
             .replace("ifnotexists", "")
     }
-    for definition in RUNTIME_SCHEMA
-        .split(';')
-        .filter(|sql| !sql.trim().is_empty())
-    {
+    for definition in schema.split(';').filter(|sql| !sql.trim().is_empty()) {
         let name = if definition.contains("CREATE INDEX") {
             "background_jobs_ready"
         } else if definition.contains("background_job_runtime(") {
@@ -184,6 +236,25 @@ pub(crate) fn validate_schema(connection: &Connection) -> Result<()> {
             )));
         }
     }
+    Ok(())
+}
+
+/// Runtime version and definitions are independent of portable canonical schema.
+pub(crate) fn validate_schema(connection: &Connection) -> Result<()> {
+    let version: Option<String> = connection
+        .query_row(
+            "SELECT value FROM schema_meta WHERE key = 'background_job_schema_version'",
+            [],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if version.as_deref() != Some("2") {
+        return Err(LoomError::JobQueue(
+            "unsupported or unmigrated runtime schema; explicitly initialize with Library::open"
+                .into(),
+        ));
+    }
+    validate_definitions(connection, RUNTIME_SCHEMA)?;
     load_policy(connection)?;
     Ok(())
 }
@@ -413,6 +484,8 @@ impl JobWorker {
         let path = path.as_ref();
         let database = path.canonicalize().map_err(|error| io_error(path, error))?;
         #[cfg(unix)]
+        let identity = crate::store::database_file_identity(&database)?;
+        #[cfg(unix)]
         {
             use std::os::unix::fs::MetadataExt;
             if std::fs::metadata(&database)
@@ -439,7 +512,19 @@ impl JobWorker {
                 io_error(&lock_path, error)
             }
         })?;
+        #[cfg(unix)]
+        if crate::store::database_file_identity(&database)? != identity {
+            return Err(LoomError::JobQueue(
+                "database identity changed during acquisition".into(),
+            ));
+        }
         let library = Library::open_for_jobs_with_limits(&database, limits)?;
+        #[cfg(unix)]
+        if crate::store::database_file_identity(&database)? != identity {
+            return Err(LoomError::JobQueue(
+                "database identity changed during opening".into(),
+            ));
+        }
         let epoch = {
             let mut connection = library.lock()?;
             let transaction =
@@ -880,6 +965,136 @@ mod tests {
         assert!(library.background_job(&failed.id).is_err());
     }
 
+    fn downgrade_runtime_for_fixture(library: &Library) {
+        let mut connection = library.lock().unwrap();
+        let transaction = connection.transaction().unwrap();
+        transaction.execute_batch("ALTER TABLE background_jobs RENAME TO current_jobs; DROP INDEX background_jobs_ready;").unwrap();
+        transaction.execute_batch(&legacy_runtime_schema()).unwrap();
+        transaction
+            .execute("INSERT INTO background_jobs SELECT * FROM current_jobs", [])
+            .unwrap();
+        transaction.execute("DROP TABLE current_jobs", []).unwrap();
+        transaction
+            .execute(
+                "DELETE FROM schema_meta WHERE key = 'background_job_schema_version'",
+                [],
+            )
+            .unwrap();
+        transaction.commit().unwrap();
+    }
+
+    #[test]
+    fn runtime_upgrade_preserves_policy_epoch_order_and_all_job_states_then_restore_fences_them() {
+        let (directory, library) = fixture();
+        library
+            .set_job_queue_policy(JobQueuePolicy {
+                max_pending: 4,
+                max_records: 8,
+                ..Default::default()
+            })
+            .unwrap();
+        let mut worker = library.acquire_job_worker().unwrap();
+        library
+            .enqueue_fts_repair("legacy-completed", JobPriority::High)
+            .unwrap();
+        worker.run_next().unwrap().unwrap();
+        library
+            .enqueue_fts_repair("legacy-queued", JobPriority::Normal)
+            .unwrap();
+        library
+            .enqueue_fts_repair("legacy-running", JobPriority::High)
+            .unwrap();
+        let claim = worker.claim_at(now()).unwrap().unwrap();
+        let rows = library.background_jobs(128).unwrap();
+        let policy = library.job_queue_policy().unwrap();
+        let runtime: (i64, i64, i64) = library
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT epoch,next_sequence,priority_streak FROM background_job_runtime",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        let archive = library.export_portable().unwrap();
+        downgrade_runtime_for_fixture(&library);
+        assert!(Library::open_for_jobs(directory.path().join("queue.sqlite3")).is_err());
+        let migrated = Library::open(directory.path().join("queue.sqlite3")).unwrap();
+        validate_schema(&migrated.lock().unwrap()).unwrap();
+        assert_eq!(migrated.background_jobs(128).unwrap(), rows);
+        assert_eq!(migrated.job_queue_policy().unwrap(), policy);
+        assert_eq!(
+            migrated
+                .lock()
+                .unwrap()
+                .query_row(
+                    "SELECT epoch,next_sequence,priority_streak FROM background_job_runtime",
+                    [],
+                    |row| Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, i64>(2)?
+                    )),
+                )
+                .unwrap(),
+            runtime
+        );
+        assert_eq!(migrated.export_portable().unwrap().digest, archive.digest);
+        assert!(!archive
+            .settings
+            .contains_key("background_job_schema_version"));
+        claim.verify(&worker.library.lock().unwrap()).unwrap();
+        migrated.import_portable(&archive).unwrap();
+        assert!(migrated.background_jobs(128).unwrap().is_empty());
+        assert!(claim.verify(&worker.library.lock().unwrap()).is_err());
+        validate_schema(&migrated.lock().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn invalid_legacy_diagnostics_roll_back_runtime_upgrade_without_dropping_jobs() {
+        let (directory, library) = fixture();
+        let job = library
+            .enqueue_fts_repair("retain-invalid-legacy", JobPriority::Normal)
+            .unwrap();
+        downgrade_runtime_for_fixture(&library);
+        library
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE background_jobs SET result_json = 'invalid-json' WHERE id = ?1",
+                [&job.id],
+            )
+            .unwrap();
+        let opened = Library::open(directory.path().join("queue.sqlite3")).unwrap();
+        assert!(opened.stats().is_ok());
+        assert!(Library::open_for_jobs(directory.path().join("queue.sqlite3")).is_err());
+        let connection = opened.lock().unwrap();
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT result_json FROM background_jobs WHERE id = ?1",
+                    [&job.id],
+                    |row| row.get::<_, String>(0)
+                )
+                .unwrap(),
+            "invalid-json"
+        );
+        assert_eq!(
+            connection
+                .query_row("SELECT COUNT(*) FROM background_jobs", [], |row| row
+                    .get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+        assert!(!connection
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name = 'background_jobs_v1')",
+                [],
+                |row| row.get::<_, bool>(0)
+            )
+            .unwrap());
+    }
+
     #[test]
     fn queue_open_refuses_uninitialized_or_malformed_runtime_without_migrating() {
         let (directory, library) = fixture();
@@ -1211,6 +1426,9 @@ mod tests {
         .unwrap();
         assert!(
             matches!(library.acquire_job_worker(), Err(LoomError::JobQueue(reason)) if reason.contains("hard-linked"))
+        );
+        assert!(
+            matches!(Library::open_for_jobs(directory.path().join("hard.sqlite3")), Err(LoomError::JobQueue(reason)) if reason.contains("hard-linked"))
         );
     }
 

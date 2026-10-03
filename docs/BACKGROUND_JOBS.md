@@ -32,6 +32,11 @@ Repeating a key with identical operation/priority returns its original row, incl
 row. Conflicting input is rejected without changing it. Terminal keys are not silently evicted.
 At the retained-record limit, explicitly forgetting a terminal record frees capacity and forgets
 its key; a later request with that key becomes new work. Pending/running jobs cannot be forgotten.
+The separate `background_job_schema_version` marker is runtime-only. Version 2 enforces
+UTF-8 byte bounds and valid result JSON; ordinary opening transactionally upgrades the first
+unversioned queue layout, preserving job rows, policy, epoch, sequence, and priority accounting.
+Invalid legacy diagnostics roll back that upgrade: canonical evidence still opens, no jobs are
+dropped, and queue commands refuse the unmigrated runtime. Future unknown versions are refused.
 
 | Transition | Condition |
 | --- | --- |

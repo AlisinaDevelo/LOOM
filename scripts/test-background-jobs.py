@@ -3,6 +3,7 @@
 import argparse
 import fcntl
 import json
+import os
 import sqlite3
 import subprocess
 import tempfile
@@ -20,9 +21,9 @@ def main():
         source = root / "fixture.md"
         source.write_text("# Fixture\n\nSource-faithful queue smoke marker.\n", encoding="utf-8")
 
-        def command(*arguments, rejected=False):
+        def command(*arguments, rejected=False, database_path=database):
             result = subprocess.run(
-                [str(binary), "--database", str(database), *arguments],
+                [str(binary), "--database", str(database_path), *arguments],
                 capture_output=True, text=True, timeout=30, check=False,
             )
             if rejected:
@@ -91,6 +92,14 @@ def main():
         replacement = command("enqueue-fts-repair", "device-repair", "--high")
         assert replacement["id"] != completed["id"]
         assert command("run-next-job")["state"] == "completed"
+        hardlink = root / "hard-link.sqlite3"
+        os.link(database, hardlink)
+        for operation in [
+            ("jobs",), ("enqueue-fts-repair", "hard-link-denied"),
+            ("cancel-job", replacement["id"]), ("forget-job", replacement["id"]),
+            ("run-next-job",),
+        ]:
+            assert "hard-linked" in command(*operation, rejected=True, database_path=hardlink)
         print("background job CLI: PASS (duplicate/conflict, real repair, durable result, cancellation, source recovery)")
 
 
