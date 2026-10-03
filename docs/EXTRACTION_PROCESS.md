@@ -111,3 +111,5 @@ the report also records baseline latency and each helper's resource metrics. Thi
 100k-corpus acceptance, a signed-build test or a claim about Vision's system-service memory.
 The target-device runner executes this experiment alongside the existing larger benchmark,
 frontend, native-host, MSRV, security and recovery checks; their failures remain separate gates.
+See [the retained device evidence](evidence/0400-isolated-extraction.md) for actual results,
+failed trials, compatibility checks and remaining limitations.

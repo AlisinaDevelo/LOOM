@@ -117,7 +117,7 @@ Cargo caches were not removed by these cleanups.
 | Security log | `d763487c117d1c76e6f3d0dadcdc8f0eedca5c4653910702f10b2221302aee9a` |
 | Tauri build log | `dc99d564ac4bd55e1a97fcc1df0cbf6c6c4f8a9262e712796461053e6f29bf4e` |
 
-## Remaining #36 work
+## Remaining #36 work at runtime v3
 
 Directory quanta, staged semantic/FTS work, desktop durable admission/progress/cancellation/
 relaunch, isolated native providers and measured search responsiveness remain unimplemented
@@ -125,3 +125,7 @@ or unproved. Current output limits are post-provider limits, not execution/memor
 The in-process adapter also treats OCR-provider unavailability as terminal cancellation;
 separating environment failures from consent cancellation belongs in that follow-up.
 No issue is closed from this partial adapter or from a report command's zero exit status.
+
+The [supervised-extraction follow-up](0400-isolated-extraction.md) records subsequent v4
+process isolation, provider-error classification and small-cohort concurrent-search tests.
+Directory/semantic scheduling and desktop integration still require their own proof.
