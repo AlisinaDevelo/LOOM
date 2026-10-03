@@ -74,6 +74,10 @@ stored extraction, checks or repairs the derived FTS5 projection, runs the retri
 benchmark, imports a local Chrome/Firefox Netscape HTML export without fetching URLs, lists
 bookmark provenance, and exposes the explicit semantic status/rebuild/benchmark/drop/search
 commands. Its default database is .loom/library.sqlite3; callers can provide another path.
+The opt-in `jobs`, `enqueue-fts-repair`, `cancel-job`, `forget-job`, and `run-next-job` commands
+expose the
+first durable background adapter: real FTS repair. See [BACKGROUND_JOBS.md](BACKGROUND_JOBS.md).
+Ingestion, OCR, semantic rebuild, and desktop scheduling are not yet routed through this queue.
 
 ### Tauri shell and UI
 
@@ -106,10 +110,10 @@ from user data and is not a claim about production retrieval quality.
 
 ## Persistence
 
-SQLite is the canonical store. The current schema is version 7 and contains source roots, logical
+SQLite is the canonical store. The current schema is version 10 and contains source roots, logical
 artifacts, locators, content versions, passages, typed provenance relationships, bookmark import and
 record history, durable indexing-job checkpoints, and extraction metadata. Each passage has a JSON
-text, PDF-page, image-region, or bookmark-text anchor plus scalar offsets. Versions 2–6 migrate
+text, PDF-page, image-region, or bookmark-text anchor plus scalar offsets. Versions 2–9 migrate
 transactionally while preserving populated
 canonical rows; see [SCHEMA_COMPATIBILITY.md](SCHEMA_COMPATIBILITY.md).
 
@@ -125,9 +129,9 @@ mode, in-memory temporary storage, and SQLite trusted-schema hardening. These ar
 choices for the local database, not a promise of crash-proof or encrypted storage. SQLite documents
 the WAL trade-offs in its [WAL reference](https://www.sqlite.org/wal.html).
 
-The current schema is version 7. Opening validates a known marker's required tables and columns,
+The current schema is version 10. Opening validates a known marker's required tables and columns,
 refuses a missing, malformed, or unknown version marker instead of rewriting it, and supports
-reviewed versions 2–6 transactional migrations. The disposable FTS5 projection is rebuilt from
+reviewed versions 2–9 transactional migrations. The disposable FTS5 projection is rebuilt from
 canonical passages on open; canonical rows are never reconstructed from FTS5. Pre-alpha version 1
 databases are explicitly rejected because their content-version uniqueness contract did not include
 extractor identity. A content observation is keyed by source artifact, byte hash, extractor, and

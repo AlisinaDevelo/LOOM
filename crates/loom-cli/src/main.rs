@@ -9,7 +9,8 @@ use std::{
 
 use clap::{Parser, Subcommand};
 use loom_core::{
-    BackupOptions, EvidenceAnchor, Library, LibraryLimits, PortableExport, SearchRequest,
+    BackupOptions, EvidenceAnchor, JobPriority, JobWorker, Library, LibraryLimits, PortableExport,
+    SearchRequest,
 };
 use serde::{Deserialize, Serialize};
 
@@ -101,6 +102,25 @@ enum Command {
     FtsHealth,
     /// Repair the derived FTS5 projection and print before/after evidence.
     FtsRepair,
+    /// Inspect durable, opt-in background jobs (currently FTS repair only).
+    Jobs {
+        #[arg(long, default_value_t = 20)]
+        limit: u32,
+    },
+    /// Queue a real FTS repair, deduplicated by a stable caller-supplied identifier.
+    EnqueueFtsRepair {
+        idempotency_key: String,
+        #[arg(long, conflicts_with = "low")]
+        high: bool,
+        #[arg(long)]
+        low: bool,
+    },
+    /// Request durable cancellation; a running transaction may already have completed.
+    CancelJob { id: String },
+    /// Explicitly forget a terminal job's diagnostic record and idempotency key.
+    ForgetJob { id: String },
+    /// Acquire exclusive worker ownership and run at most one due FTS-repair job.
+    RunNextJob,
     /// Print local OCR policy and derived-record counts.
     OcrStatus,
     /// Enable local image OCR for subsequent indexing runs.
@@ -544,6 +564,53 @@ fn main() -> Result<(), Box<dyn Error>> {
         Command::FtsRepair => {
             let library = Library::open(arguments.database)?;
             println!("{}", serde_json::to_string_pretty(&library.repair_fts()?)?);
+        }
+        Command::Jobs { limit } => {
+            let library = Library::open_for_jobs(arguments.database)?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&library.background_jobs(limit)?)?
+            );
+        }
+        Command::EnqueueFtsRepair {
+            idempotency_key,
+            high,
+            low,
+        } => {
+            let library = Library::open_for_jobs(arguments.database)?;
+            let priority = if high {
+                JobPriority::High
+            } else if low {
+                JobPriority::Low
+            } else {
+                JobPriority::Normal
+            };
+            println!(
+                "{}",
+                serde_json::to_string_pretty(
+                    &library.enqueue_fts_repair(&idempotency_key, priority)?
+                )?
+            );
+        }
+        Command::CancelJob { id } => {
+            let library = Library::open_for_jobs(arguments.database)?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&library.cancel_background_job(&id)?)?
+            );
+        }
+        Command::ForgetJob { id } => {
+            let library = Library::open_for_jobs(arguments.database)?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&library.forget_background_job(&id)?)?
+            );
+        }
+        Command::RunNextJob => {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&JobWorker::open(arguments.database)?.run_next()?)?
+            );
         }
         Command::OcrStatus => {
             let library = Library::open(arguments.database)?;
@@ -1663,6 +1730,7 @@ fn phrase_is_highlighted(hit: &loom_core::SearchHit, phrase: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use clap::Parser;
     use std::path::PathBuf;
 
     use loom_core::{
@@ -1676,6 +1744,26 @@ mod tests {
         validate_expected_anchor, BenchmarkAccumulator, BenchmarkAlternative, BenchmarkAnchor,
         BenchmarkQuery, BenchmarkThresholds, QueryEvaluation,
     };
+
+    #[test]
+    fn background_job_commands_parse_and_reject_conflicting_priorities() {
+        for arguments in [
+            vec!["loom", "jobs", "--limit", "20"],
+            vec!["loom", "enqueue-fts-repair", "device-check", "--high"],
+            vec!["loom", "cancel-job", "job-id"],
+            vec!["loom", "run-next-job"],
+        ] {
+            assert!(super::Arguments::try_parse_from(arguments).is_ok());
+        }
+        assert!(super::Arguments::try_parse_from([
+            "loom",
+            "enqueue-fts-repair",
+            "device-check",
+            "--high",
+            "--low",
+        ])
+        .is_err());
+    }
 
     #[test]
     fn percentile_uses_nearest_rank() {

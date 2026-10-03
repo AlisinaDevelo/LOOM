@@ -17,6 +17,7 @@ chrono.workspace = true
 image.workspace = true
 kamadak-exif.workspace = true
 libc.workspace = true
+fs2.workspace = true
 loom-ocr-macos = { path = "../loom-ocr-macos" }
 pdf-extract.workspace = true
 rusqlite.workspace = true

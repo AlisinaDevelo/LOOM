@@ -322,6 +322,7 @@ impl Library {
         // Runtime work is not portable. A restored root ID/generation must not revive a worker
         // that was prepared before the old canonical rows were purged.
         transaction.execute("DELETE FROM index_jobs", [])?;
+        crate::jobs::reset_for_restore(&transaction)?;
         transaction.execute(
             "UPDATE schema_meta SET value = ?1 WHERE key = 'authorization_incarnation'",
             [uuid::Uuid::new_v4().to_string()],

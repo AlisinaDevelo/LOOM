@@ -5,6 +5,7 @@ mod bookmarks;
 mod domain;
 mod error;
 mod ingest;
+mod jobs;
 mod observe;
 mod ocr;
 mod portable;
@@ -34,6 +35,7 @@ pub use domain::{
     StorageEntry, StorageInspection,
 };
 pub use error::{LoomError, Result};
+pub use jobs::{BackgroundJob, JobPriority, JobQueuePolicy, JobState, JobWorker};
 pub use observe::{coalesce_events, ObservationEvent, ObservationEventKind, ObservationPlan};
 pub use portable::{
     PortableExport, PortableImportReport, PortableTable, EXPORT_FORMAT, EXPORT_FORMAT_VERSION,
