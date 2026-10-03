@@ -1,0 +1,24 @@
+# Project policy takes precedence over the operator's Cargo audit configuration.
+[advisories]
+ignore = []
+informational_warnings = ["unmaintained", "unsound", "notice"]
+severity_threshold = "none"
+
+[database]
+url = "https://github.com/RustSec/advisory-db.git"
+fetch = true
+stale = false
+
+[output]
+deny = ["warnings"]
+format = "terminal"
+quiet = false
+show_tree = true
+
+[target]
+arch = []
+os = []
+
+[yanked]
+enabled = true
+update_index = true

@@ -119,5 +119,26 @@ scope, ambient capture, networking, model download, external study, or signing c
 | `jobs-reviewed-frontend.log` | `6e75fff1af65dc389af8c00a713864d430951fb57bef7c0a2a60e51b93c3b0fe` |
 | `jobs-ship-capture-sample.txt` | `e80cfe460f4731189e08ac0867c171cb68c2c13dafc7ae20bae3bd73df209a2b` |
 
-After merge, retain the exact main SHA/tree identity and rerun the queue, full workspace,
-CLI, and source-recovery checks on clean main. No hosted check is substituted for that proof.
+## Merged-main reproduction
+
+[PR #316](https://github.com/AlisinaDevelo/LOOM/pull/316) merged normally on
+2026-10-03 at 02:57:00 UTC as `39b8d2f7ed4bed297b48b723eecd195254fc2d62`.
+The tested PR head `aee4a804fe52f2e3d7dfd38a45f77c0a971c9eb0` and main both have tree
+`f56eb5b72e75623ed213be408350ce5baeb5bb90`; their complete diff is empty.
+No hosted-check wait, administrative merge, protection change, or required-check bypass was used.
+
+On clean main, all 240 workspace tests passed again. A CLI rebuilt on main passed the actual
+queue corruption/ownership/hard-link/cancellation/forgetting fixtures and 3/3 v0 recovery queries.
+Native-host acceptance/refusal/recovery, frontend 39/12/6 tests plus lint/typecheck/build, and the
+local security script passed again. The separate Rust advisory #278 remains open; no issue
+was closed by this partial engine. GitHub has no open PRs and 122 open / 44 closed issues.
+The read-only roadmap plan still has zero mutations and no warnings.
+
+| Merged-main log | SHA-256 |
+| --- | --- |
+| `jobs-merged-workspace.log` | `00dc93b5517f1254d10911db931cd230bbab9a4571de37a1daa2445ae8fd277f` |
+| `jobs-merged-cli.log` | `cd15b03cd5860d5b2c9391e10c64df8cc3b8648cdaab69932f2f878b444ed5f8` |
+| `jobs-merged-v0.log` | `67a8eba8576c0d241509ebaeda3e02fbd439e98f81f7000e0786b9d4314ef1ea` |
+| `jobs-merged-native-host.log` | `babf157dc05792fdd7a07e6332690413dfceacc492c315157fa903dab97e59e5` |
+| `jobs-merged-frontend.log` | `33f9103ce7c0d97952d5c118225a63ee4b09176281d28993680a973bc56fa0b9` |
+| `jobs-merged-security.log` | `5e13b8393973b8070e13ceb8230fd5952dd1efbe888b389e585df45350bf3eab` |

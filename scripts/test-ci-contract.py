@@ -71,7 +71,10 @@ class CiContractTests(unittest.TestCase):
         self.assertIn("run: make roadmap-check", CI)
 
     def test_local_release_hygiene_matches_the_public_contract(self) -> None:
-        for marker in ("gitleaks detect", "npm audit --audit-level=high", "cargo metadata --locked"):
+        for marker in (
+            "gitleaks detect", "npm audit --audit-level=high", "cargo metadata --locked",
+            "AUDIT_ARGS=(audit --file Cargo.lock --deny warnings)",
+        ):
             self.assertIn(marker, SECURITY)
         for marker in (
             "run_step fmt cargo fmt --all --check",
