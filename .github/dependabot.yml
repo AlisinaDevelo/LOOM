@@ -8,6 +8,28 @@ updates:
     groups:
       rust:
         patterns: ["*"]
+    ignore:
+      # These releases require Rust 1.90; keep Rust 1.88 until #329 is decided.
+      - dependency-name: tauri
+        versions: [">=2.12"]
+      - dependency-name: tauri-build
+        versions: [">=2.7"]
+      - dependency-name: tauri-codegen
+        versions: [">=2.7"]
+      - dependency-name: tauri-macros
+        versions: [">=2.7"]
+      - dependency-name: tauri-plugin
+        versions: [">=2.7"]
+      - dependency-name: tauri-plugin-dialog
+        versions: [">=2.8"]
+      - dependency-name: tauri-plugin-fs
+        versions: [">=2.6"]
+      - dependency-name: tauri-runtime
+        versions: [">=2.12"]
+      - dependency-name: tauri-runtime-wry
+        versions: [">=2.12"]
+      - dependency-name: tauri-utils
+        versions: [">=2.10"]
 
   - package-ecosystem: npm
     directory: /
