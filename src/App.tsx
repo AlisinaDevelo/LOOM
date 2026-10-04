@@ -967,13 +967,17 @@ function App() {
     return () => window.removeEventListener("keydown", closeOnEscape);
   }, [evidenceState, closeEvidence]);
 
-  const resolveEvidence = async (hit: EvidenceIdentity) => {
+  const resolveEvidence = async (hit: EvidenceIdentity, trigger?: HTMLElement) => {
     const requestId = ++evidenceRequestRef.current;
     historyRequestRef.current += 1;
     relationshipRequestRef.current += 1;
     setSourceHistoryState(null);
     setRelationshipState(null);
-    if (!evidenceState && document.activeElement instanceof HTMLElement && document.activeElement !== document.body) {
+    // Pointer activation in macOS WebKit need not focus the button. Keep the actual
+    // result action; version/relationship traversal must not replace it with a transient control.
+    if (trigger) {
+      evidenceTriggerRef.current = trigger;
+    } else if (!evidenceState && document.activeElement instanceof HTMLElement && document.activeElement !== document.body) {
       evidenceTriggerRef.current = document.activeElement;
     }
     setError(null);
@@ -1344,7 +1348,7 @@ function App() {
                         <h3>{hit.title}</h3>
                       </div>
                       <div className="result-actions">
-                        <button type="button" className="evidence-button" onClick={() => resolveEvidence(hit)} disabled={busy !== null}>
+                        <button type="button" className="evidence-button" onClick={(event) => resolveEvidence(hit, event.currentTarget)} disabled={busy !== null}>
                           {busy === "evidence" && evidenceState?.hit.passage_id === hit.passage_id ? "Checking evidence" : "View evidence"}
                         </button>
                         <button type="button" className="open-button" onClick={() => openArtifact(hit)} disabled={busy !== null}>

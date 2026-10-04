@@ -13,7 +13,8 @@ library controls). Roadmap `0208`.
 - **Focus order.** The skip link comes first, search precedes results, and no positive `tabindex`
   reorders the page.
 - **Focus return.** Closing the evidence viewer, with the Close button or `Escape`, returns focus
-  to the control that opened it (2.4.3).
+  to the result control that opened it (2.4.3), including pointer activation without browser focus
+  and navigation through related-source versions. Opening another result replaces that return target.
 - **Announcements.** Search progress and outcomes go through one polite, atomic live region; there
   are no assertive regions.
 
