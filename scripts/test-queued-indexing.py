@@ -53,7 +53,7 @@ def main():
             return json.loads(result.stdout)
 
         command("index", source)
-        assert command("upgrade-job-runtime") == {"background_job_schema_version": 4}
+        assert command("upgrade-job-runtime") == {"background_job_schema_version": 5}
         before = command("search", "approved source marker")[0]
         source.write_text("Refreshed queued source marker.\n", encoding="utf-8")
         queued = command("enqueue-index-file", source, "refresh-file")
@@ -173,9 +173,9 @@ def main():
             assert command("jobs", database_path=old_database) == [old_job]
             command("run-next-job", executable=previous, database_path=old_database, rejected=True)
             assert command("search", "queued source marker", executable=previous, database_path=old_database)
-            measured(command("run-next-job", database_path=old_database), "text/markdown (v3->v4)")
+            measured(command("run-next-job", database_path=old_database), "text/markdown (v3->v5)")
             with sqlite3.connect(old_database) as connection:
-                assert connection.execute("SELECT value FROM schema_meta WHERE key='background_job_schema_version'").fetchone()[0] == "4"
+                assert connection.execute("SELECT value FROM schema_meta WHERE key='background_job_schema_version'").fetchone()[0] == "5"
         if args.report:
             args.report.write_text(json.dumps({"platform": sys.platform, "measurements": measurements}, indent=2) + "\n", encoding="utf-8")
         print("queued source CLI: PASS (text/PDF, scoped admission, atomic parent, cancellation/purge, OCR-off)"

@@ -1,7 +1,7 @@
 use std::fs;
 
 use loom_core::{
-    BackupOptions, Library, PortableExport, RelationshipInput, RelationshipKind,
+    BackupOptions, JobPriority, Library, PortableExport, RelationshipInput, RelationshipKind,
     RelationshipOrigin, SearchRequest,
 };
 use serde_json::{json, Value};
@@ -522,6 +522,14 @@ fn corrupted_and_hostile_exports_fail_closed_without_partial_rows() {
 #[test]
 fn encrypted_backup_restores_into_a_new_library() {
     let (directory, library) = populated();
+    let queued = library
+        .enqueue_index_directory(
+            directory.path().join("notes"),
+            "backup-directory",
+            JobPriority::Normal,
+        )
+        .unwrap();
+    assert_eq!(queued.directory_progress.unwrap().total_units, 2);
     let backup = directory.path().join("library.loombak");
     let report = library
         .write_encrypted_backup(&backup, PASSWORD, FAST)
@@ -545,6 +553,17 @@ fn encrypted_backup_restores_into_a_new_library() {
     let restored = Library::restore_encrypted_backup(&backup, PASSWORD, &restored_path).unwrap();
     assert!(restored.import.fts_healthy);
     let reopened = Library::open(&restored_path).unwrap();
+    assert!(reopened.background_jobs(128).unwrap().is_empty());
+    let connection = rusqlite::Connection::open(&restored_path).unwrap();
+    let retained: i64 = connection
+        .query_row(
+            "SELECT (SELECT COUNT(*) FROM background_directory_manifests) +
+        (SELECT COUNT(*) FROM background_directory_units)",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(retained, 0);
     assert_eq!(
         comparable(reopened.export_portable().unwrap()),
         comparable(library.export_portable().unwrap())

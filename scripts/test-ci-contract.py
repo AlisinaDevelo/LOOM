@@ -154,6 +154,8 @@ class CiContractTests(unittest.TestCase):
         self.assertIn("python3 scripts/test-background-jobs.py --loom target/debug/loom", CI)
         self.assertIn("run_step queued-indexing python3 scripts/test-queued-indexing.py", DEVICE)
         self.assertIn("python3 scripts/test-queued-indexing.py --loom target/debug/loom", CI)
+        self.assertIn("run_step directory-jobs python3 scripts/test-directory-jobs.py", DEVICE)
+        self.assertIn("python3 scripts/test-directory-jobs.py --loom target/debug/loom", CI)
 
     def test_real_extractor_is_built_tested_and_staged_beside_the_cli(self) -> None:
         self.assertIn("cargo build --locked -p loom-extraction --bin loom-extractor", CI)

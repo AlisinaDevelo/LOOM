@@ -61,6 +61,44 @@ struct Budget {
     directories: usize,
     retained_path_bytes: usize,
     files: Vec<PathBuf>,
+    namespace: Option<Vec<NamespaceObservation>>,
+    namespace_bytes: usize,
+}
+
+pub(crate) type SourceIdentityStamp = (u64, u64, (u64, u32));
+
+pub(crate) fn birth_time(metadata: &fs::Metadata) -> Result<(u64, u32)> {
+    let created = metadata.created().map_err(|_| {
+        LoomError::UnsupportedSource(
+            "durable directory jobs require filesystem birth-time identity".into(),
+        )
+    })?;
+    let elapsed = created.duration_since(std::time::UNIX_EPOCH).map_err(|_| {
+        LoomError::UnsupportedSource("source birth time precedes Unix epoch".into())
+    })?;
+    Ok((elapsed.as_secs(), elapsed.subsec_nanos()))
+}
+
+pub(crate) struct NamespaceSnapshot {
+    pub(crate) files: Vec<PathBuf>,
+    pub(crate) file_identities: Vec<SourceIdentityStamp>,
+    pub(crate) fingerprint: String,
+    directories: Vec<(PathBuf, [u8; 32])>,
+}
+
+struct NamespaceObservation {
+    relative: PathBuf,
+    stamp: [u8; 32],
+    identity: Option<SourceIdentityStamp>,
+    directory: bool,
+}
+
+impl NamespaceSnapshot {
+    /// Repeat the finite directory-stamp fence after obtaining SQLite's writer slot. This closes
+    /// the enumeration/writer-wait gap; it still is not an atomic filesystem/SQLite snapshot.
+    pub(crate) fn verify_directories(&self, root: &Path, limits: DiscoveryLimits) -> Result<()> {
+        backend::verify_directories(root, limits, &self.directories)
+    }
 }
 
 impl Budget {
@@ -72,6 +110,8 @@ impl Budget {
             directories: 0,
             retained_path_bytes: 0,
             files: Vec::new(),
+            namespace: None,
+            namespace_bytes: 0,
         }
     }
 
@@ -166,6 +206,35 @@ impl Budget {
         Ok(())
     }
 
+    fn observe(
+        &mut self,
+        relative: &Path,
+        stamp: [u8; 32],
+        identity: Option<SourceIdentityStamp>,
+        directory: bool,
+    ) -> Result<()> {
+        if let Some(namespace) = &mut self.namespace {
+            let bytes = relative.as_os_str().as_encoded_bytes().len();
+            let charge = bytes.saturating_add(64);
+            if charge
+                > self
+                    .limits
+                    .retained_path_bytes
+                    .saturating_sub(self.namespace_bytes)
+            {
+                return Err(limit("namespace-byte limit"));
+            }
+            self.namespace_bytes += charge;
+            namespace.push(NamespaceObservation {
+                relative: relative.to_path_buf(),
+                stamp,
+                identity,
+                directory,
+            });
+        }
+        Ok(())
+    }
+
     fn finish(mut self) -> Result<Vec<PathBuf>> {
         self.check_time()?;
         // Compare components, not a raw flattened pathname: the old sorted
@@ -203,6 +272,62 @@ pub(crate) fn walk(
         return Err(changed(root));
     }
     budget.finish()
+}
+
+/// Complete, bounded namespace observations for a durable directory manifest. File identity and
+/// entry type participate, but file contents/mtime do not: authorized content edits are extracted
+/// under the separate byte/hash fence. Directory timestamps detect add/remove/rename ABA.
+pub(crate) fn walk_snapshot(
+    root: &Path,
+    limits: DiscoveryLimits,
+    mut probe: impl FnMut(&Path) -> Result<()>,
+) -> Result<NamespaceSnapshot> {
+    let mut budget = Budget::new(limits);
+    budget.namespace = Some(Vec::new());
+    budget.directory(root, 0)?;
+    let canonical = fs::canonicalize(root).map_err(|error| io_error(root, error))?;
+    backend::walk(root, &mut budget, &mut probe)?;
+    if fs::canonicalize(root).map_err(|error| io_error(root, error))? != canonical {
+        return Err(changed(root));
+    }
+    budget.check_time()?;
+    let mut observations = budget
+        .namespace
+        .take()
+        .expect("snapshot observations enabled");
+    observations.sort_unstable_by(|a, b| a.relative.components().cmp(b.relative.components()));
+    let mut hasher = blake3::Hasher::new();
+    limits.fingerprint(&mut hasher);
+    hasher.update(b"loom.directory.namespace.v2\0");
+    let mut file_identities = Vec::new();
+    let mut directories = Vec::new();
+    for NamespaceObservation {
+        relative,
+        stamp,
+        identity,
+        directory,
+    } in observations
+    {
+        budget.check_time()?;
+        let path = relative.as_os_str().as_encoded_bytes();
+        hasher.update(&(path.len() as u64).to_le_bytes());
+        hasher.update(path);
+        hasher.update(&stamp);
+        if let Some(identity) = identity {
+            hasher.update(&identity.2 .0.to_le_bytes());
+            hasher.update(&identity.2 .1.to_le_bytes());
+            file_identities.push(identity);
+        }
+        if directory {
+            directories.push((relative, stamp));
+        }
+    }
+    Ok(NamespaceSnapshot {
+        files: budget.finish()?,
+        file_identities,
+        fingerprint: format!("blake3:{}", hasher.finalize().to_hex()),
+        directories,
+    })
 }
 
 #[cfg(unix)]
@@ -261,6 +386,26 @@ mod unix_backend {
         }
     }
 
+    #[allow(clippy::unnecessary_cast)]
+    fn namespace_stamp(value: &Stat) -> [u8; 32] {
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(&(value.st_mode as u32 & libc::S_IFMT as u32).to_le_bytes());
+        hasher.update(&(value.st_dev as u64).to_le_bytes());
+        hasher.update(&(value.st_ino as u64).to_le_bytes());
+        if FileType::from_raw_mode(value.st_mode) == FileType::Directory {
+            let stamp = Stamp::from_stat(value);
+            for value in [
+                stamp.modified.0,
+                stamp.modified.1,
+                stamp.changed.0,
+                stamp.changed.1,
+            ] {
+                hasher.update(&value.to_le_bytes());
+            }
+        }
+        *hasher.finalize().as_bytes()
+    }
+
     struct Frame {
         relative: PathBuf,
         stream: Dir,
@@ -302,6 +447,30 @@ mod unix_backend {
         Ok(parent)
     }
 
+    pub(super) fn verify_directories(
+        root: &Path,
+        limits: DiscoveryLimits,
+        directories: &[(PathBuf, [u8; 32])],
+    ) -> Result<()> {
+        let budget = Budget::new(limits);
+        if directories.len() > limits.directories {
+            return Err(limit("directory limit"));
+        }
+        let root_fd =
+            open(root, flags(), Mode::empty()).map_err(|error| namespace_error(root, error))?;
+        for (relative, expected) in directories {
+            budget.check_time()?;
+            let fd = reopen(&root_fd, root, relative, &budget)?;
+            let fd = fd.as_ref().map_or(root_fd.as_fd(), AsFd::as_fd);
+            let stamp = rustix::fs::fstat(fd)
+                .map_err(|error| io_error(root.join(relative), error.into()))?;
+            if namespace_stamp(&stamp) != *expected {
+                return Err(changed(&root.join(relative)));
+            }
+        }
+        Ok(())
+    }
+
     pub(super) fn walk(
         root: &Path,
         budget: &mut Budget,
@@ -320,6 +489,14 @@ mod unix_backend {
         {
             return Err(changed(root));
         }
+        budget.observe(
+            Path::new(""),
+            namespace_stamp(
+                &rustix::fs::fstat(&root_fd).map_err(|error| io_error(root, error.into()))?,
+            ),
+            None,
+            true,
+        )?;
         let mut stack = vec![Frame {
             relative: PathBuf::new(),
             stream,
@@ -361,6 +538,34 @@ mod unix_backend {
                 .map_err(|error| io_error(&path, error.into()))?;
             let before = statat(fd, name, AtFlags::SYMLINK_NOFOLLOW)
                 .map_err(|error| namespace_error(&path, error))?;
+            let identity = if budget.namespace.is_some()
+                && FileType::from_raw_mode(before.st_mode) == FileType::RegularFile
+            {
+                let child = openat(
+                    fd,
+                    name,
+                    OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC | OFlags::NONBLOCK,
+                    Mode::empty(),
+                )
+                .map_err(|error| namespace_error(&path, error))?;
+                let metadata = fs::File::from(child)
+                    .metadata()
+                    .map_err(|error| io_error(&path, error))?;
+                #[allow(clippy::unnecessary_cast)]
+                let expected = (before.st_dev as u64, before.st_ino as u64);
+                if !metadata.is_file() || (metadata.dev(), metadata.ino()) != expected {
+                    return Err(changed(&path));
+                }
+                Some((expected.0, expected.1, birth_time(&metadata)?))
+            } else {
+                None
+            };
+            budget.observe(
+                &relative,
+                namespace_stamp(&before),
+                identity,
+                FileType::from_raw_mode(before.st_mode) == FileType::Directory,
+            )?;
             probe(&path)?;
             budget.check_time()?;
             match FileType::from_raw_mode(before.st_mode) {
@@ -416,6 +621,17 @@ mod unix_backend {
 mod portable_backend {
     use super::*;
 
+    #[cfg(not(unix))]
+    pub(super) fn verify_directories(
+        _root: &Path,
+        _limits: DiscoveryLimits,
+        _directories: &[(PathBuf, [u8; 32])],
+    ) -> Result<()> {
+        Err(LoomError::UnsupportedSource(
+            "directory identity fencing requires Unix".into(),
+        ))
+    }
+
     struct Frame {
         path: PathBuf,
         stream: fs::ReadDir,
@@ -450,6 +666,8 @@ mod portable_backend {
         budget: &mut Budget,
         probe: &mut impl FnMut(&Path) -> Result<()>,
     ) -> Result<()> {
+        // This fallback does not claim Unix identity guarantees. Directory queue admission is
+        // unavailable on non-Unix; ordinary bounded foreground discovery remains supported.
         let mut stack = vec![frame(root.to_path_buf(), 0)?];
         let mut visited = Vec::new();
         probe(root)?;

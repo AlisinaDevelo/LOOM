@@ -62,6 +62,20 @@ derived or diagnostic and may be rebuilt.
 
 ## Support policy
 
+The background queue has its own operational version, independent of canonical schema 10.
+Runtime v5 adds directory manifests/quanta and locator deletion/update fences. Recognized v4/v3/v2
+and legacy queues require explicit `upgrade-job-runtime` under kernel worker ownership; ordinary
+canonical open never silently upgrades them. Existing FTS/file jobs survive the transactional upgrade.
+Unknown layouts, stale v5 objects under older markers and invalid copied rows roll back. Older
+workers must refuse v5 before claiming work. Portable exports exclude runtime rows/indexes/triggers;
+restore validates the runtime and clears its manifests and claims. See [background jobs](BACKGROUND_JOBS.md).
+
+Runtime v5 supports only the exact checked-in layout, including unit checksums and all ownership
+fences. Earlier unpushed, unreleased development prototypes also used the v5 marker; they are not
+supported migration inputs. A marker alone never authorizes migration or deletion: an unrecognized
+shape remains canonically readable but refuses queue operations and destructive runtime changes.
+Private runtime namespace checks are case-insensitive, matching SQLite identifier semantics.
+
 Schema version 10 is the supported local format. Versions 2 through 9 are supported by reviewed
 transactional migrations. Version 1 and unknown/future versions are intentionally rejected; LOOM
 does not promise to infer or rewrite an unrecognized format. Users with a rejected database keep

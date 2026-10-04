@@ -148,6 +148,7 @@ run_step stage-cli-binary stage_cli_binary
 run_step directory-discovery python3 scripts/test-directory-discovery.py --loom "$EVIDENCE_DIR/loom" --report "$EVIDENCE_DIR/directory-discovery.json"
 run_step background-jobs python3 scripts/test-background-jobs.py --loom "$EVIDENCE_DIR/loom"
 run_step queued-indexing python3 scripts/test-queued-indexing.py --loom "$EVIDENCE_DIR/loom" --native-ocr
+run_step directory-jobs python3 scripts/test-directory-jobs.py --loom "$EVIDENCE_DIR/loom" --report "$EVIDENCE_DIR/directory-jobs.json"
 run_step queued-responsiveness env LOOM_TEST_RESPONSE_REPORT="$EVIDENCE_DIR/queued-responsiveness.json" cargo test --locked -p loom-core jobs::tests::persistent_retrieval_during_native_queued_ocr -- --exact --nocapture
 run_step clear-rust-target clear_rust_outputs
 run_step retrieval-benchmark "$EVIDENCE_DIR/loom" benchmark --corpus benchmarks/retrieval/v0/corpus --queries benchmarks/retrieval/v0/queries.jsonl

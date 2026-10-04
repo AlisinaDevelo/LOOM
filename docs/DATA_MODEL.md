@@ -20,6 +20,8 @@ version matrix and migration policy are maintained in [SCHEMA_COMPATIBILITY.md](
 |bookmark_records|Current bookmark metadata and artifact identity|folder path, title, URL, browser timestamps, entry hash, first import|
 |bookmark_import_items|Per-import idempotence and merge history|import, bookmark, ordinal, entry hash, imported/unchanged/merged/conflict outcome|
 |index_jobs|Durable progress for one root scan|discovery fingerprint, total/next unit, state, error, timestamps|
+|background_directory_manifests|Runtime v5 directory quantum progress, never portable|job, relational root ID/locator, encoded payload budget, total/next units, indexed/unchanged/skipped, bytes and last helper metrics|
+|background_directory_units|Runtime v5 immutable ordered source membership, never portable|job/ordinal, exact UTF-8 relative path/locator, media, discovery-time device/inode/birth time, admission artifact identity, unit hash|
 |semantic_index_meta|One disposable semantic-index manifest|provider/model/tokenizer, dimension, normalization, build parameters, revision, canonical digest/counts, vector bytes|
 |semantic_embeddings|Rebuildable vector per active passage|passage hash, provider/model/tokenizer, dimension, normalization, build parameters, revision, encoded vector bytes|
 

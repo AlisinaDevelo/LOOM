@@ -39,6 +39,12 @@ use crate::{
     },
 };
 
+mod directory_jobs;
+
+pub(crate) fn validate_directory_targets_for_purge(connection: &Connection) -> Result<()> {
+    directory_jobs::validate_targets_for_purge(connection)
+}
+
 type BookmarkRecordProjection = (
     String,
     String,
@@ -2675,11 +2681,16 @@ impl Library {
             selector: format!("root:{locator}"),
             ..DeletionReport::default()
         };
-        crate::jobs::purge_file_targets(&transaction, Some(locator), None, false)?;
+        let queue_purge =
+            crate::jobs::purge_file_targets(&transaction, Some(locator), None, false)?;
         for artifact_id in artifact_ids {
             merge_deletion_reports(
                 &mut report,
-                delete_artifact_transaction(&transaction, &artifact_id)?,
+                delete_artifact_transaction_validated(
+                    &transaction,
+                    &artifact_id,
+                    Some(&queue_purge),
+                )?,
             );
         }
         // Fence an absent-root selection too: select + purge during discovery must not appear
@@ -2700,6 +2711,7 @@ impl Library {
         let cutoff = normalize_timestamp(cutoff)?;
         let mut connection = self.lock()?;
         let transaction = connection.transaction()?;
+        let queue_purge = crate::jobs::purge_file_targets(&transaction, None, None, false)?;
         let mut statement = transaction
             .prepare("SELECT id FROM artifacts WHERE created_at < ?1 ORDER BY created_at, id")?;
         let artifact_ids = statement
@@ -2713,7 +2725,11 @@ impl Library {
         for artifact_id in artifact_ids {
             merge_deletion_reports(
                 &mut report,
-                delete_artifact_transaction(&transaction, &artifact_id)?,
+                delete_artifact_transaction_validated(
+                    &transaction,
+                    &artifact_id,
+                    Some(&queue_purge),
+                )?,
             );
         }
         transaction.commit()?;
@@ -3459,8 +3475,37 @@ impl Library {
         {
             return Err(LoomError::OcrDisabled);
         }
-        let stable =
-            ingest::read_stable_bytes(path, path, self.limits.max_file_bytes.min(8 * 1024 * 1024))?;
+        let (document, extraction_metrics) =
+            self.prepare_queued_document(path, path, media_type, supervisor, None, || {
+                self.probe_file_job(claim, json, &target, &snapshot)
+            })?;
+        Ok(PreparedFileJob {
+            target,
+            target_json: json.to_owned(),
+            snapshot,
+            document,
+            extraction_metrics,
+        })
+    }
+
+    /// Shared bounded provider work; scope-specific wrappers must fence the claim and capability.
+    fn prepare_queued_document(
+        &self,
+        path: &Path,
+        root: &Path,
+        media_type: &'static str,
+        supervisor: Option<&loom_extraction::ExtractionSupervisor>,
+        bytes: Option<ingest::StableBytes>,
+        mut probe: impl FnMut() -> Result<()>,
+    ) -> Result<(PreparedIndexDocument, loom_extraction::ExtractionMetrics)> {
+        let stable = match bytes {
+            Some(bytes) => bytes,
+            None => ingest::read_stable_bytes(
+                path,
+                root,
+                self.limits.max_file_bytes.min(8 * 1024 * 1024),
+            )?,
+        };
         let media = loom_extraction::MediaKind::from_mime(media_type)?;
         let mut budget = loom_extraction::ExtractionBudget::for_media(media);
         budget.max_pdf_pages = self.limits.max_pdf_pages.min(2048) as u32;
@@ -3473,9 +3518,7 @@ impl Library {
             }
         };
         let output = supervisor
-            .extract(&stable.bytes, media, budget, || {
-                self.probe_file_job(claim, json, &target, &snapshot)
-            })
+            .extract(&stable.bytes, media, budget, &mut probe)
             .map_err(|error| match error {
                 loom_extraction::RunError::Extraction(error) => LoomError::from(error),
                 loom_extraction::RunError::Interrupted(error) => error,
@@ -3500,7 +3543,7 @@ impl Library {
             ),
             _ => (EXTRACTOR_ID, EXTRACTOR_VERSION),
         };
-        if document.media_type != target.media_type {
+        if document.media_type != media_type {
             return Err(LoomError::JobQueue("file media type changed".into()));
         }
         let document = PreparedIndexDocument::new(
@@ -3513,13 +3556,7 @@ impl Library {
         if document.passages.len() > 8192 {
             return Err(LoomError::JobQueue("queued passages exceed 8192".into()));
         }
-        Ok(PreparedFileJob {
-            target,
-            target_json: json.to_owned(),
-            snapshot,
-            document,
-            extraction_metrics: output.metrics,
-        })
+        Ok((document, output.metrics))
     }
 
     /// Short DB-only probe: no source access or five-second SQLite busy wait while a child runs.
@@ -5777,6 +5814,14 @@ fn delete_artifact_transaction(
     transaction: &Transaction<'_>,
     artifact_id: &str,
 ) -> Result<DeletionReport> {
+    delete_artifact_transaction_validated(transaction, artifact_id, None)
+}
+
+fn delete_artifact_transaction_validated(
+    transaction: &Transaction<'_>,
+    artifact_id: &str,
+    queue_purge: Option<&crate::jobs::ValidatedPurge<'_>>,
+) -> Result<DeletionReport> {
     let exists: bool = transaction.query_row(
         "SELECT EXISTS(SELECT 1 FROM artifacts WHERE id = ?1)",
         [artifact_id],
@@ -5785,7 +5830,12 @@ fn delete_artifact_transaction(
     if !exists {
         return Err(LoomError::ArtifactNotFound(artifact_id.to_string()));
     }
-    crate::jobs::purge_file_targets(transaction, None, Some(artifact_id), false)?;
+    match queue_purge {
+        Some(purge) => purge.apply(transaction, None, Some(artifact_id), false)?,
+        None => {
+            crate::jobs::purge_file_targets(transaction, None, Some(artifact_id), false)?;
+        }
+    }
     let versions_deleted: i64 = transaction.query_row(
         "SELECT COUNT(*) FROM artifact_versions WHERE artifact_id = ?1",
         [artifact_id],

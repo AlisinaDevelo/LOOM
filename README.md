@@ -67,6 +67,8 @@ part of this supported slice.
 Requirements: Rust 1.88 or newer and Node.js 24 or newer.
 Queued approved-file refresh requires the trusted `loom-extractor` beside `loom`;
 build both with `cargo build --locked -p loom-cli -p loom-extraction --bins`.
+The CLI also queues approved directories as resumable single-file quanta with an explicit final
+namespace/reconciliation step. This does not enable desktop background indexing.
 See [background jobs](docs/BACKGROUND_JOBS.md) for explicit runtime upgrades and
 [extraction limits](docs/EXTRACTION_PROCESS.md) for the process boundary.
 
