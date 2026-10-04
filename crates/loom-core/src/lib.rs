@@ -38,6 +38,7 @@ pub use domain::{
 pub use error::{LoomError, Result};
 pub use jobs::{
     BackgroundJob, DirectoryProgress, JobPriority, JobQueuePolicy, JobState, JobWorker,
+    SemanticProgress,
 };
 pub use observe::{coalesce_events, ObservationEvent, ObservationEventKind, ObservationPlan};
 pub use portable::{

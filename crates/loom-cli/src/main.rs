@@ -133,6 +133,14 @@ enum Command {
         #[arg(long)]
         low: bool,
     },
+    /// Queue already indexed passages; each run-next-job embeds one bounded passage.
+    EnqueueSemanticRebuild {
+        idempotency_key: String,
+        #[arg(long, conflicts_with = "low")]
+        high: bool,
+        #[arg(long)]
+        low: bool,
+    },
     /// Explicitly upgrade a recognized operational runtime under exclusive worker ownership.
     UpgradeJobRuntime,
     /// Request durable cancellation; a running transaction may already have completed.
@@ -648,7 +656,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         }
         Command::UpgradeJobRuntime => {
             JobWorker::upgrade_runtime(arguments.database)?;
-            println!("{{\"background_job_schema_version\":5}}");
+            println!("{{\"background_job_schema_version\":6}}");
         }
         Command::EnqueueIndexDirectory {
             path,
@@ -671,6 +679,26 @@ fn main() -> Result<(), Box<dyn Error>> {
                     &idempotency_key,
                     priority
                 )?)?
+            );
+        }
+        Command::EnqueueSemanticRebuild {
+            idempotency_key,
+            high,
+            low,
+        } => {
+            let library = Library::open_for_jobs(arguments.database)?;
+            let priority = if high {
+                JobPriority::High
+            } else if low {
+                JobPriority::Low
+            } else {
+                JobPriority::Normal
+            };
+            println!(
+                "{}",
+                serde_json::to_string_pretty(
+                    &library.enqueue_semantic_rebuild(&idempotency_key, priority)?
+                )?
             );
         }
         Command::CancelJob { id } => {

@@ -54,6 +54,8 @@ jobs:
         run: python3 scripts/test-queued-indexing.py --loom target/debug/loom
       - name: Approved-directory queue CLI contract
         run: python3 scripts/test-directory-jobs.py --loom target/debug/loom
+      - name: Canonical-passage semantic queue CLI contract
+        run: python3 scripts/test-semantic-jobs.py --loom target/debug/loom
       - name: Bounded folder discovery CLI contract
         run: python3 scripts/test-directory-discovery.py --loom target/debug/loom
 
