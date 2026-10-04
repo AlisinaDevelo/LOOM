@@ -4,12 +4,65 @@
 - Implementation PRs: [#223](https://github.com/AlisinaDevelo/LOOM/pull/223),
   [#310](https://github.com/AlisinaDevelo/LOOM/pull/310),
   [#311](https://github.com/AlisinaDevelo/LOOM/pull/311)
-- Latest runtime verification: merged main `6cf16040c59f896649c163ffa9273ffd37db91f8`
-- Roadmap status: `review`
+- Latest runtime verification: merged main `0a533a6f142fb7713eeb81cb8abbf8dd16ac5ca6`
+- Roadmap status: `done`
 - Verification status: core, CLI, frontend, extension, migration and packaged native navigation
   checks pass on the target device. The dependent browser-capture permission/release gates
-  remain open; no consented human workflow study is claimed. Earlier resource-limited attempts
-  below are historical, not the current desktop build result.
+  remain separate open gates; no consented human workflow study is claimed. Earlier resource-limited
+  attempts below are historical, not the current desktop build result.
+
+## Agent-driven interactive session (2026-10-04 UTC)
+
+The packaged debug app was rebuilt and operated at merged main
+`0a533a6f142fb7713eeb81cb8abbf8dd16ac5ca6` on Apple M1/macOS 26.6.2 (25G83), arm64,
+with Rust 1.96.0, Node 26.7.0 and npm 11.19.0. Only the test app identifier, title and
+window configuration differed from the ordinary build. This was an **agent-driven desktop
+session**, not a person-run session or participant usability study.
+
+The isolated library contained five synthetic/CC0 files, six versions and one `observed`
+relationship seeded through the public core API. No private files or normal LOOM library
+were opened. The native UI verified:
+
+- `Cmd+K` and Enter searched `amber spindle` and returned the revised `amber.md` source.
+- `View evidence` resolved its exact passage, hash and text-line anchor.
+- `Source versions` showed the current version plus a metadata-only historical version;
+  only the current version offered verified evidence.
+- `Show relationships` → the related `violet.md` source → its current-version action
+  displayed the target's verified passage without a graph database.
+- Changing the target's fixture bytes without reindexing produced `Source needs attention`;
+  no old passage remained represented as verified. Restoring the bytes and reindexing recovered it.
+- Escape and Close returned keyboard focus to the original result's `View evidence` button;
+  Return reopened it, including after relationship navigation and a stale-error viewer.
+
+This run found a macOS WebKit pointer-focus defect. [PR #335](https://github.com/AlisinaDevelo/LOOM/pull/335)
+fixed it by remembering the clicked result action explicitly. Four new/strengthened focus
+assertions failed on the previous code. At the merged SHA, `npm run check` passed 43 UI,
+12 extension and six tooling tests, typecheck, lint and build; the nine accessibility-contract
+tests and `make roadmap-check` passed. The isolated packaged build and native interactions
+above were repeated after merge. Strict Cargo audit still reports the separately tracked
+advisories; no security-audit, signed-release, browser-gesture or human-study pass is implied.
+
+After quitting the app, fixture purge removed five artifacts, six versions, six passages
+and the relationship. Root/artifact/version/passage counts and indexed bytes were zero;
+the isolated test app-data directory was removed from Application Support. This is
+application-level cleanup, not a secure-erasure claim.
+
+Only the cropped LOOM panels below were retained; desktop, sidebar and source-path lines
+are excluded. Uncropped temporary captures were deleted after crop inspection.
+
+![Verified related source](images/0302-related-source.jpeg)
+
+![Current and metadata-only historical versions](images/0302-source-versions.jpeg)
+
+| Artifact | SHA-256 |
+| --- | --- |
+| Packaged executable | `450c8a8417ba1cb11b776d8b997b220b863a545e6d99181a2a928a8913bd40a1` |
+| Merged native build log | `48cfe464fdd858935317512e96b958f490a01298ad45ca5d860a1be0d9c79b6d` |
+| Merged frontend check log | `0f3a55d4d1bb5d38fcd4fb3e037ab8726ebe61a1f0289c23a47044d0b31b9ab3` |
+| Related-source crop | `e80d50e59eecfeeee623630985300d5b85143ce2ae1557728f6ee34b08063ba1` |
+| Version-history crop | `801c1edec755d194724867e14b6b075da89ac75e36e4e9fd09a1e2d26f496af3` |
+| Fixture purge report | `61f60c604bef987d227762d052d6f775df443d22f820ccf137a0b937aee3bae4` |
+| Post-purge counts | `fa53fd3f5c4206765bddc6077fed4532e7464679b11d06f6d3ed0799c76f1e51` |
 
 ## Current source/version navigation (2026-10-02 UTC)
 
@@ -48,9 +101,10 @@ The command/source and interactive-session record is `merged-main-regression.md`
 retained directory. The subsequent actual merged-main regression ran 182 Rust workspace tests,
 139 core/CLI tests on Rust 1.88, 35 UI and 12 extension tests, warnings-denied Clippy, typecheck,
 lint/build, 24 Python/8 CI/10 protocol tests and both benchmark commands; digests are recorded in
-[0110-device.md](0110-device.md). This automated native session is not a participant usability,
-browser toolbar/permission or signed-release test. Issue #31 stays in review while those
-prerequisite and human workflow gates remain unresolved.
+[0110-device.md](0110-device.md). This historical automated native session was not a participant
+usability, browser toolbar/permission or signed-release test. Issue #31 remained in review at
+that point; the 2026-10-04 session above completes its explicit interactive-viewer criterion.
+Browser release and participant studies remain tracked separately.
 
 ## Target and retained evidence
 
