@@ -796,6 +796,42 @@ pub(crate) fn row_bytes(row: &rusqlite::Row<'_>, index: usize) -> rusqlite::Resu
     u64::try_from(value).map_err(|_| rusqlite::Error::IntegralValueOutOfRange(index, value))
 }
 
+fn replay_directory_selection(
+    connection: &Connection,
+    key: &str,
+    priority: JobPriority,
+    matches_target: impl FnOnce(&str) -> Result<bool>,
+) -> Result<Option<BackgroundJob>> {
+    let existing: Option<(String, Option<String>)> = connection
+        .query_row(
+            "SELECT id,target_json FROM background_jobs WHERE idempotency_key=?1",
+            [key],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?;
+    let Some((id, target)) = existing else {
+        return Ok(None);
+    };
+    let job = get_job(connection, &id)?;
+    if job.operation != "index_directory" || job.priority != priority {
+        return Err(LoomError::JobQueue("idempotency key conflict".into()));
+    }
+    let target = target.ok_or_else(|| LoomError::JobQueue("directory target is missing".into()))?;
+    if !matches_target(&target)? {
+        return Err(LoomError::JobQueue("idempotency key conflict".into()));
+    }
+    if matches!(
+        job.state,
+        JobState::Queued | JobState::Running | JobState::Retryable
+    ) && job.directory_progress.is_none()
+    {
+        return Err(LoomError::JobQueue(
+            "pending directory manifest is missing".into(),
+        ));
+    }
+    Ok(Some(job))
+}
+
 pub(crate) fn row_metrics(
     row: &rusqlite::Row<'_>,
     index: usize,
@@ -920,6 +956,56 @@ impl Library {
         )?;
         let job = admit(&transaction, key, priority, "index_directory", Some(&json))?;
         admission.insert_manifest(&transaction, &job, existing)?;
+        let job = get_job(&transaction, &job.id)?;
+        transaction.commit()?;
+        Ok(job)
+    }
+
+    /// Explicitly select a folder and atomically admit its first durable scan.
+    /// A repeated key returns its original job without refreshing consent, even after revocation.
+    pub fn select_and_enqueue_directory(
+        &self,
+        path: impl AsRef<Path>,
+        key: &str,
+        priority: JobPriority,
+    ) -> Result<BackgroundJob> {
+        self.select_directory_before_admission(path.as_ref(), key, priority, || {})
+    }
+
+    fn select_directory_before_admission(
+        &self,
+        path: &Path,
+        key: &str,
+        priority: JobPriority,
+        before_admission: impl FnOnce(),
+    ) -> Result<BackgroundJob> {
+        validate_key(key)?;
+        drop(self.queue_connection()?);
+        let selected = self.prepare_directory_selection(path)?;
+        {
+            let mut connection = self.queue_connection()?;
+            let transaction = connection.transaction()?;
+            if let Some(job) = replay_directory_selection(&transaction, key, priority, |json| {
+                selected.matches_target(json)
+            })? {
+                return Ok(job);
+            }
+        }
+        let prepared = self.discover_directory_selection(selected)?;
+        before_admission();
+        let mut connection = self.queue_connection()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        // Another caller may have admitted this request during discovery. Replaying that row
+        // must not reauthorize an older selection observation or mutate last_seen_at.
+        if let Some(job) = replay_directory_selection(&transaction, key, priority, |json| {
+            prepared.matches_target(json)
+        })? {
+            return Ok(job);
+        }
+        let admission = prepared.authorize(&transaction)?;
+        let json = admission.target_json(&transaction)?;
+        let job = admit(&transaction, key, priority, "index_directory", Some(&json))?;
+        admission.insert_manifest(&transaction, &job, false)?;
         let job = get_job(&transaction, &job.id)?;
         transaction.commit()?;
         Ok(job)
@@ -1766,6 +1852,149 @@ mod tests {
         let directory = tempdir().unwrap();
         let library = Library::open(directory.path().join("queue.sqlite3")).unwrap();
         (directory, library)
+    }
+
+    #[test]
+    fn explicit_directory_selection_refuses_consent_and_identity_races_atomically() {
+        for selected in [false, true] {
+            for action in [
+                "revoke",
+                "reselect",
+                "purge",
+                "restore",
+                "replace",
+                "exact-child",
+            ] {
+                let (temporary, library) = fixture();
+                let root = temporary.path().join("selected");
+                fs::create_dir(&root).unwrap();
+                fs::write(root.join("a.md"), "Synthetic selection race marker").unwrap();
+                let root = root.canonicalize().unwrap();
+                let controller = Library::open(temporary.path().join("queue.sqlite3")).unwrap();
+                if selected {
+                    controller.index_path(&root).unwrap();
+                }
+                let baseline = std::cell::RefCell::new(None);
+                let result = library.select_directory_before_admission(
+                    &root,
+                    "race",
+                    JobPriority::Normal,
+                    || {
+                        match action {
+                            "revoke" | "reselect" => {
+                                if !selected {
+                                    controller.index_path(&root).unwrap();
+                                }
+                                controller
+                                    .revoke_source_root(root.to_str().unwrap())
+                                    .unwrap();
+                                if action == "reselect" {
+                                    controller.index_path(&root).unwrap();
+                                }
+                            }
+                            "purge" => {
+                                controller.purge_root(root.to_str().unwrap()).unwrap();
+                            }
+                            "restore" => {
+                                if selected {
+                                    controller.purge_root(root.to_str().unwrap()).unwrap();
+                                }
+                                let archive = controller.export_portable().unwrap();
+                                controller.import_portable(&archive).unwrap();
+                            }
+                            "replace" => {
+                                let moved = temporary.path().join("moved");
+                                fs::rename(&root, &moved).unwrap();
+                                fs::create_dir(&root).unwrap();
+                                fs::hard_link(moved.join("a.md"), root.join("a.md")).unwrap();
+                            }
+                            "exact-child" => {
+                                if selected {
+                                    controller.purge_root(root.to_str().unwrap()).unwrap();
+                                }
+                                controller.index_path(root.join("a.md")).unwrap();
+                            }
+                            _ => unreachable!(),
+                        }
+                        *baseline.borrow_mut() = Some((
+                            controller.export_portable().unwrap().digest,
+                            controller.source_roots().unwrap(),
+                            controller.background_jobs(128).unwrap(),
+                        ));
+                    },
+                );
+                assert!(
+                    matches!(
+                        result,
+                        Err(LoomError::SourceRevoked(_) | LoomError::SourceChanged(_))
+                    ),
+                    "{selected}/{action}: {result:?}"
+                );
+                let (digest, roots, jobs) = baseline.into_inner().unwrap();
+                assert_eq!(controller.export_portable().unwrap().digest, digest);
+                assert_eq!(controller.source_roots().unwrap(), roots);
+                assert_eq!(controller.background_jobs(128).unwrap(), jobs);
+            }
+        }
+    }
+
+    #[test]
+    fn concurrent_identical_selection_replays_instead_of_reauthorizing() {
+        let (temporary, library) = fixture();
+        let root = temporary.path().join("selected");
+        fs::create_dir(&root).unwrap();
+        fs::write(root.join("a.md"), "Concurrent synthetic selection marker").unwrap();
+        let controller = Library::open(temporary.path().join("queue.sqlite3")).unwrap();
+        let baseline = std::cell::RefCell::new(None);
+        let replay = library
+            .select_directory_before_admission(&root, "same", JobPriority::Normal, || {
+                let admitted = controller
+                    .select_and_enqueue_directory(&root, "same", JobPriority::Normal)
+                    .unwrap();
+                controller
+                    .lock()
+                    .unwrap()
+                    .execute(
+                        "UPDATE source_roots SET last_seen_at='2020-01-01T00:00:00Z'",
+                        [],
+                    )
+                    .unwrap();
+                *baseline.borrow_mut() = Some((
+                    admitted,
+                    controller.export_portable().unwrap().digest,
+                    controller.source_roots().unwrap(),
+                ));
+            })
+            .unwrap();
+        let (admitted, digest, roots) = baseline.into_inner().unwrap();
+        assert_eq!(replay, admitted);
+        assert_eq!(controller.export_portable().unwrap().digest, digest);
+        assert_eq!(controller.source_roots().unwrap(), roots);
+        assert_eq!(controller.background_jobs(128).unwrap(), [admitted]);
+    }
+
+    #[test]
+    fn selected_directory_rejects_nested_namespace_drift_before_writer_admission() {
+        let (temporary, library) = fixture();
+        let root = temporary.path().join("selected");
+        fs::create_dir_all(root.join("nested")).unwrap();
+        fs::write(root.join("nested/a.md"), "Nested selection marker").unwrap();
+        let before = library.export_portable().unwrap().digest;
+        let result = library.select_directory_before_admission(
+            &root,
+            "namespace",
+            JobPriority::Normal,
+            || {
+                fs::write(root.join("nested/b.md"), "Added while waiting for writer").unwrap();
+            },
+        );
+        assert!(
+            matches!(result, Err(LoomError::SourceChanged(_))),
+            "namespace drift was admitted: {result:?}"
+        );
+        assert_eq!(library.export_portable().unwrap().digest, before);
+        assert!(library.source_roots().unwrap().is_empty());
+        assert!(library.background_jobs(128).unwrap().is_empty());
     }
 
     // Unit race/state fixtures use the Cargo-managed test helper. The

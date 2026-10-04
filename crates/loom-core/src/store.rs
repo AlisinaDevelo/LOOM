@@ -4042,12 +4042,21 @@ impl SourceSelection {
     ) -> Result<SourceAuthorization> {
         let transaction =
             connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-        if Self::capture(&transaction, locator)? != *self {
-            return Err(LoomError::SourceRevoked(locator.to_owned()));
-        }
-        let authorization = ensure_source_root(&transaction, locator, directory)?;
+        let authorization = self.authorize_in(&transaction, locator, directory)?;
         transaction.commit()?;
         Ok(authorization)
+    }
+
+    fn authorize_in(
+        &self,
+        transaction: &Transaction<'_>,
+        locator: &str,
+        directory: bool,
+    ) -> Result<SourceAuthorization> {
+        if Self::capture(transaction, locator)? != *self {
+            return Err(LoomError::SourceRevoked(locator.to_owned()));
+        }
+        ensure_source_root(transaction, locator, directory)
     }
 }
 

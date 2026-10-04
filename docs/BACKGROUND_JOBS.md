@@ -1,8 +1,8 @@
-# Durable background work: maintenance, refresh and semantic rebuild
+# Durable background work: selection, refresh and semantic rebuild
 
 Roadmap `0400` / [#36](https://github.com/AlisinaDevelo/LOOM/issues/36) is not complete.
-This is an opt-in durable queue with real FTS-repair, approved-file/directory refresh and
-semantic rebuild adapters,
+This is an opt-in durable queue with atomic explicit folder selection, FTS-repair,
+approved-file/directory refresh and semantic rebuild adapters,
 not desktop background indexing. Synchronous ingestion/OCR/semantic commands remain available.
 
 ## Using the current adapter
@@ -12,6 +12,7 @@ cargo build --locked -p loom-extraction --bin loom-extractor
 cargo run --locked -p loom-cli -- enqueue-fts-repair repair-after-import --low
 cargo run --locked -p loom-cli -- index /absolute/selected-file.md
 cargo run --locked -p loom-cli -- enqueue-index-file /absolute/selected-file.md refresh-selected-file
+cargo run --locked -p loom-cli -- select-and-enqueue-directory /absolute/chosen-folder first-folder-choice
 cargo run --locked -p loom-cli -- enqueue-semantic-rebuild semantic-after-index --low
 cargo run --locked -p loom-cli -- jobs
 cargo run --locked -p loom-cli -- run-next-job
@@ -31,8 +32,10 @@ never implicitly rebuild FTS. An empty or contending `run-next-job` cannot repai
 ## Operational contract
 
 `background_jobs` and singleton `background_job_runtime` are operational schema-10 additions,
-not portable canonical records. They contain no new source permissions or arbitrary executable
-payloads; admitted operations are `fts_repair`, `index_file`, `index_directory` and `semantic_rebuild`.
+not portable canonical records. Job targets retain existing source-capability snapshots, not
+arbitrary executable payloads; admitted operations are `fts_repair`, `index_file`, `index_directory`
+and `semantic_rebuild`. Only the explicitly invoked selection API grants a folder root; dispatch,
+refresh and retries never grant or refresh consent.
 A key is 1–128 ASCII identifier bytes.
 Repeating a key with identical operation/priority/target returns its original row, including a terminal
 row. Conflicting input is rejected without changing it. Terminal keys are not silently evicted.
@@ -253,12 +256,35 @@ SQLite page, index or free-space sizes.
 root. It never grants/reselects consent. Parent approval does not turn `index_file` into a directory
 adapter. A caller may explicitly select an empty folder with `index` before admitting later work.
 
+`select-and-enqueue-directory /absolute/chosen-folder KEY` is the explicit alternative for a
+first folder selection; it does **not** first run foreground indexing. Bounded metadata discovery
+runs without a SQLite transaction or content extraction. One IMMEDIATE transaction rechecks
+the observed consent state, authorization incarnation, purge revision and filesystem identity,
+then grants/reselects that exact directory, admits the job and inserts its complete manifest.
+Discovery refusal, ownership/kind conflict, queue/manifest capacity or any writer failure leaves
+root permissions/generation/last-seen, canonical evidence, semantic derivatives and queue state
+unchanged. A successful re-selection invalidates old semantic work through the existing fences.
+Revoke/reselect, root purge (including an absent root), restore and replacement while discovery
+runs refuse a stale selection; the API is not an implicit source grant for ordinary refresh.
+
+Repeating this explicit selection's key with the same canonical folder and priority returns its
+original job without discovery, consent refresh, or manifest rewriting—even when membership
+changed or the root was revoked. Replayed work keeps its original capability and can be cancelled
+or refused at dispatch; replay never re-enables the root. A new explicit choice needs a fresh key.
+A different folder/priority/operation conflicts. A concurrently admitted identical selection is
+replayed again inside the writer transaction, so it cannot reauthorize an older observation.
+The requested path must still resolve to a bounded, non-symlink directory for replay. This does
+not promise replay after deletion of the folder or after forgetting/purging the job.
+
 Admission completes bounded metadata discovery before writing any queue row. The v5 operational
 manifest stores one checksummed ordered unit per regular file, including unsupported media and OCR-disabled
 images as explicit skips. Paths must be exact UTF-8, control-free, component-contained locators;
 non-UTF-8 queued paths are refused, never lossily converted. Unix device/inode plus filesystem
 birth time pins the root and each child; the child's birth time comes from descriptor-bound
-discovery, not a later admission recapture. The root also pins its change timestamp. Symlinks and
+discovery, not a later admission recapture. Both selection and refresh pin the root identity/change
+timestamp before discovery, then verify it through admission. The bounded directory-stamp snapshot
+is retained and rechecked after obtaining the writer slot and after manifest insertion, including
+nested directories. Symlinks and
 special files are not followed. Non-Unix systems and filesystems without birth-time identity
 are refused rather than claiming equivalent replacement/identity-reuse fencing there.
 
@@ -330,7 +356,8 @@ wall-clock starvation bound while one unsliced maintenance operation runs.
 The file and directory adapters carry claim and scope/OCR fences through canonical publication.
 Directory file work yields, but admission/final discovery and the capped final reconciliation are
 still bounded synchronous phases. Single-file helper limits do not prove whole-folder resource bounds.
-Semantic rebuild needs staged bounded work and fenced publication.
+Semantic rebuild now has staged bounded quanta and fenced publication, but its capped final
+scan remains unsliced and the hash baseline is not a neural retrieval-quality claim.
 Desktop admission, progress, durable cancellation/relaunch, and measured resource budgets
 remain required before #36 can close. No ambient capture or additional source access is enabled.
 
