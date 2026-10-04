@@ -40,6 +40,7 @@ use crate::{
 };
 
 mod directory_jobs;
+mod semantic_jobs;
 
 pub(crate) fn validate_directory_targets_for_purge(connection: &Connection) -> Result<()> {
     directory_jobs::validate_targets_for_purge(connection)
@@ -1708,9 +1709,14 @@ impl Library {
 
     /// Searches active versions and returns direct evidence locators.
     pub fn search(&self, request: &SearchRequest) -> Result<Vec<SearchHit>> {
+        let mut connection = self.lock()?;
+        let transaction = connection.transaction()?;
+        Self::search_in(&transaction, request)
+    }
+
+    fn search_in(connection: &Connection, request: &SearchRequest) -> Result<Vec<SearchHit>> {
         let compiled = compile_query(&request.text)?;
         let limit = request.limit.clamp(1, 100);
-        let connection = self.lock()?;
         let candidates = {
             let mut statement = connection.prepare_cached(
                 "SELECT
@@ -1862,14 +1868,29 @@ impl Library {
     /// instead of silently presenting a lexical-only result as a hybrid result. This method is not
     /// wired into the desktop default until the benchmark gate in issue 0204 passes.
     pub fn hybrid_search(&self, query: &str, limit: u32) -> Result<Vec<HybridSearchHit>> {
+        self.hybrid_search_with_hook(query, limit, || {})
+    }
+
+    fn hybrid_search_with_hook(
+        &self,
+        query: &str,
+        limit: u32,
+        after_lexical: impl FnOnce(),
+    ) -> Result<Vec<HybridSearchHit>> {
         let parsed = crate::search::parse_query(query)?;
         let limit = limit.clamp(1, 100);
         let candidate_limit = limit.saturating_mul(4).clamp(limit, 100);
-        let lexical = self.search(&SearchRequest {
-            text: query.to_string(),
-            limit: candidate_limit,
-        })?;
-        let semantic = self.semantic_search_parsed(&parsed, candidate_limit)?;
+        let mut connection = self.lock()?;
+        let transaction = connection.transaction()?;
+        let lexical = Self::search_in(
+            &transaction,
+            &SearchRequest {
+                text: query.to_string(),
+                limit: candidate_limit,
+            },
+        )?;
+        after_lexical();
+        let semantic = Self::semantic_search_in(&transaction, &parsed, candidate_limit)?;
         let mut inputs = BTreeMap::<String, HybridRankInput>::new();
 
         for hit in lexical {
@@ -1892,7 +1913,7 @@ impl Library {
                         .collect(),
                     excerpt: hit.excerpt,
                     anchor: hit.anchor,
-                    source_modified_ns: self.source_modified_ns(&hit.version_id)?,
+                    source_modified_ns: Self::source_modified_ns_in(&transaction, &hit.version_id)?,
                     lexical_rank: Some(hit.rank),
                     semantic_rank: None,
                 },
@@ -1923,7 +1944,10 @@ impl Library {
                         }],
                     },
                     anchor: candidate.anchor,
-                    source_modified_ns: self.source_modified_ns(&candidate.version_id)?,
+                    source_modified_ns: Self::source_modified_ns_in(
+                        &transaction,
+                        &candidate.version_id,
+                    )?,
                     lexical_rank: None,
                     semantic_rank: Some(candidate.rank),
                 },
@@ -2535,7 +2559,8 @@ impl Library {
                     (SELECT COALESCE(SUM(length(text) + length(locator_json)), 0) FROM passages) +
                     (SELECT COALESCE(SUM(length(vector_blob)), 0) FROM semantic_embeddings) +
                     (SELECT COALESCE(SUM(length(term)), 0) FROM passages_fts_vocab)",
-            )?;
+            )?
+            .saturating_add(semantic_jobs::storage_bytes(&connection)?);
             if derived_bytes > 0 {
                 entries.push(StorageEntry {
                     category: "derived_records".into(),
@@ -2917,7 +2942,9 @@ impl Library {
         let provider = HashEmbeddingProvider::default();
         let config = provider.config().clone();
         let mut connection = self.lock()?;
-        let transaction = connection.transaction()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        semantic_jobs::require_current_runtime(&transaction)?;
+        semantic_jobs::check_corpus_bounds(&transaction)?;
         let passages = {
             let mut statement = transaction.prepare(
                 "SELECT p.id, p.text, p.text_hash
@@ -2938,7 +2965,12 @@ impl Library {
             rows.collect::<rusqlite::Result<Vec<_>>>()?
         };
         let mut source_hasher = blake3::Hasher::new();
-        for (passage_id, _, passage_hash) in &passages {
+        for (passage_id, text, passage_hash) in &passages {
+            if format!("blake3:{}", blake3::hash(text.as_bytes()).to_hex()) != *passage_hash {
+                return Err(LoomError::SemanticIndexIncompatible(
+                    "canonical passage hash mismatch".into(),
+                ));
+            }
             source_hasher.update(passage_id.as_bytes());
             source_hasher.update(&[0]);
             source_hasher.update(passage_hash.as_bytes());
@@ -2946,6 +2978,7 @@ impl Library {
         }
         let source_digest = format!("blake3:{}", source_hasher.finalize().to_hex());
 
+        semantic_jobs::clear_foreground(&transaction)?;
         transaction.execute("DELETE FROM semantic_embeddings", [])?;
         transaction.execute("DELETE FROM semantic_index_meta", [])?;
         let mut insert = transaction.prepare(
@@ -3039,8 +3072,33 @@ impl Library {
 
     /// Reports whether the semantic derivative matches current active canonical passages.
     pub fn semantic_status(&self) -> Result<SemanticIndexStatus> {
-        let connection = self.lock()?;
-        let (canonical_passages, canonical_digest) = canonical_semantic_source(&connection)?;
+        let mut connection = self.lock()?;
+        let transaction = connection.transaction()?;
+        Self::semantic_status_in(&transaction)
+    }
+
+    fn semantic_status_in(connection: &Connection) -> Result<SemanticIndexStatus> {
+        if !semantic_jobs::current_runtime(connection)? {
+            let (canonical_passages, canonical_digest) = canonical_semantic_source(connection)?;
+            return Ok(SemanticIndexStatus {
+                healthy: false,
+                canonical_passages,
+                indexed_passages: count(connection, "semantic_embeddings")?,
+                canonical_digest,
+                vector_bytes: storage_sql_bytes(
+                    connection,
+                    "SELECT COALESCE(SUM(length(vector_blob)),0) FROM semantic_embeddings",
+                )?,
+                manifest: None,
+                reason: Some(
+                    "semantic use requires runtime v6; explicitly run upgrade-job-runtime".into(),
+                ),
+            });
+        }
+        if let Some(status) = semantic_jobs::status(connection)? {
+            return Ok(status);
+        }
+        let (canonical_passages, canonical_digest) = canonical_semantic_source(connection)?;
         let config = SemanticIndexConfig::default();
         let meta: Option<SemanticMetaRow> = connection
             .query_row(
@@ -3066,13 +3124,13 @@ impl Library {
                 },
             )
             .optional()?;
-        let indexed_passages = count(&connection, "semantic_embeddings")?;
+        let indexed_passages = count(connection, "semantic_embeddings")?;
         let vector_bytes = connection.query_row(
             "SELECT COALESCE(SUM(length(vector_blob)), 0) FROM semantic_embeddings",
             [],
             |row| row.get::<_, i64>(0),
         )?;
-        let invalid_vectors: i64 = connection.query_row(
+        let mut invalid_vectors: i64 = connection.query_row(
             "SELECT COUNT(*) FROM semantic_embeddings
              WHERE provider_id <> ?1 OR model_id <> ?2 OR tokenizer <> ?3
                 OR dimension <> ?4 OR normalization <> ?5 OR build_parameters <> ?6
@@ -3089,6 +3147,17 @@ impl Library {
             ],
             |row| row.get(0),
         )?;
+        // Decode one fixed-size vector at a time. Length checks above detect malformed blobs;
+        // the SQL guard prevents allocating an oversized corrupted record during this scan.
+        let mut vectors = connection
+            .prepare("SELECT vector_blob FROM semantic_embeddings WHERE length(vector_blob)=?1")?;
+        for vector in vectors.query_map([i64::from(config.dimension) * 4], |row| {
+            row.get::<_, Vec<u8>>(0)
+        })? {
+            if decode_vector(&vector?, config.dimension).is_none() {
+                invalid_vectors += 1;
+            }
+        }
         let invalid_bindings: i64 = connection.query_row(
             "SELECT COUNT(*) FROM semantic_embeddings e
              JOIN passages p ON p.id = e.passage_id
@@ -3140,6 +3209,12 @@ impl Library {
             vector_bytes: nonnegative_u64(stored_vector_bytes),
         };
         let mut reasons = Vec::new();
+        let invalid_text = semantic_jobs::invalid_canonical_hashes(connection)?;
+        if invalid_text > 0 {
+            reasons.push(format!(
+                "{invalid_text} canonical passage text/hash records are incompatible"
+            ));
+        }
         if stored_config != config {
             reasons.push("provider manifest does not match the current provider".into());
         }
@@ -3177,9 +3252,12 @@ impl Library {
     /// Removes the semantic derivative while leaving every canonical row untouched.
     pub fn semantic_drop(&self) -> Result<SemanticDropReport> {
         let mut connection = self.lock()?;
-        let transaction = connection.transaction()?;
-        let embeddings_deleted = transaction.execute("DELETE FROM semantic_embeddings", [])? as u64;
-        let manifest_deleted = transaction.execute("DELETE FROM semantic_index_meta", [])? > 0;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let (staged_deleted, active_deleted) = semantic_jobs::clear_foreground(&transaction)?;
+        let embeddings_deleted =
+            transaction.execute("DELETE FROM semantic_embeddings", [])? as u64 + staged_deleted;
+        let manifest_deleted =
+            transaction.execute("DELETE FROM semantic_index_meta", [])? > 0 || active_deleted;
         transaction.commit()?;
         Ok(SemanticDropReport {
             embeddings_deleted,
@@ -3198,7 +3276,17 @@ impl Library {
         parsed: &crate::search::ParsedQuery,
         limit: u32,
     ) -> Result<Vec<SemanticCandidate>> {
-        let status = self.semantic_status()?;
+        let mut connection = self.lock()?;
+        let transaction = connection.transaction()?;
+        Self::semantic_search_in(&transaction, parsed, limit)
+    }
+
+    fn semantic_search_in(
+        connection: &Connection,
+        parsed: &crate::search::ParsedQuery,
+        limit: u32,
+    ) -> Result<Vec<SemanticCandidate>> {
+        let status = Self::semantic_status_in(connection)?;
         if !status.healthy {
             return Err(LoomError::SemanticIndexUnavailable(
                 status
@@ -3211,20 +3299,29 @@ impl Library {
         })?;
         let provider = HashEmbeddingProvider::default();
         let query_vector = provider.embed(&parsed.text);
-        let connection = self.lock()?;
-        let mut statement = connection.prepare(
+        let projection = if semantic_jobs::active_target(connection)?.is_some() {
+            "SELECT u.passage_id,u.passage_hash,u.vector_blob,
+                json_extract(b.target_json,'$.config.model_id') AS model_id,
+                json_extract(b.target_json,'$.config.index_revision') AS index_revision
+             FROM background_semantic_units u JOIN background_semantic_builds b ON b.id=u.build_id
+             JOIN background_semantic_active active ON active.build_id=b.id"
+        } else {
+            "SELECT passage_id,passage_hash,vector_blob,model_id,index_revision FROM semantic_embeddings"
+        };
+        let sql = format!(
             "SELECT e.passage_id, e.passage_hash, e.vector_blob, e.model_id, e.index_revision,
                     a.id, v.id, a.title, a.media_type, l.locator, v.content_hash,
                     v.source_modified_ns, p.text, p.locator_json
-             FROM semantic_embeddings e
-             JOIN passages p ON p.id = e.passage_id
+             FROM ({projection}) e
+             JOIN passages p ON p.id = e.passage_id AND p.text_hash=e.passage_hash
              JOIN artifact_versions v ON v.id = p.artifact_version_id
              JOIN artifacts a ON a.id = v.artifact_id AND a.active_version_id = v.id
              JOIN source_roots r ON r.id = a.source_root_id AND r.enabled = 1
              JOIN artifact_locators l ON l.artifact_id = a.id AND l.active = 1 AND l.kind = 'file'
              WHERE a.state = 'active'
-             ORDER BY e.passage_id",
-        )?;
+             ORDER BY e.passage_id"
+        );
+        let mut statement = connection.prepare(&sql)?;
         let rows = statement.query_map([], |row| {
             Ok((
                 row.get::<_, String>(0)?,
@@ -3243,25 +3340,25 @@ impl Library {
                 row.get::<_, String>(13)?,
             ))
         })?;
-        let rows = rows.collect::<rusqlite::Result<Vec<_>>>()?;
-        let mut candidates = Vec::with_capacity(rows.len());
-        for (
-            passage_id,
-            passage_hash,
-            vector_blob,
-            model_id,
-            index_revision,
-            artifact_id,
-            version_id,
-            title,
-            media_type,
-            source_uri,
-            content_hash,
-            source_modified_ns,
-            passage_text,
-            locator_json,
-        ) in rows
-        {
+        let mut candidates = Vec::new();
+        let retained_limit = limit.clamp(1, 100) as usize;
+        for row in rows {
+            let (
+                passage_id,
+                passage_hash,
+                vector_blob,
+                model_id,
+                index_revision,
+                artifact_id,
+                version_id,
+                title,
+                media_type,
+                source_uri,
+                content_hash,
+                source_modified_ns,
+                passage_text,
+                locator_json,
+            ) = row?;
             let vector =
                 decode_vector(&vector_blob, manifest.config.dimension).ok_or_else(|| {
                     LoomError::SemanticIndexIncompatible(format!(
@@ -3292,6 +3389,13 @@ impl Library {
                 model_id,
                 index_revision,
             });
+            candidates.sort_by(|left, right| {
+                right
+                    .score
+                    .total_cmp(&left.score)
+                    .then_with(|| left.passage_id.cmp(&right.passage_id))
+            });
+            candidates.truncate(retained_limit);
         }
         candidates.sort_by(|left, right| {
             right
@@ -3646,8 +3750,7 @@ impl Library {
         Ok(report)
     }
 
-    fn source_modified_ns(&self, version_id: &str) -> Result<Option<i64>> {
-        let connection = self.lock()?;
+    fn source_modified_ns_in(connection: &Connection, version_id: &str) -> Result<Option<i64>> {
         connection
             .query_row(
                 "SELECT source_modified_ns FROM artifact_versions WHERE id = ?1",

@@ -22,6 +22,9 @@ version matrix and migration policy are maintained in [SCHEMA_COMPATIBILITY.md](
 |index_jobs|Durable progress for one root scan|discovery fingerprint, total/next unit, state, error, timestamps|
 |background_directory_manifests|Runtime v5 directory quantum progress, never portable|job, relational root ID/locator, encoded payload budget, total/next units, indexed/unchanged/skipped, bytes and last helper metrics|
 |background_directory_units|Runtime v5 immutable ordered source membership, never portable|job/ordinal, exact UTF-8 relative path/locator, media, discovery-time device/inode/birth time, admission artifact identity, unit hash|
+|background_semantic_builds|Runtime v6 bounded staged/published vector generation, never portable|build ID, optional job owner, typed target, total/next units, capped input bytes, vector bytes|
+|background_semantic_units|Runtime v6 canonical passage capability and disposable vector, never portable|build/ordinal, passage/hash, artifact/version/root/consent generation, text length, unit checksum, nullable fixed-size vector and checksum|
+|background_semantic_active|Runtime v6 atomic projection pointer, never portable|singleton slot and detached published build ID|
 |semantic_index_meta|One disposable semantic-index manifest|provider/model/tokenizer, dimension, normalization, build parameters, revision, canonical digest/counts, vector bytes|
 |semantic_embeddings|Rebuildable vector per active passage|passage hash, provider/model/tokenizer, dimension, normalization, build parameters, revision, encoded vector bytes|
 
@@ -176,8 +179,13 @@ The provider
 benchmark also measures character n-gram and token-count candidates, but does not claim semantic
 quality.
 
-semantic-rebuild deletes and recreates only the two derivative tables from active canonical
-passages. semantic-status reports stale, incomplete, incompatible, or unbuilt state, and
+Foreground semantic-rebuild deletes and recreates only derivative state from capped active
+canonical passages, rehashing text before publication. Current semantic use requires runtime v6
+fences; explicit older-runtime upgrades discard unverifiable vectors and require a fresh rebuild.
+Queued rebuild stages one passage per claim and atomically publishes a detached generation pointer.
+Storage inspection includes its logical metadata/vector payload bytes, separate from physical
+SQLite database/sidecar sizes. semantic-status reports stale, incomplete, incompatible, or
+unbuilt state, and
 semantic-search refuses to search unless the manifest is healthy. Candidates include an artifact
 ID, version ID, passage ID, source hash, passage hash, and structured text/page/region anchor, so a
 semantic score cannot become unsupported evidence. semantic-drop is a lossless derivative purge;

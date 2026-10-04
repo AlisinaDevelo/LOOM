@@ -1,7 +1,8 @@
-# Durable background work: explicit maintenance, file and directory refresh
+# Durable background work: maintenance, refresh and semantic rebuild
 
 Roadmap `0400` / [#36](https://github.com/AlisinaDevelo/LOOM/issues/36) is not complete.
-This is an opt-in durable queue with real FTS-repair, approved-file and directory refresh adapters,
+This is an opt-in durable queue with real FTS-repair, approved-file/directory refresh and
+semantic rebuild adapters,
 not desktop background indexing. Synchronous ingestion/OCR/semantic commands remain available.
 
 ## Using the current adapter
@@ -11,6 +12,7 @@ cargo build --locked -p loom-extraction --bin loom-extractor
 cargo run --locked -p loom-cli -- enqueue-fts-repair repair-after-import --low
 cargo run --locked -p loom-cli -- index /absolute/selected-file.md
 cargo run --locked -p loom-cli -- enqueue-index-file /absolute/selected-file.md refresh-selected-file
+cargo run --locked -p loom-cli -- enqueue-semantic-rebuild semantic-after-index --low
 cargo run --locked -p loom-cli -- jobs
 cargo run --locked -p loom-cli -- run-next-job
 cargo run --locked -p loom-cli -- cancel-job JOB_ID
@@ -30,22 +32,26 @@ never implicitly rebuild FTS. An empty or contending `run-next-job` cannot repai
 
 `background_jobs` and singleton `background_job_runtime` are operational schema-10 additions,
 not portable canonical records. They contain no new source permissions or arbitrary executable
-payloads; admitted operations are `fts_repair`, `index_file` and `index_directory`.
+payloads; admitted operations are `fts_repair`, `index_file`, `index_directory` and `semantic_rebuild`.
 A key is 1–128 ASCII identifier bytes.
 Repeating a key with identical operation/priority/target returns its original row, including a terminal
 row. Conflicting input is rejected without changing it. Terminal keys are not silently evicted.
 At the retained-record limit, explicitly forgetting a terminal record frees capacity and forgets
 its key; a later request with that key becomes new work. Pending/running jobs cannot be forgotten.
-The separate `background_job_schema_version` marker is runtime-only. Version 5 adds bounded
+The separate `background_job_schema_version` marker is runtime-only. Version 6 adds bounded
+semantic generation staging, atomic active-pointer publication, and source/policy/legacy derivative
+mutation fences. Version 5 adds bounded
 directory manifests, quanta, and canonical-locator deletion/update fences. Version 4 requires
 supervised byte-only extraction; version 3 introduced the typed file target, bounded to 16 KiB.
-Existing version-4, version-3, version-2 or recognized unversioned layouts require explicit
+Existing version-5, version-4, version-3, version-2 or recognized unversioned layouts require explicit
 `upgrade-job-runtime`. Upgrade takes the kernel worker lock before opening SQLite; migration,
 epoch rotation, and abandoned-work recovery share one transaction. A live worker prevents it.
 Ordinary opening does not migrate an existing runtime. Records, policy, sequence, and priority
 accounting survive upgrade; invalid legacy diagnostics roll back without dropping jobs.
 Unknown layouts are refused. Old binaries can still read canonical schema-10 evidence but must
-refuse v5 queue commands. Upgrade is operational, not a portable schema migration.
+refuse v6 queue commands. The released exact v5 layout has a reviewed child-before-parent copy
+migration preserving directory units/manifests and all job states; FK/row constraints are reapplied.
+Upgrade is operational, not a portable schema migration.
 Artifact/root/OCR deletion applies the same recovery gate: validated v2 or unversioned legacy
 runtimes contain no file targets and may continue, while a recognized v3 runtime must complete
 the owned upgrade before deletion. An unknown future marker or malformed current layout/state
@@ -185,6 +191,62 @@ worker epoch in the canonical import transaction; a still-live old worker become
 Invalid restore rolls back both runtime and canonical changes. A fresh worker must wait for
 the old descriptor to close even after restore; restore does not force takeover.
 
+## Queued semantic rebuild
+
+`enqueue-semantic-rebuild KEY` reads only already indexed, enabled canonical passages; it never
+selects a root, opens original files, invokes OCR, downloads a model or contacts a provider.
+The provider remains the deterministic 128-dimensional hash baseline, not a neural retrieval
+quality claim. Admission pins provider/config, authorization incarnation, purge revision,
+OCR revision and ordered passage/hash/artifact/version/root/consent-generation membership.
+
+The adapter caps a corpus at 20,000 passages, each at 64 KiB UTF-8 and the combined input at
+64 MiB. It reads byte lengths before allocating passage text. Private retention is capped at
+65,536 unit rows, each with fixed-size IDs/checksums and a nullable 512-byte vector. Source text
+is not duplicated into the runtime. Pending work and the active build are never evicted for
+capacity. Unreferenced published generations are pruned transactionally at later admission.
+
+Each successful claim embeds **one** passage outside the connection mutex and SQL transaction.
+An IMMEDIATE writer rechecks claim/target/policy, canonical membership, text length/hash and
+cursor before committing staged vector bytes, cursor advancement and fair queue yield together.
+Successful quanta do not consume retry attempts. A crash before commit leaves no partial unit;
+a crash after commit resumes at the next ordinal. Cancellation is checked at commit, not a
+promise of interrupting computation mid-token; the input quantum is finite.
+
+A separate final claim revalidates the capped metadata corpus and all staged vector bindings,
+dimensions, checksums and finite floats. It detaches the finished build from its job, swaps the
+singleton active pointer and completes the job atomically. Failure rolls all three back. The
+pointer swap is constant-size, but the final validation scans up to 20,000 rows under a writer;
+it is **not** a sliced finalizer or a demonstrated large-library latency SLO.
+The prior healthy derivative remains searchable while unchanged staging proceeds. Search/status
+share a read snapshot, compare passage hashes and retain at most the requested 100 candidates.
+Hybrid lexical/semantic candidates and modification times use the same snapshot. Opening a
+result still rechecks current consent and source bytes. Hybrid search requires a healthy
+derivative; lexical search is separately available. The synchronous foreground compatibility
+path has the same corpus caps, but still embeds under a writer; it is not a sliced adapter.
+
+The new binary's `semantic-drop` and foreground rebuild clear staged and published generations
+in their writer transaction, even when the legacy derivative is empty. Root/artifact/OCR purge,
+restore, canonical passage deletion/change, consent re-selection and OCR/incarnation changes
+invalidate both legacy vectors/manifests and private builds, preventing stale fallback after
+consent or policy ABA. Deleting a terminal job cannot delete its detached published build.
+Malformed typed payloads can be cancelled/forgotten, and a structurally valid semantic drop
+does not need a valid scheduling policy. This is application-level deletion, not secure erasure
+of SQLite free pages, WAL, backups or filesystem snapshots.
+
+Semantic use requires runtime v6; earlier runtimes remain canonically readable, but need the
+explicit upgrade before semantic queries or foreground rebuild. Upgrade discards unverifiable
+older vectors/manifests, without changing canonical evidence or file/directory work. Once v6
+fences are installed, an unchanged foreground derivative is used until a queued active generation
+exists. Mutating its manifest invalidates v6 work through checked triggers, including
+a real older foreground rebuild. An older binary's **no-op drop of an empty legacy table** is
+unobservable by row triggers: mixed-version support is canonical read compatibility, not a
+cross-version erasure guarantee. Use the current binary for drop/purge/restore.
+Unknown/malformed layouts refuse semantic mutation; opening canonical evidence does not
+silently migrate them. [Semantic evidence](evidence/0400-semantic-queue.md) records actual checks.
+Deletion remains available on recognized older layouts. Storage inspection counts logical staged
+metadata/vector payloads as derived records; it does not mistake those estimates for physical
+SQLite page, index or free-space sizes.
+
 ## Approved-directory contract
 
 `enqueue-index-directory /absolute/approved-folder KEY` requires an enabled exact **directory**
@@ -243,7 +305,7 @@ This assumes LOOM-managed SQLite connections with foreign keys enabled, not arbi
 that disable integrity checks. Empty-root purge also removes targeted jobs. Restore validates runtime
 definitions, explicitly clears all directory tables and advances the epoch atomically. Manifests,
 queue rows, their indexes/triggers and resource diagnostics are excluded from portable exports.
-Current v5 rejects unknown private runtime objects before queue work, purge or restore. Purge
+Current v6 rejects unknown private runtime objects before queue work, purge or restore. Purge
 validates every bounded unit's digest, shape and canonical relation without requiring source files
 to remain on disk. Bulk deletion reuses that validation only within the same writer transaction.
 Unit hashes detect damaged operational records; they are not protection against a hostile DB writer.
