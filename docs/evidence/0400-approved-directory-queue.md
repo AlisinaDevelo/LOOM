@@ -107,6 +107,18 @@ only synthetic measurements and digests, not raw paths, logs or source documents
 | Staged helper | `52c9e5f99fc181ed51df8ec030b9d6bd783c784571e9918024ed122eca683766` |
 | MSRV tests | `108310fe530ab4c6ff7a75c96a5d7c1f32112a931622785c21824d4e26625ec5` |
 | CLI measurements | `0696ebb484de371cb6507be96684359bc19b2e239ec858a35616c9e806a092c2` |
+| Merged-main workspace tests | `22594f81178fc56297d7b1d1e79313ff18044a381339b757bf733c94134a3681` |
+| Merged-main CLI measurements | `066122f1cf79995b6ef9cbafb6a24bb4b551400385cd9afeed18826ddef932db` |
 
-Merged-main reproduction will be recorded separately after merge; this document does not
-claim the candidate has already merged or that the remaining engine acceptance gates passed.
+## Merged-main reproduction
+
+[PR #339](https://github.com/AlisinaDevelo/LOOM/pull/339) merged at 2026-10-04 17:55:47 UTC
+as `b07df36f84af62d49d8aba9016119117c07f129e`. Its tree exactly matches the tested candidate.
+The merged commit was checked out separately from the main working checkout, then rebuilt
+and tested again: **374 workspace tests**, strict Clippy, approved-directory, maintenance,
+approved-file/native OCR and finite-discovery CLI fixtures all passed. The rebuilt CLI/helper
+hashes match those above; the merged test and measurement receipts are retained under the same
+evidence ID. All fixture libraries and sources were temporary and synthetic.
+
+This proves the merged slice, not completion of #36, a globally green security pipeline,
+signed/notarized distribution or additional interactive/device acceptance.
