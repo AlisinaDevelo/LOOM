@@ -21,6 +21,8 @@ synthetic corpus. `--previous-loom OLD_CLI` verifies the actual released v5 upgr
 preserved directory units, FK integrity and old canonical read/new queue refusal. Keep
 each CLI's matching `loom-extractor` sibling. These are bounded fixture checks, not a
 large-library or real-world retrieval-quality result.
+When sharing an isolated `CARGO_TARGET_DIR` with a Tauri build, use an absolute path:
+Tauri invokes Cargo from `src-tauri`.
 
 ## Contract coverage
 
@@ -56,6 +58,7 @@ Local run: **2026-10-04**, macOS **26.6.2 (25G83)**, **arm64**. Base commit:
 **1.88.0**, Node **26.7.0**, npm **11.19.0**. Build jobs: two; incremental compilation and
 debug symbols disabled. Local evidence ID: **semantic-queue.W0sg5b**. Receipts and matching
 CLI/extractor binaries are retained outside disposable build output.
+Candidate commit: `2f50cc6f3eb54a8ffddcf50cb8575a13f665f012`.
 
 - Full Rust workspace: **396 tests passed**; strict workspace/all-targets Clippy and formatting
   passed. Rust 1.88: **331 core/extraction tests passed**, plus the full workspace/all-targets
@@ -85,6 +88,14 @@ The semantic CLI resource fixture measured **135 one-passage claims** across the
 and peak resident size **16,744,448 bytes**. These include subprocess startup; they are not a
 20,000-passage finalizer, desktop latency or whole-library resource gate.
 
+The default lexical performance harness ran **10,000 and 100,000 synthetic text artifacts,
+twice per scale**. All six pre-optimization budgets passed at 100k, with no unavailable or
+exceeded measurement: throughput **613.615 artifacts/s**, warm-query p95 **0.464333 ms**,
+peak process RSS **75,431,936 bytes**, database amplification **11.7161**, CPU **1.1253 s
+per 1,000 artifacts**, and FTS rebuild **10.431525 s**. These are the gate's conservative
+observations over its two runs. This is a lexical workload, not a 100k semantic rebuild,
+mixed-media admission or aggregate desktop/Vision-service resource result.
+
 The live-extraction restore fixture also exposed contention between a settling worker and the
 existing deferred import transaction. Its test-only retry accepts only a Busy/Locked rollback
 with unchanged canonical export digest; production restore was not changed. Deferred import
@@ -102,3 +113,35 @@ advisory suppression, target filter, MSRV increase or Tauri 2.12 upgrade was int
 | MSRV test receipt | `148ebed01676a493d7e261e3547ca88c9212794ebca3f6bafb7493244c5bc00e` |
 | Workspace test receipt | `ff11e59643f8470dc18ad8ba5489eecef01e333defacdebf14e1c62df7b4bd64` |
 | Semantic CLI measurements | `f619aaa5d831f0798f80e1c0dcac82d340dba81ef996b22c8ed6e264e62380e7` |
+| 10k/100k performance report | `cd2df0d94bcae5509b421081b4ef01243bb61f10fe690ac27c3459e620f9113c` |
+
+## Merged-main reproduction
+
+[PR #341](https://github.com/AlisinaDevelo/LOOM/pull/341) merged at **2026-10-04 20:02:18 UTC**
+as `a58aa907c9cbc035338712cc39f53931387044a0`. Its tree exactly matches the tested candidate:
+`c87b511d21fb9fccc4cbd7f3b7de58ddeb2c978e`. The merged commit was checked out independently
+of the main working checkout.
+
+Repeated on that commit: **396 workspace tests**, strict Clippy, **331 MSRV core/extraction
+tests**, full MSRV workspace/all-targets check, frontend/Python/CI/accessibility/browser protocol
+checks, and roadmap validation all passed. CLI/helper/native-host were rebuilt; the CLI/helper
+hashes match the table above. Actual released-v5 upgrade and semantic, maintenance, file/native
+Vision OCR, directory/discovery, native-host, retrieval, PDF, hybrid and semantic derivative
+contracts passed again. The Tauri debug/no-bundle app was rebuilt successfully; no interactive
+application session was performed. The 10k/100k report above is from the candidate's identical
+source tree and byte-identical CLI, not a second large-scale run after merge.
+
+The fixed-corpus native queued-OCR responsiveness smoke also passed: **501** overlapping
+retrievals within running claims, p95 **5.233417 ms**, maximum **9.6415 ms**. It explicitly
+does not prove desktop or 100k responsiveness, hard peak RSS, or Vision-service memory.
+
+| Merged artifact | SHA-256 |
+| --- | --- |
+| Workspace tests | `3b6081d3455546f58da3262d811630a5c1c3c7d902aa61380f3c502295f548e6` |
+| MSRV tests | `882144c7f43dd60147849db2c95f831b0c2b29758e68d032d1197e50890067e6` |
+| Semantic CLI measurements | `6792873fea8206a412cb661bf096ad9263733c11684175e755ce9f0a3db28c7e` |
+| Debug/no-bundle app | `c155c7fcba3721b704f8e33d77c6fd6b233c460b0532f9bbdf3ab9f129fce05e` |
+
+This verifies the merged adapter, not completion of #36 or a globally green security pipeline.
+Only synthetic fixture libraries and sources were used. No private documents or browser
+profiles were accessed, no permissions changed, and no desktop screenshots captured.
