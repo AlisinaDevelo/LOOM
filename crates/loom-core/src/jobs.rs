@@ -219,10 +219,12 @@ CREATE TABLE IF NOT EXISTS background_directory_units(
     media_type TEXT,
     identity_json TEXT NOT NULL CHECK(length(CAST(identity_json AS BLOB)) <= 256 AND json_valid(identity_json)),
     artifact_id TEXT,
+    unit_hash TEXT NOT NULL CHECK(length(unit_hash)=71 AND substr(unit_hash,1,7)='blake3:'),
     PRIMARY KEY(job_id, ordinal),
     UNIQUE(job_id, locator)
 ) STRICT;
 CREATE INDEX IF NOT EXISTS background_directory_unit_locator ON background_directory_units(locator, job_id);
+CREATE INDEX IF NOT EXISTS background_directory_unit_artifact ON background_directory_units(artifact_id, job_id);
 CREATE INDEX IF NOT EXISTS background_directory_artifact_root ON artifacts(source_root_id, state, id);
 CREATE INDEX IF NOT EXISTS background_directory_artifact_locator ON artifact_locators(artifact_id, kind, active, locator);";
 
@@ -246,10 +248,21 @@ BEGIN
         (SELECT job_id FROM background_directory_units WHERE locator IN (OLD.locator,NEW.locator));
 END";
 
+const DIRECTORY_ARTIFACT_FENCE: &str =
+    "CREATE TRIGGER IF NOT EXISTS background_directory_artifact_changed
+AFTER UPDATE OF source_root_id,state ON artifacts
+WHEN NEW.source_root_id<>OLD.source_root_id OR (NEW.state='tombstoned' AND OLD.state<>'tombstoned')
+BEGIN
+    DELETE FROM background_jobs WHERE operation='index_directory' AND id IN
+        (SELECT job_id FROM background_directory_units WHERE artifact_id=OLD.id OR locator IN
+            (SELECT locator FROM artifact_locators WHERE artifact_id=OLD.id AND kind='file'));
+END";
+
 fn create_runtime_v5(connection: &Connection) -> Result<()> {
     connection.execute_batch(RUNTIME_SCHEMA_V5)?;
     connection.execute_batch(DIRECTORY_DELETE_FENCE)?;
     connection.execute_batch(DIRECTORY_UPDATE_FENCE)?;
+    connection.execute_batch(DIRECTORY_ARTIFACT_FENCE)?;
     Ok(())
 }
 
@@ -429,6 +442,21 @@ fn validate_runtime_layout(connection: &Connection) -> Result<()> {
         "background_directory_locator_changed",
         DIRECTORY_UPDATE_FENCE,
     )?;
+    validate_definition(
+        connection,
+        "background_directory_artifact_changed",
+        DIRECTORY_ARTIFACT_FENCE,
+    )?;
+    let extra: bool = connection.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name GLOB 'background_*'
+        AND name NOT IN ('background_job_runtime','background_jobs','background_jobs_ready',
+            'background_directory_manifests','background_directory_units','background_directory_unit_locator',
+            'background_directory_unit_artifact','background_directory_artifact_root','background_directory_artifact_locator',
+            'background_directory_locator_deleted','background_directory_locator_changed','background_directory_artifact_changed'))", [], |row| row.get(0))?;
+    if extra {
+        return Err(LoomError::JobQueue(
+            "unknown private runtime object; operation refused".into(),
+        ));
+    }
     Ok(())
 }
 
@@ -502,12 +530,12 @@ fn validate_purge_runtime_row(connection: &Connection) -> Result<()> {
 
 /// Purge must also remove bounded operational locators/diagnostics and invalidate running claims.
 /// Known older runtimes contain no file targets; never silently migrate them during deletion.
-pub(crate) fn purge_file_targets(
-    connection: &Connection,
+pub(crate) fn purge_file_targets<'a>(
+    connection: &'a rusqlite::Transaction<'_>,
     locator: Option<&str>,
     artifact_id: Option<&str>,
     images: bool,
-) -> Result<()> {
+) -> Result<ValidatedPurge<'a>> {
     let version: Option<String> = connection
         .query_row(
             "SELECT value FROM schema_meta WHERE key='background_job_schema_version'",
@@ -533,7 +561,11 @@ pub(crate) fn purge_file_targets(
         } else {
             return Err(purge_runtime_recovery_error());
         }
-        return Ok(());
+        return Ok(ValidatedPurge {
+            connection,
+            files: false,
+            directories: false,
+        });
     }
     if version.as_deref() == Some("4") {
         validate_definitions(connection, &runtime_schema_v4())
@@ -544,8 +576,42 @@ pub(crate) fn purge_file_targets(
             .map_err(|_| purge_runtime_recovery_error())?;
     }
     validate_purge_runtime_row(connection).map_err(|_| purge_runtime_recovery_error())?;
-    connection.execute(
-        "DELETE FROM background_jobs WHERE operation='index_file' AND (
+    let purge = ValidatedPurge {
+        connection,
+        files: true,
+        directories: version.as_deref() == Some("5"),
+    };
+    purge.apply(connection, locator, artifact_id, images)?;
+    Ok(purge)
+}
+
+/// Reuse a validated immutable writer snapshot for bulk deletion instead of rescanning every
+/// unrelated manifest per artifact. This permit cannot be created outside a transaction.
+pub(crate) struct ValidatedPurge<'a> {
+    connection: &'a Connection,
+    files: bool,
+    directories: bool,
+}
+
+impl ValidatedPurge<'_> {
+    pub(crate) fn apply(
+        &self,
+        transaction: &rusqlite::Transaction<'_>,
+        locator: Option<&str>,
+        artifact_id: Option<&str>,
+        images: bool,
+    ) -> Result<()> {
+        let connection: &Connection = transaction;
+        if !std::ptr::eq(connection, self.connection) {
+            return Err(LoomError::JobQueue(
+                "purge permit belongs to another transaction connection".into(),
+            ));
+        }
+        if !self.files {
+            return Ok(());
+        }
+        connection.execute(
+            "DELETE FROM background_jobs WHERE operation='index_file' AND (
             (?1 IS NOT NULL AND (
                 json_extract(target_json,'$.locator') = ?1
                 OR json_extract(target_json,'$.authorization.root_id') IN
@@ -555,10 +621,10 @@ pub(crate) fn purge_file_targets(
                     (SELECT locator FROM artifact_locators WHERE artifact_id=?2 AND kind='file')
                 OR json_extract(target_json,'$.artifact_id') = ?2))
             OR (?3=1 AND json_extract(target_json,'$.media_type') LIKE 'image/%'))",
-        params![locator, artifact_id, images],
-    )?;
-    if version.as_deref() == Some("5") {
-        connection.execute(
+            params![locator, artifact_id, images],
+        )?;
+        if self.directories {
+            connection.execute(
             "DELETE FROM background_jobs WHERE operation='index_directory' AND (
                 (?1 IS NOT NULL AND (json_extract(target_json,'$.locator')=?1
                     OR id IN (SELECT job_id FROM background_directory_manifests
@@ -571,8 +637,9 @@ pub(crate) fn purge_file_targets(
                     OR id IN (SELECT job_id FROM background_directory_units WHERE media_type LIKE 'image/%'))))",
             params![locator, artifact_id, images],
         )?;
+        }
+        Ok(())
     }
-    Ok(())
 }
 
 fn advance_epoch(connection: &Connection) -> Result<i64> {
@@ -3361,6 +3428,7 @@ mod tests {
             .execute_batch(
                 "DROP TRIGGER background_directory_locator_deleted;
             DROP TRIGGER background_directory_locator_changed;
+            DROP TRIGGER background_directory_artifact_changed;
             DROP INDEX background_directory_artifact_root;
             DROP INDEX background_directory_artifact_locator;
             DROP TABLE background_directory_units;
@@ -3419,6 +3487,62 @@ mod tests {
             );
             assert_eq!(library.export_portable().unwrap().digest, before);
         }
+    }
+
+    #[test]
+    fn current_runtime_unknown_objects_refuse_purge_restore_and_queue_commands() {
+        let temporary = tempdir().unwrap();
+        let library = Library::open(temporary.path().join("library.sqlite3")).unwrap();
+        let export = library.export_portable().unwrap();
+        library
+            .lock()
+            .unwrap()
+            .execute_batch(
+                "CREATE TABLE background_directory_unknown(private_locator TEXT);
+            INSERT INTO background_directory_unknown VALUES ('synthetic-private-locator');",
+            )
+            .unwrap();
+        assert!(library
+            .purge_root("/synthetic-absent-root")
+            .unwrap_err()
+            .to_string()
+            .contains("no data was deleted"));
+        assert!(library
+            .import_portable(&export)
+            .unwrap_err()
+            .to_string()
+            .contains("unknown private runtime object"));
+        assert!(library
+            .enqueue_fts_repair("unknown-layout", JobPriority::Normal)
+            .is_err());
+        assert_eq!(library.export_portable().unwrap().digest, export.digest);
+        let retained: String = library
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT private_locator FROM background_directory_unknown",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(retained, "synthetic-private-locator");
+    }
+
+    #[test]
+    fn purge_validation_permit_cannot_apply_to_another_connection() {
+        let temporary = tempdir().unwrap();
+        let first = Library::open(temporary.path().join("first.sqlite3")).unwrap();
+        let second = Library::open(temporary.path().join("second.sqlite3")).unwrap();
+        let mut first_connection = first.lock().unwrap();
+        let transaction = first_connection.transaction().unwrap();
+        let permit = purge_file_targets(&transaction, None, None, false).unwrap();
+        let mut second_connection = second.lock().unwrap();
+        let other = second_connection.transaction().unwrap();
+        assert!(permit
+            .apply(&other, None, None, false)
+            .unwrap_err()
+            .to_string()
+            .contains("another transaction connection"));
     }
 
     #[test]

@@ -1,5 +1,6 @@
 //! Durable directory capabilities, never interchangeable with exact-file capabilities.
 use super::*;
+use crate::discovery::birth_time;
 use crate::jobs::{BackgroundJob, DirectoryProgress, JobClaim, JobState};
 
 const MAX_DIRECTORY_UNITS: usize = 20_000;
@@ -142,18 +143,6 @@ impl IndexDirectoryTarget {
     }
 }
 
-fn birth_time(metadata: &fs::Metadata) -> Result<(u64, u32)> {
-    let created = metadata.created().map_err(|_| {
-        LoomError::UnsupportedSource(
-            "durable directory jobs require filesystem birth-time identity".into(),
-        )
-    })?;
-    let elapsed = created.duration_since(std::time::UNIX_EPOCH).map_err(|_| {
-        LoomError::UnsupportedSource("source birth time precedes Unix epoch".into())
-    })?;
-    Ok((elapsed.as_secs(), elapsed.subsec_nanos()))
-}
-
 fn directory_change(_metadata: &fs::Metadata) -> (i64, i64) {
     #[cfg(unix)]
     {
@@ -225,6 +214,22 @@ struct DirectoryUnit {
 }
 
 impl DirectoryUnit {
+    fn digest(&self, job_id: &str) -> Result<String> {
+        let bytes = serde_json::to_vec(&(
+            job_id,
+            self.ordinal,
+            &self.relative_path,
+            &self.locator,
+            &self.media_type,
+            &self.identity,
+            &self.artifact_id,
+        ))?;
+        let mut hash = blake3::Hasher::new();
+        hash.update(b"loom.directory.unit.v1\0");
+        hash.update(&bytes);
+        Ok(format!("blake3:{}", hash.finalize().to_hex()))
+    }
+
     fn validate(&self, target: &IndexDirectoryTarget) -> Result<()> {
         let relative = Path::new(&self.relative_path);
         if self.ordinal >= target.total_units
@@ -276,7 +281,7 @@ impl DirectoryUnit {
 pub(crate) struct DirectoryAdmission {
     target: IndexDirectoryTarget,
     paths: Vec<PathBuf>,
-    identities: Vec<(u64, u64)>,
+    identities: Vec<crate::discovery::SourceIdentityStamp>,
 }
 
 impl DirectoryAdmission {
@@ -340,7 +345,7 @@ impl DirectoryAdmission {
             "INSERT INTO background_directory_manifests(job_id,root_id,root_locator,encoded_bytes,total_units) VALUES (?1,?2,?3,?4,?5)",
             params![job.id, self.target.authorization.root_id, self.target.locator, sql_i64(encoded_bytes,"directory manifest bytes")?, self.target.total_units],
         )?;
-        for (ordinal, (path, &(device, inode))) in
+        for (ordinal, (path, &(device, inode, created))) in
             self.paths.iter().zip(&self.identities).enumerate()
         {
             let locator = utf8_path(path)?;
@@ -363,18 +368,30 @@ impl DirectoryAdmission {
                     self.target.authorization.root_id.clone(),
                 ));
             }
-            let identity = SourceIdentity::capture(path, false)?;
-            if (identity.device, identity.inode) != (device, inode) {
-                return Err(LoomError::SourceChanged(locator));
-            }
+            let identity = SourceIdentity {
+                device,
+                inode,
+                created,
+            };
+            identity.verify(path, false)?;
             let identity_json = serde_json::to_string(&identity)?;
             let media = ingest::supported_media_type(path);
+            let unit_hash = DirectoryUnit {
+                ordinal: ordinal as u32,
+                relative_path: relative_path.clone(),
+                locator: locator.clone(),
+                media_type: media.map(str::to_owned),
+                identity,
+                artifact_id: snapshot.as_ref().map(|record| record.artifact_id.clone()),
+            }
+            .digest(&job.id)?;
             encoded_bytes += (job.id.len()
                 + 8
                 + relative_path.len()
                 + locator.len()
                 + media.map_or(0, str::len)
                 + identity_json.len()
+                + unit_hash.len()
                 + snapshot
                     .as_ref()
                     .map_or(0, |record| record.artifact_id.len()))
@@ -385,9 +402,9 @@ impl DirectoryAdmission {
                 u64::from(self.target.total_units),
                 encoded_bytes,
             )?;
-            connection.execute("INSERT INTO background_directory_units(job_id,ordinal,relative_path,locator,media_type,identity_json,artifact_id)
-                VALUES (?1,?2,?3,?4,?5,?6,?7)", params![job.id, ordinal as u32, relative_path, locator,
-                media, identity_json, snapshot.map(|record| record.artifact_id)])?;
+            connection.execute("INSERT INTO background_directory_units(job_id,ordinal,relative_path,locator,media_type,identity_json,artifact_id,unit_hash)
+                VALUES (?1,?2,?3,?4,?5,?6,?7,?8)", params![job.id, ordinal as u32, relative_path, locator,
+                media, identity_json, snapshot.map(|record| record.artifact_id),unit_hash])?;
         }
         connection.execute(
             "UPDATE background_directory_manifests SET encoded_bytes=?1 WHERE job_id=?2",
@@ -415,6 +432,8 @@ fn enforce_manifest_capacity(
 }
 
 pub(super) fn validate_targets_for_purge(connection: &Connection) -> Result<()> {
+    let mut retained_units = 0_u64;
+    let mut retained_bytes = 0_u64;
     let mut statement = connection
         .prepare("SELECT id,target_json,state FROM background_jobs WHERE operation='index_directory' LIMIT 4097")?;
     let rows = statement.query_map([], |row| {
@@ -431,19 +450,58 @@ pub(super) fn validate_targets_for_purge(connection: &Connection) -> Result<()> 
         let (id, json, state) = row?;
         let target = IndexDirectoryTarget::parse(&json)?;
         // Terminal diagnostics legitimately have no manifest; pending jobs must have one.
-        let roots: Option<(String,String,u32)> = connection.query_row(
-            "SELECT root_id,root_locator,total_units FROM background_directory_manifests WHERE job_id=?1", [&id],
-            |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?))).optional()?;
-        if let Some((root_id, locator, units)) = roots {
+        let roots: Option<(String,String,u32,u64)> = connection.query_row(
+            "SELECT root_id,root_locator,total_units,encoded_bytes FROM background_directory_manifests WHERE job_id=?1", [&id],
+            |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,crate::jobs::row_bytes(row,3)?))).optional()?;
+        if let Some((root_id, locator, units, encoded_bytes)) = roots {
+            retained_units += u64::from(units);
+            retained_bytes = retained_bytes.saturating_add(encoded_bytes);
+            enforce_manifest_capacity(retained_units, retained_bytes, 0, 0)?;
             if root_id != target.authorization.root_id
                 || locator != target.locator
                 || units != target.total_units
             {
                 return Err(invalid("directory manifest capability mismatch"));
             }
+            let actual: u32 = connection.query_row(
+                "SELECT COUNT(*) FROM background_directory_units WHERE job_id=?1",
+                [&id],
+                |row| row.get(0),
+            )?;
+            if actual != units {
+                return Err(invalid("incomplete directory manifest"));
+            }
+            for ordinal in 0..units {
+                let unit = load_unit(connection, &id, ordinal)?;
+                unit.validate(&target)?;
+                validate_unit_canonical(
+                    &target,
+                    &unit,
+                    &canonical_file_snapshot(connection, &unit.locator)?,
+                )?;
+            }
         } else if matches!(state.as_str(), "queued" | "running" | "retryable") {
             return Err(invalid("pending directory job has no manifest"));
         }
+    }
+    Ok(())
+}
+
+fn validate_unit_canonical(
+    target: &IndexDirectoryTarget,
+    unit: &DirectoryUnit,
+    current: &Option<CanonicalFileSnapshot>,
+) -> Result<()> {
+    if current.as_ref().is_some_and(|record| {
+        record.root_id != target.authorization.root_id
+            || !record.locator_active
+            || record.state == "tombstoned"
+    }) || unit
+        .artifact_id
+        .as_ref()
+        .is_some_and(|id| current.as_ref().map(|record| &record.artifact_id) != Some(id))
+    {
+        return Err(invalid("directory manifest canonical ownership mismatch"));
     }
     Ok(())
 }
@@ -788,9 +846,26 @@ impl Library {
             unit.validate(target)?;
             if namespace.files[ordinal as usize] != Path::new(&unit.locator)
                 || namespace.file_identities[ordinal as usize]
-                    != (unit.identity.device, unit.identity.inode)
+                    != (
+                        unit.identity.device,
+                        unit.identity.inode,
+                        unit.identity.created,
+                    )
             {
                 return Err(LoomError::SourceChanged(unit.locator));
+            }
+            let current = canonical_file_snapshot(&transaction, &unit.locator)?;
+            validate_unit_canonical(target, &unit, &current)?;
+            let expected_publication = unit.media_type.as_deref().is_some_and(|media| {
+                !media.starts_with("image/")
+                    || target
+                        .authorization
+                        .ocr_policy
+                        .as_ref()
+                        .is_some_and(|policy| policy.enabled)
+            });
+            if expected_publication && current.is_none() {
+                return Err(invalid("settled directory unit has no canonical artifact"));
             }
         }
         namespace.verify_directories(
@@ -853,7 +928,7 @@ fn directory_progress(
 fn load_unit(connection: &Connection, id: &str, ordinal: u32) -> Result<DirectoryUnit> {
     let raw = connection
         .query_row(
-            "SELECT relative_path,locator,media_type,identity_json,artifact_id
+            "SELECT relative_path,locator,media_type,identity_json,artifact_id,unit_hash
         FROM background_directory_units WHERE job_id=?1 AND ordinal=?2",
             params![id, ordinal],
             |row| {
@@ -863,12 +938,13 @@ fn load_unit(connection: &Connection, id: &str, ordinal: u32) -> Result<Director
                     row.get::<_, Option<String>>(2)?,
                     row.get::<_, String>(3)?,
                     row.get::<_, Option<String>>(4)?,
+                    row.get::<_, String>(5)?,
                 ))
             },
         )
         .optional()?
         .ok_or_else(|| invalid("directory manifest unit is unavailable"))?;
-    Ok(DirectoryUnit {
+    let unit = DirectoryUnit {
         ordinal,
         relative_path: raw.0,
         locator: raw.1,
@@ -876,7 +952,11 @@ fn load_unit(connection: &Connection, id: &str, ordinal: u32) -> Result<Director
         identity: serde_json::from_str(&raw.3)
             .map_err(|_| invalid("invalid directory file identity"))?,
         artifact_id: raw.4,
-    })
+    };
+    if unit.digest(id)? != raw.5 {
+        return Err(invalid("directory manifest unit digest mismatch"));
+    }
+    Ok(unit)
 }
 
 #[cfg(test)]
@@ -1178,5 +1258,111 @@ mod tests {
         ));
         assert_eq!(library.export_portable().unwrap().digest, before);
         assert!(library.background_jobs(128).unwrap().is_empty());
+    }
+
+    #[test]
+    fn child_birth_time_is_pinned_at_discovery_not_recaptured_at_manifest_insert() {
+        let (_temporary, library, root) = fixture();
+        fs::create_dir(root.join("nested")).unwrap();
+        fs::write(root.join("nested/a.md"), "Discovery identity marker").unwrap();
+        let mut admission = library.prepare_directory_admission(&root).unwrap();
+        let job = library
+            .enqueue_index_directory(&root, "discovery-gap", JobPriority::Normal)
+            .unwrap();
+        // Model an inode recycled after discovery with a different filesystem birth time.
+        admission.identities[0].2 .0 -= 1;
+        let before = library.export_portable().unwrap().digest;
+        {
+            let mut connection = library.lock().unwrap();
+            let transaction = source_write_transaction(&mut connection).unwrap();
+            transaction
+                .execute(
+                    "DELETE FROM background_directory_manifests WHERE job_id=?1",
+                    [&job.id],
+                )
+                .unwrap();
+            assert!(matches!(
+                admission.insert_manifest(&transaction, &job, false),
+                Err(LoomError::SourceRevoked(_))
+            ));
+            // Roll back the attempted manifest replacement, including its partial operational rows.
+        }
+        assert_eq!(library.export_portable().unwrap().digest, before);
+        assert_eq!(
+            library
+                .background_job(&job.id)
+                .unwrap()
+                .directory_progress
+                .unwrap()
+                .total_units,
+            1
+        );
+    }
+
+    #[test]
+    fn canonical_reparenting_invalidates_processed_absent_baseline_units() {
+        let (_temporary, library, root) = fixture();
+        let path = root.join("a.md");
+        fs::write(&path, "Reparenting marker").unwrap();
+        let job = library
+            .enqueue_index_directory(&root, "reparent", JobPriority::Normal)
+            .unwrap();
+        let (mut worker, claim, json) = claim(&library);
+        let prepared = library
+            .prepare_directory_file(&claim, &json, Some(&helper()))
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            library
+                .publish_directory_file(&claim, &prepared)
+                .unwrap()
+                .state,
+            JobState::Queued
+        );
+        let baseline: Option<String> = library
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT artifact_id FROM background_directory_units WHERE job_id=?1",
+                [&job.id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(baseline.is_none());
+        library.index_path(&path).unwrap(); // Normal foreground explicit exact-file selection.
+        assert!(library.background_job(&job.id).is_err());
+        assert!(worker.run_next().unwrap().is_none());
+        assert_eq!(library.stats().unwrap().artifacts, 1);
+    }
+
+    #[test]
+    fn malformed_valid_shape_unit_cannot_evade_artifact_purge_or_supply_new_bytes() {
+        let (_temporary, library, root) = fixture();
+        fs::write(root.join("a.md"), "Private original artifact marker").unwrap();
+        library.index_path(&root).unwrap();
+        let artifact = library
+            .search(&SearchRequest {
+                text: "Private original artifact marker".into(),
+                limit: 1,
+            })
+            .unwrap()
+            .remove(0)
+            .artifact_id;
+        let job = library
+            .enqueue_index_directory(&root, "unit-purge", JobPriority::Normal)
+            .unwrap();
+        library.lock().unwrap().execute("UPDATE background_directory_units SET relative_path='other.md',locator=?1,artifact_id=NULL WHERE job_id=?2",
+            params![root.join("other.md").to_str().unwrap(),job.id]).unwrap();
+        let before = library.export_portable().unwrap().digest;
+        assert!(library
+            .purge_artifact(&artifact)
+            .unwrap_err()
+            .to_string()
+            .contains("no data was deleted"));
+        assert_eq!(library.export_portable().unwrap().digest, before);
+        library.cancel_background_job(&job.id).unwrap();
+        library.forget_background_job(&job.id).unwrap();
+        library.purge_artifact(&artifact).unwrap();
+        assert_eq!(library.stats().unwrap().artifacts, 0);
     }
 }

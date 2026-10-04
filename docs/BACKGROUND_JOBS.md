@@ -108,6 +108,8 @@ and matches an independent relational root identity/locator. A malformed directo
 the transaction before canonical deletion. Inspect `jobs`, `cancel-job` the diagnostic, then
 `forget-job` once terminal and retry; neither command silently authorizes another source.
 Known older runtimes also refuse unexpected directory objects rather than leave private paths behind.
+File-target selectors retain their earlier diagnostic contract: an unrelated malformed file target
+without a recognizable locator/identity remains inspectable and can be forgotten once terminal.
 
 Mixed-version compatibility is canonical **read** compatibility, not a complete privacy-erasure
 guarantee. Older canonical-only binaries cannot remove v3 operational locators/diagnostics.
@@ -190,10 +192,11 @@ root. It never grants/reselects consent. Parent approval does not turn `index_fi
 adapter. A caller may explicitly select an empty folder with `index` before admitting later work.
 
 Admission completes bounded metadata discovery before writing any queue row. The v5 operational
-manifest stores one ordered unit per regular file, including unsupported media and OCR-disabled
+manifest stores one checksummed ordered unit per regular file, including unsupported media and OCR-disabled
 images as explicit skips. Paths must be exact UTF-8, control-free, component-contained locators;
 non-UTF-8 queued paths are refused, never lossily converted. Unix device/inode plus filesystem
-birth time pins the root and each child; the root also pins its change timestamp. Symlinks and
+birth time pins the root and each child; the child's birth time comes from descriptor-bound
+discovery, not a later admission recapture. The root also pins its change timestamp. Symlinks and
 special files are not followed. Non-Unix systems and filesystems without birth-time identity
 are refused rather than claiming equivalent replacement/identity-reuse fencing there.
 
@@ -234,10 +237,16 @@ Terminal completion/failure/cancellation removes manifest paths. Root/artifact/O
 matching pending/running work; a purge of any manifested locator conservatively invalidates the
 whole directory job. Indexed locator delete, relocation/reparenting or deactivation triggers provide
 a backstop for canonical-only writers, including absent → created → purged → absent admissions.
+Artifact reparenting/tombstoning also invalidates manifested locators, including already-processed
+units whose admission artifact was absent. Final reconciliation rechecks canonical ownership.
 This assumes LOOM-managed SQLite connections with foreign keys enabled, not arbitrary raw writers
 that disable integrity checks. Empty-root purge also removes targeted jobs. Restore validates runtime
 definitions, explicitly clears all directory tables and advances the epoch atomically. Manifests,
 queue rows, their indexes/triggers and resource diagnostics are excluded from portable exports.
+Current v5 rejects unknown private runtime objects before queue work, purge or restore. Purge
+validates every bounded unit's digest, shape and canonical relation without requiring source files
+to remain on disk. Bulk deletion reuses that validation only within the same writer transaction.
+Unit hashes detect damaged operational records; they are not protection against a hostile DB writer.
 
 ## Verification and remaining work
 

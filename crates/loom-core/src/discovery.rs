@@ -65,9 +65,23 @@ struct Budget {
     namespace_bytes: usize,
 }
 
+pub(crate) type SourceIdentityStamp = (u64, u64, (u64, u32));
+
+pub(crate) fn birth_time(metadata: &fs::Metadata) -> Result<(u64, u32)> {
+    let created = metadata.created().map_err(|_| {
+        LoomError::UnsupportedSource(
+            "durable directory jobs require filesystem birth-time identity".into(),
+        )
+    })?;
+    let elapsed = created.duration_since(std::time::UNIX_EPOCH).map_err(|_| {
+        LoomError::UnsupportedSource("source birth time precedes Unix epoch".into())
+    })?;
+    Ok((elapsed.as_secs(), elapsed.subsec_nanos()))
+}
+
 pub(crate) struct NamespaceSnapshot {
     pub(crate) files: Vec<PathBuf>,
-    pub(crate) file_identities: Vec<(u64, u64)>,
+    pub(crate) file_identities: Vec<SourceIdentityStamp>,
     pub(crate) fingerprint: String,
     directories: Vec<(PathBuf, [u8; 32])>,
 }
@@ -75,7 +89,7 @@ pub(crate) struct NamespaceSnapshot {
 struct NamespaceObservation {
     relative: PathBuf,
     stamp: [u8; 32],
-    identity: Option<(u64, u64)>,
+    identity: Option<SourceIdentityStamp>,
     directory: bool,
 }
 
@@ -196,12 +210,12 @@ impl Budget {
         &mut self,
         relative: &Path,
         stamp: [u8; 32],
-        identity: Option<(u64, u64)>,
+        identity: Option<SourceIdentityStamp>,
         directory: bool,
     ) -> Result<()> {
         if let Some(namespace) = &mut self.namespace {
             let bytes = relative.as_os_str().as_encoded_bytes().len();
-            let charge = bytes.saturating_add(32);
+            let charge = bytes.saturating_add(64);
             if charge
                 > self
                     .limits
@@ -284,7 +298,7 @@ pub(crate) fn walk_snapshot(
     observations.sort_unstable_by(|a, b| a.relative.components().cmp(b.relative.components()));
     let mut hasher = blake3::Hasher::new();
     limits.fingerprint(&mut hasher);
-    hasher.update(b"loom.directory.namespace.v1\0");
+    hasher.update(b"loom.directory.namespace.v2\0");
     let mut file_identities = Vec::new();
     let mut directories = Vec::new();
     for NamespaceObservation {
@@ -300,6 +314,8 @@ pub(crate) fn walk_snapshot(
         hasher.update(path);
         hasher.update(&stamp);
         if let Some(identity) = identity {
+            hasher.update(&identity.2 .0.to_le_bytes());
+            hasher.update(&identity.2 .1.to_le_bytes());
             file_identities.push(identity);
         }
         if directory {
@@ -522,9 +538,28 @@ mod unix_backend {
                 .map_err(|error| io_error(&path, error.into()))?;
             let before = statat(fd, name, AtFlags::SYMLINK_NOFOLLOW)
                 .map_err(|error| namespace_error(&path, error))?;
-            #[allow(clippy::unnecessary_cast)]
-            let identity = (FileType::from_raw_mode(before.st_mode) == FileType::RegularFile)
-                .then_some((before.st_dev as u64, before.st_ino as u64));
+            let identity = if budget.namespace.is_some()
+                && FileType::from_raw_mode(before.st_mode) == FileType::RegularFile
+            {
+                let child = openat(
+                    fd,
+                    name,
+                    OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC | OFlags::NONBLOCK,
+                    Mode::empty(),
+                )
+                .map_err(|error| namespace_error(&path, error))?;
+                let metadata = fs::File::from(child)
+                    .metadata()
+                    .map_err(|error| io_error(&path, error))?;
+                #[allow(clippy::unnecessary_cast)]
+                let expected = (before.st_dev as u64, before.st_ino as u64);
+                if !metadata.is_file() || (metadata.dev(), metadata.ino()) != expected {
+                    return Err(changed(&path));
+                }
+                Some((expected.0, expected.1, birth_time(&metadata)?))
+            } else {
+                None
+            };
             budget.observe(
                 &relative,
                 namespace_stamp(&before),
