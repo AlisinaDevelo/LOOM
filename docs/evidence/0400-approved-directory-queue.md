@@ -2,7 +2,7 @@
 
 ## Scope and device
 
-Code verified at `0117922a449d1344b3e9521c8a4a7544052ff949`, based on main
+Code verified at `eb946e9e1b615e4464a9786541f82065a808b4e3`, based on main
 `6ef8993cca5ccd1a089b928c64821ef630530b4f`. Verification date: 2026-10-04.
 Device: MacBookPro17,1, Apple M1 arm64, 8 GiB RAM, macOS 26.6.2 build 25G83.
 Toolchains: Rust 1.96.0 and 1.88.0, Node 26.7.0, npm 11.19.0, Python 3.9.6.
@@ -20,8 +20,8 @@ See [the operational contract](../BACKGROUND_JOBS.md) for bounds and explicit ru
 This was a local command-by-command pipeline, not a successful hosted CI run or release approval.
 The security step failed; the overall verification is not globally green.
 
-- Full Rust workspace: **368 tests passed**, repeated against the committed candidate.
-- Rust 1.88 full-workspace/all-target check and **303 core/extraction tests**: PASS.
+- Full Rust workspace: **373 tests passed**, repeated against the committed candidate.
+- Rust 1.88 full-workspace/all-target check and **308 core/extraction tests**: PASS.
 - Full-workspace/all-target Clippy with warnings denied, format and diff checks: PASS.
 - Frontend lint/typecheck/build, **43 UI, 12 extension and 6 Markdown-tooling tests**: PASS.
 - Five-year manifest/graph and **33 Python repository tests**: PASS.
@@ -48,11 +48,14 @@ atomic publication/cursor rollback, namespace changes before final cleanup, and 
 killed-worker recovery both before and after a committed quantum. Live blocked extraction
 is interrupted/reaped by cancellation, revocation, purge, restore, OCR revision, and
 foreground canonical changes without publishing stale evidence.
+Normal foreground exact-file reparenting invalidates already-processed admission-absent units.
 
 Source reads validate the actual opened root and child before allocating/reading bytes.
 A deterministic preparation-to-open root replacement with the same hard-linked child inode
 is refused before extraction. Birth-time and root-change fixtures simulate device/inode ABA;
 these are not claims of forensic authenticity or hostile filesystem protection.
+Discovery carries descriptor-bound child birth time into admission; a simulated recycled inode
+between discovery and manifest insertion cannot be silently recaptured with a new identity.
 Missing/symlink/wrong-kind namespaces return typed source-change/refusal outcomes.
 
 Root/artifact/OCR purge invalidates matching work and removes manifest paths. A malformed
@@ -60,6 +63,9 @@ empty target refuses the entire purge without canonical deletion; explicit cance
 terminal diagnostic forgetting recover deletion. Canonical-only locator delete/update fences
 prevent absent/create/purge ABA on managed foreign-key-enabled connections. Portable and
 encrypted backup restore retain evidence but exclude/clear operational manifests and claims.
+Unknown v5 private runtime objects refuse purge and restore. Job-bound unit digests and
+canonical relations prevent malformed valid-shape units from evading artifact purge.
+Bulk deletion validates once in its writer transaction; a permit cannot apply to another connection.
 These are application-level deletion checks, not secure-erasure proofs for SQLite/WAL or storage.
 
 ## Small-fixture measurements and limitations
@@ -69,9 +75,9 @@ Measured helper quanta use a 25 ms sample interval and an installed address-spac
 
 | Unit | Helper wall ms | CPU ms | Peak resident bytes |
 | --- | ---: | ---: | ---: |
-| First text | 516 | 10 | 9,256,960 |
-| Second text | 56 | 4 | 9,273,344 |
-| PDF | 71 | 6 | 10,649,600 |
+| First text | 139 | 4 | 9,273,344 |
+| Second text | 67 | 4 | 9,273,344 |
+| PDF | 62 | 6 | 10,633,216 |
 
 These are three functional-fixture measurements, not a large-folder latency/memory gate.
 Admission/final discovery and capped reconciliation remain synchronous bounded phases.
@@ -93,10 +99,10 @@ only synthetic measurements and digests, not raw paths, logs or source documents
 
 | Artifact | SHA-256 |
 | --- | --- |
-| Staged CLI | `a5fcc37785e01bf81045f7538275d59deec30ef92c3223d953eb5d2fd420c259` |
+| Staged CLI | `7de0a5d574a5f70175a875d04ebd6382da2559d08c6f941d448edb4a30681c8d` |
 | Staged helper | `52c9e5f99fc181ed51df8ec030b9d6bd783c784571e9918024ed122eca683766` |
-| MSRV tests | `903681e2d26c6481474f8eb6a4a813c13ca496ba97fa68755614fb95e11e7bae` |
-| CLI measurements | `0869d753a0cf7940c57e74b9409b6cfd7ab5bc258d1a5b62eec713efa4b983ef` |
+| MSRV tests | `f7e2afa21f77bead3b9b38666b585f6e6d44d97264fbc3b5f8452c4036ee09d1` |
+| CLI measurements | `3a7983a2e715e3b5985ba33dfb68066204c11092a5dc9c875e902550906e2ec8` |
 
 Merged-main reproduction will be recorded separately after merge; this document does not
 claim the candidate has already merged or that the remaining engine acceptance gates passed.
