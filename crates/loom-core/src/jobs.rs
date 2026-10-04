@@ -1321,8 +1321,9 @@ mod tests {
 
     fn after_deliberate_test_drop<T>(mut operation: impl FnMut() -> Result<T>) -> Result<T> {
         // Other test threads can fork with a transient copy of the CLOEXEC lock
-        // descriptor. This applies only after a known owner release; production
-        // acquisition and all live-contention assertions remain immediate.
+        // descriptor. This applies only after a known logical owner release or
+        // test-child startup with no expected live owner; production acquisition
+        // and all live-contention assertions remain immediate.
         let start = Instant::now();
         loop {
             match operation() {
@@ -3557,7 +3558,18 @@ mod tests {
             return;
         };
         let library = Library::open_for_jobs(database).unwrap();
-        let mut worker = test_worker(&library).unwrap();
+        // The parent fixture has no live owner. Parallel test forks can
+        // still retain a CLOEXEC descriptor briefly, just as in drop/reacquire.
+        let mut worker = after_deliberate_test_drop(|| {
+            let acquisition = test_worker(&library);
+            if matches!(acquisition, Err(LoomError::JobWorkerBusy)) {
+                if let Some(blocked) = std::env::var_os("LOOM_TEST_JOB_LOCK_BLOCKED") {
+                    fs::write(blocked, "blocked").unwrap();
+                }
+            }
+            acquisition
+        })
+        .unwrap();
         let claim = worker.claim_at(now()).unwrap().unwrap();
         let target: Option<String> = worker
             .library
@@ -3583,6 +3595,82 @@ mod tests {
         loop {
             std::thread::park();
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn process_child_recovers_after_a_released_owners_descriptor_copy_closes() {
+        let (directory, library) = fixture();
+        let job = library
+            .enqueue_fts_repair("inherited-lock-copy", JobPriority::Normal)
+            .unwrap();
+        let canonical = library.export_portable().unwrap().digest;
+        let owner = test_worker(&library).unwrap();
+        // A duplicate shares the same open file description, as an unrelated
+        // test thread's fork does before CLOEXEC. The logical owner is released.
+        let inherited = owner._ownership.try_clone().unwrap();
+        drop(owner);
+        assert!(matches!(
+            test_worker(&library),
+            Err(LoomError::JobWorkerBusy)
+        ));
+        let ready = directory.path().join("child-ready");
+        let blocked = directory.path().join("child-blocked");
+        let child = Command::new(std::env::current_exe().unwrap())
+            .args(["jobs::tests::process_lock_child", "--exact", "--nocapture"])
+            .env(
+                "LOOM_TEST_JOB_LOCK_DATABASE",
+                directory.path().join("queue.sqlite3"),
+            )
+            .env("LOOM_TEST_JOB_LOCK_READY", &ready)
+            .env("LOOM_TEST_JOB_LOCK_BLOCKED", &blocked)
+            .stdout(Stdio::null())
+            .spawn()
+            .unwrap();
+        let mut child = ChildGuard(child);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !blocked.exists() && Instant::now() < deadline {
+            assert!(
+                child.0.try_wait().unwrap().is_none(),
+                "child exited before observing the copy"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(
+            blocked.exists(),
+            "child did not observe the retained descriptor"
+        );
+        assert!(!ready.exists(), "child took over a still-locked descriptor");
+        assert_eq!(
+            library.background_job(&job.id).unwrap().state,
+            JobState::Queued
+        );
+        assert_eq!(library.export_portable().unwrap().digest, canonical);
+        drop(inherited);
+        while !ready.exists() && Instant::now() < deadline {
+            assert!(
+                child.0.try_wait().unwrap().is_none(),
+                "child exited before locking"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(ready.exists(), "child did not acquire the released lock");
+        assert!(matches!(
+            test_worker(&library),
+            Err(LoomError::JobWorkerBusy)
+        ));
+        assert_eq!(
+            library.background_job(&job.id).unwrap().state,
+            JobState::Running
+        );
+        assert_eq!(library.export_portable().unwrap().digest, canonical);
+        child.0.kill().unwrap();
+        child.0.wait().unwrap();
+        let mut recovered = reacquire_after_deliberate_test_drop(&library).unwrap();
+        let completed = recovered.run_next().unwrap().unwrap();
+        assert_eq!(completed.id, job.id);
+        assert_eq!(completed.state, JobState::Completed);
+        assert_eq!(completed.attempts, 2);
     }
 
     #[test]
@@ -3636,7 +3724,7 @@ mod tests {
             assert_eq!(library.export_portable().unwrap().digest, canonical);
             child.0.kill().unwrap();
             child.0.wait().unwrap();
-            let mut recovered = test_worker(&library).unwrap();
+            let mut recovered = reacquire_after_deliberate_test_drop(&library).unwrap();
             let completed = recovered.run_next().unwrap().unwrap();
             assert_eq!(completed.state, JobState::Completed);
             assert_eq!(completed.id, job.id);
