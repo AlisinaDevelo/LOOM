@@ -39,6 +39,12 @@ use crate::{
     },
 };
 
+mod directory_jobs;
+
+pub(crate) fn validate_directory_targets_for_purge(connection: &Connection) -> Result<()> {
+    directory_jobs::validate_targets_for_purge(connection)
+}
+
 type BookmarkRecordProjection = (
     String,
     String,
@@ -3459,8 +3465,37 @@ impl Library {
         {
             return Err(LoomError::OcrDisabled);
         }
-        let stable =
-            ingest::read_stable_bytes(path, path, self.limits.max_file_bytes.min(8 * 1024 * 1024))?;
+        let (document, extraction_metrics) =
+            self.prepare_queued_document(path, path, media_type, supervisor, None, || {
+                self.probe_file_job(claim, json, &target, &snapshot)
+            })?;
+        Ok(PreparedFileJob {
+            target,
+            target_json: json.to_owned(),
+            snapshot,
+            document,
+            extraction_metrics,
+        })
+    }
+
+    /// Shared bounded provider work; scope-specific wrappers must fence the claim and capability.
+    fn prepare_queued_document(
+        &self,
+        path: &Path,
+        root: &Path,
+        media_type: &'static str,
+        supervisor: Option<&loom_extraction::ExtractionSupervisor>,
+        bytes: Option<ingest::StableBytes>,
+        mut probe: impl FnMut() -> Result<()>,
+    ) -> Result<(PreparedIndexDocument, loom_extraction::ExtractionMetrics)> {
+        let stable = match bytes {
+            Some(bytes) => bytes,
+            None => ingest::read_stable_bytes(
+                path,
+                root,
+                self.limits.max_file_bytes.min(8 * 1024 * 1024),
+            )?,
+        };
         let media = loom_extraction::MediaKind::from_mime(media_type)?;
         let mut budget = loom_extraction::ExtractionBudget::for_media(media);
         budget.max_pdf_pages = self.limits.max_pdf_pages.min(2048) as u32;
@@ -3473,9 +3508,7 @@ impl Library {
             }
         };
         let output = supervisor
-            .extract(&stable.bytes, media, budget, || {
-                self.probe_file_job(claim, json, &target, &snapshot)
-            })
+            .extract(&stable.bytes, media, budget, &mut probe)
             .map_err(|error| match error {
                 loom_extraction::RunError::Extraction(error) => LoomError::from(error),
                 loom_extraction::RunError::Interrupted(error) => error,
@@ -3500,7 +3533,7 @@ impl Library {
             ),
             _ => (EXTRACTOR_ID, EXTRACTOR_VERSION),
         };
-        if document.media_type != target.media_type {
+        if document.media_type != media_type {
             return Err(LoomError::JobQueue("file media type changed".into()));
         }
         let document = PreparedIndexDocument::new(
@@ -3513,13 +3546,7 @@ impl Library {
         if document.passages.len() > 8192 {
             return Err(LoomError::JobQueue("queued passages exceed 8192".into()));
         }
-        Ok(PreparedFileJob {
-            target,
-            target_json: json.to_owned(),
-            snapshot,
-            document,
-            extraction_metrics: output.metrics,
-        })
+        Ok((document, output.metrics))
     }
 
     /// Short DB-only probe: no source access or five-second SQLite busy wait while a child runs.

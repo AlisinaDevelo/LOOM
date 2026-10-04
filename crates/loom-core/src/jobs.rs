@@ -115,6 +115,18 @@ pub struct BackgroundJob {
     pub ready_at_ms: i64,
     pub last_error: Option<String>,
     pub result: Option<serde_json::Value>,
+    pub directory_progress: Option<DirectoryProgress>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DirectoryProgress {
+    pub total_units: u32,
+    pub next_unit: u32,
+    pub indexed: u32,
+    pub unchanged: u32,
+    pub skipped: u32,
+    pub bytes_read: u64,
+    pub last_extraction: Option<loom_extraction::ExtractionMetrics>,
 }
 
 const RUNTIME_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS background_job_runtime(
@@ -144,7 +156,7 @@ const RUNTIME_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS background_job_runtime(
          ) STRICT;
          CREATE INDEX IF NOT EXISTS background_jobs_ready ON background_jobs(state, ready_at_ms, sequence);";
 
-fn current_runtime_schema() -> String {
+fn runtime_schema_v4() -> String {
     RUNTIME_SCHEMA
         .replace("CHECK(operation = 'fts_repair')", "CHECK(operation IN ('fts_repair','index_file'))")
         .replace(
@@ -154,6 +166,91 @@ fn current_runtime_schema() -> String {
                 OR (operation = 'index_file' AND target_json IS NOT NULL)),
             CHECK((state = 'running'",
         )
+}
+
+const RUNTIME_SCHEMA_V5: &str = "CREATE TABLE IF NOT EXISTS background_job_runtime(
+    slot INTEGER PRIMARY KEY CHECK(slot = 1),
+    epoch INTEGER NOT NULL CHECK(epoch >= 0),
+    next_sequence INTEGER NOT NULL CHECK(next_sequence >= 1),
+    priority_streak INTEGER NOT NULL CHECK(priority_streak BETWEEN 0 AND 8),
+    policy_json TEXT NOT NULL
+) STRICT;
+CREATE TABLE IF NOT EXISTS background_jobs(
+    id TEXT PRIMARY KEY,
+    idempotency_key TEXT NOT NULL UNIQUE CHECK(length(idempotency_key) BETWEEN 1 AND 128),
+    operation TEXT NOT NULL CHECK(operation IN ('fts_repair','index_file','index_directory')),
+    priority INTEGER NOT NULL CHECK(priority BETWEEN 0 AND 2),
+    state TEXT NOT NULL CHECK(state IN ('queued','running','retryable','failed','cancelled','completed')),
+    attempts INTEGER NOT NULL CHECK(attempts BETWEEN 0 AND 8),
+    max_attempts INTEGER NOT NULL CHECK(max_attempts BETWEEN 1 AND 8),
+    sequence INTEGER NOT NULL UNIQUE CHECK(sequence > 0),
+    ready_at_ms INTEGER NOT NULL,
+    epoch INTEGER,
+    claim_token TEXT,
+    cancel_requested INTEGER NOT NULL DEFAULT 0 CHECK(cancel_requested IN (0,1)),
+    last_error TEXT CHECK(length(CAST(last_error AS BLOB)) <= 4096),
+    result_json TEXT CHECK(length(CAST(result_json AS BLOB)) <= 65536 AND json_valid(result_json)),
+    target_json TEXT CHECK(length(CAST(target_json AS BLOB)) <= 16384 AND json_valid(target_json)),
+    CHECK((operation = 'fts_repair' AND target_json IS NULL)
+        OR (operation IN ('index_file','index_directory') AND target_json IS NOT NULL)),
+    CHECK((state = 'running' AND epoch IS NOT NULL AND claim_token IS NOT NULL)
+        OR (state != 'running' AND epoch IS NULL AND claim_token IS NULL))
+) STRICT;
+CREATE INDEX IF NOT EXISTS background_jobs_ready ON background_jobs(state, ready_at_ms, sequence);
+CREATE TABLE IF NOT EXISTS background_directory_manifests(
+    job_id TEXT PRIMARY KEY REFERENCES background_jobs(id) ON DELETE CASCADE,
+    root_id TEXT NOT NULL CHECK(length(root_id) = 36),
+    root_locator TEXT NOT NULL CHECK(length(CAST(root_locator AS BLOB)) BETWEEN 1 AND 4096),
+    encoded_bytes INTEGER NOT NULL CHECK(encoded_bytes BETWEEN 0 AND 67108864),
+    total_units INTEGER NOT NULL CHECK(total_units BETWEEN 0 AND 20000),
+    next_unit INTEGER NOT NULL DEFAULT 0 CHECK(next_unit BETWEEN 0 AND total_units),
+    indexed INTEGER NOT NULL DEFAULT 0 CHECK(indexed BETWEEN 0 AND total_units),
+    unchanged INTEGER NOT NULL DEFAULT 0 CHECK(unchanged BETWEEN 0 AND total_units),
+    skipped INTEGER NOT NULL DEFAULT 0 CHECK(skipped BETWEEN 0 AND total_units),
+    bytes_read INTEGER NOT NULL DEFAULT 0 CHECK(bytes_read BETWEEN 0 AND 167772160000),
+    last_extraction_json TEXT CHECK(length(CAST(last_extraction_json AS BLOB)) <= 4096 AND json_valid(last_extraction_json)),
+    CHECK(indexed + unchanged + skipped = next_unit)
+) STRICT;
+CREATE TABLE IF NOT EXISTS background_directory_units(
+    job_id TEXT NOT NULL REFERENCES background_directory_manifests(job_id) ON DELETE CASCADE,
+    ordinal INTEGER NOT NULL CHECK(ordinal BETWEEN 0 AND 19999),
+    relative_path TEXT NOT NULL CHECK(length(CAST(relative_path AS BLOB)) BETWEEN 1 AND 4096),
+    locator TEXT NOT NULL CHECK(length(CAST(locator AS BLOB)) BETWEEN 1 AND 4096),
+    media_type TEXT,
+    identity_json TEXT NOT NULL CHECK(length(CAST(identity_json AS BLOB)) <= 256 AND json_valid(identity_json)),
+    artifact_id TEXT,
+    PRIMARY KEY(job_id, ordinal),
+    UNIQUE(job_id, locator)
+) STRICT;
+CREATE INDEX IF NOT EXISTS background_directory_unit_locator ON background_directory_units(locator, job_id);
+CREATE INDEX IF NOT EXISTS background_directory_artifact_root ON artifacts(source_root_id, state, id);
+CREATE INDEX IF NOT EXISTS background_directory_artifact_locator ON artifact_locators(artifact_id, kind, active, locator);";
+
+// A canonical-only writer can delete a newly created artifact after an empty admission. Its
+// locator deletion must also invalidate the manifest: NULL -> artifact -> NULL is not consent.
+const DIRECTORY_DELETE_FENCE: &str =
+    "CREATE TRIGGER IF NOT EXISTS background_directory_locator_deleted
+AFTER DELETE ON artifact_locators WHEN OLD.kind = 'file'
+BEGIN
+    DELETE FROM background_jobs WHERE operation='index_directory' AND id IN
+        (SELECT job_id FROM background_directory_units WHERE locator = OLD.locator);
+END";
+
+const DIRECTORY_UPDATE_FENCE: &str =
+    "CREATE TRIGGER IF NOT EXISTS background_directory_locator_changed
+AFTER UPDATE OF locator,artifact_id,kind,active ON artifact_locators
+WHEN OLD.kind='file' AND (NEW.locator<>OLD.locator OR NEW.artifact_id<>OLD.artifact_id
+    OR NEW.kind<>OLD.kind OR (OLD.active=1 AND NEW.active=0))
+BEGIN
+    DELETE FROM background_jobs WHERE operation='index_directory' AND id IN
+        (SELECT job_id FROM background_directory_units WHERE locator IN (OLD.locator,NEW.locator));
+END";
+
+fn create_runtime_v5(connection: &Connection) -> Result<()> {
+    connection.execute_batch(RUNTIME_SCHEMA_V5)?;
+    connection.execute_batch(DIRECTORY_DELETE_FENCE)?;
+    connection.execute_batch(DIRECTORY_UPDATE_FENCE)?;
+    Ok(())
 }
 
 pub(crate) fn ensure_schema(connection: &Connection) -> Result<()> {
@@ -171,7 +268,7 @@ pub(crate) fn ensure_schema(connection: &Connection) -> Result<()> {
         return Ok(());
     }
     let existing: bool = transaction.query_row(
-        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name = 'background_jobs')",
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name GLOB 'background_*')",
         [],
         |row| row.get(0),
     )?;
@@ -179,13 +276,13 @@ pub(crate) fn ensure_schema(connection: &Connection) -> Result<()> {
         // Existing runtimes migrate only through an explicit kernel-owned upgrade.
         return Ok(());
     }
-    transaction.execute_batch(&current_runtime_schema())?;
+    create_runtime_v5(&transaction)?;
     transaction.execute(
         "INSERT INTO background_job_runtime VALUES (1, 0, 1, 0, ?1) ON CONFLICT(slot) DO NOTHING",
         [serde_json::to_string(&JobQueuePolicy::default())?],
     )?;
     transaction.execute(
-        "INSERT INTO schema_meta(key,value) VALUES ('background_job_schema_version','4')",
+        "INSERT INTO schema_meta(key,value) VALUES ('background_job_schema_version','5')",
         [],
     )?;
     transaction.commit()?;
@@ -202,17 +299,18 @@ fn upgrade_runtime(connection: &Connection) -> Result<()> {
             |row| row.get(0),
         )
         .optional()?;
-    if version.as_deref() == Some("4") {
+    if version.as_deref() == Some("5") {
         return validate_schema(connection);
     }
     let recognized = match version.as_deref() {
-        Some("3") => validate_definitions(connection, &current_runtime_schema()),
+        Some("3" | "4") => validate_definitions(connection, &runtime_schema_v4()),
         Some("2") => validate_definitions(connection, RUNTIME_SCHEMA),
         None => validate_definitions(connection, RUNTIME_SCHEMA)
             .or_else(|_| validate_definitions(connection, &legacy_runtime_schema())),
         _ => Err(LoomError::JobQueue("unsupported runtime upgrade".into())),
     };
     recognized?;
+    refuse_directory_objects(connection)?;
     let policy = load_policy(connection)?;
     let count: u32 =
         connection.query_row("SELECT COUNT(*) FROM background_jobs", [], |row| row.get(0))?;
@@ -225,17 +323,23 @@ fn upgrade_runtime(connection: &Connection) -> Result<()> {
         "ALTER TABLE background_jobs RENAME TO background_jobs_previous;
         DROP INDEX background_jobs_ready;",
     )?;
-    connection.execute_batch(&current_runtime_schema())?;
-    let copy = if version.as_deref() == Some("3") {
-        "INSERT INTO background_jobs SELECT * FROM background_jobs_previous"
+    create_runtime_v5(connection)?;
+    let columns = "id,idempotency_key,operation,priority,state,attempts,max_attempts,sequence,
+        ready_at_ms,epoch,claim_token,cancel_requested,last_error,result_json";
+    let target = if matches!(version.as_deref(), Some("3" | "4")) {
+        "target_json"
     } else {
-        "INSERT INTO background_jobs SELECT *, NULL FROM background_jobs_previous"
+        "NULL"
     };
+    let copy = format!(
+        "INSERT INTO background_jobs({columns},target_json)
+        SELECT {columns},{target} FROM background_jobs_previous"
+    );
     // Reapply STRICT/CHECK constraints to every bounded retained row, including v3.
-    connection.execute(copy, [])?;
+    connection.execute(&copy, [])?;
     connection.execute("DROP TABLE background_jobs_previous", [])?;
     connection.execute(
-        "INSERT INTO schema_meta(key,value) VALUES ('background_job_schema_version','4')
+        "INSERT INTO schema_meta(key,value) VALUES ('background_job_schema_version','5')
          ON CONFLICT(key) DO UPDATE SET value=excluded.value",
         [],
     )?;
@@ -251,33 +355,51 @@ fn legacy_runtime_schema() -> String {
         )
 }
 
+fn refuse_directory_objects(connection: &Connection) -> Result<()> {
+    let extra: bool = connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE
+        name GLOB 'background_directory_*')",
+        [],
+        |row| row.get(0),
+    )?;
+    if extra {
+        return Err(LoomError::JobQueue(
+            "older runtime contains unknown directory objects; operation refused".into(),
+        ));
+    }
+    Ok(())
+}
+
 fn validate_definitions(connection: &Connection, schema: &str) -> Result<()> {
+    for definition in schema.split(';').filter(|sql| !sql.trim().is_empty()) {
+        let name = definition
+            .split_whitespace()
+            .nth(5)
+            .and_then(|name| name.split('(').next())
+            .ok_or_else(|| LoomError::JobQueue("invalid runtime definition".into()))?;
+        validate_definition(connection, name, definition)?;
+    }
+    Ok(())
+}
+
+fn validate_definition(connection: &Connection, name: &str, definition: &str) -> Result<()> {
     fn normalized(sql: &str) -> String {
         sql.split_whitespace()
             .collect::<String>()
             .to_ascii_lowercase()
             .replace("ifnotexists", "")
     }
-    for definition in schema.split(';').filter(|sql| !sql.trim().is_empty()) {
-        let name = if definition.contains("CREATE INDEX") {
-            "background_jobs_ready"
-        } else if definition.contains("background_job_runtime(") {
-            "background_job_runtime"
-        } else {
-            "background_jobs"
-        };
-        let actual: Option<String> = connection
-            .query_row(
-                "SELECT sql FROM sqlite_master WHERE name = ?1",
-                [name],
-                |row| row.get(0),
-            )
-            .optional()?;
-        if actual.as_deref().map(normalized) != Some(normalized(definition)) {
-            return Err(LoomError::JobQueue(format!(
-                "missing or unsupported runtime schema: {name}"
-            )));
-        }
+    let actual: Option<String> = connection
+        .query_row(
+            "SELECT sql FROM sqlite_master WHERE name=?1",
+            [name],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if actual.as_deref().map(normalized) != Some(normalized(definition)) {
+        return Err(LoomError::JobQueue(format!(
+            "missing or unsupported runtime schema: {name}"
+        )));
     }
     Ok(())
 }
@@ -291,12 +413,22 @@ fn validate_runtime_layout(connection: &Connection) -> Result<()> {
             |row| row.get(0),
         )
         .optional()?;
-    if version.as_deref() != Some("4") {
+    if version.as_deref() != Some("5") {
         return Err(LoomError::JobQueue(
             "unsupported or unmigrated runtime schema; explicitly run upgrade-job-runtime".into(),
         ));
     }
-    validate_definitions(connection, &current_runtime_schema())?;
+    validate_definitions(connection, RUNTIME_SCHEMA_V5)?;
+    validate_definition(
+        connection,
+        "background_directory_locator_deleted",
+        DIRECTORY_DELETE_FENCE,
+    )?;
+    validate_definition(
+        connection,
+        "background_directory_locator_changed",
+        DIRECTORY_UPDATE_FENCE,
+    )?;
     Ok(())
 }
 
@@ -330,7 +462,10 @@ fn next_sequence(connection: &Connection) -> Result<i64> {
 }
 
 pub(crate) fn reset_for_restore(connection: &Connection) -> Result<()> {
+    validate_runtime_layout(connection)?;
     advance_epoch(connection)?;
+    connection.execute("DELETE FROM background_directory_units", [])?;
+    connection.execute("DELETE FROM background_directory_manifests", [])?;
     connection.execute("DELETE FROM background_jobs", [])?;
     connection.execute(
         "UPDATE background_job_runtime SET priority_streak = 0 WHERE slot = 1",
@@ -341,7 +476,7 @@ pub(crate) fn reset_for_restore(connection: &Connection) -> Result<()> {
 
 fn purge_runtime_recovery_error() -> LoomError {
     LoomError::JobQueue(
-        "deletion refused: no data was deleted because the durable job runtime is unsupported or malformed; use a compatible LOOM release or run the owned upgrade-job-runtime migration before retrying".into(),
+        "deletion refused: no data was deleted because the durable job runtime is unsupported or malformed; use a compatible LOOM release or run the owned upgrade-job-runtime migration before retrying. For malformed target diagnostics, inspect jobs, cancel-job, then forget-job before retrying".into(),
     )
 }
 
@@ -384,7 +519,10 @@ pub(crate) fn purge_file_targets(
     if version.as_deref() == Some("3") {
         return Err(purge_runtime_recovery_error());
     }
-    if version.as_deref() != Some("4") {
+    if version.as_deref() != Some("5") {
+        refuse_directory_objects(connection).map_err(|_| purge_runtime_recovery_error())?;
+    }
+    if !matches!(version.as_deref(), Some("4" | "5")) {
         if version.as_deref() == Some("2") {
             validate_definitions(connection, RUNTIME_SCHEMA)
                 .map_err(|_| purge_runtime_recovery_error())?;
@@ -397,7 +535,14 @@ pub(crate) fn purge_file_targets(
         }
         return Ok(());
     }
-    validate_runtime_layout(connection).map_err(|_| purge_runtime_recovery_error())?;
+    if version.as_deref() == Some("4") {
+        validate_definitions(connection, &runtime_schema_v4())
+            .map_err(|_| purge_runtime_recovery_error())?;
+    } else {
+        validate_runtime_layout(connection).map_err(|_| purge_runtime_recovery_error())?;
+        crate::store::validate_directory_targets_for_purge(connection)
+            .map_err(|_| purge_runtime_recovery_error())?;
+    }
     validate_purge_runtime_row(connection).map_err(|_| purge_runtime_recovery_error())?;
     connection.execute(
         "DELETE FROM background_jobs WHERE operation='index_file' AND (
@@ -412,6 +557,21 @@ pub(crate) fn purge_file_targets(
             OR (?3=1 AND json_extract(target_json,'$.media_type') LIKE 'image/%'))",
         params![locator, artifact_id, images],
     )?;
+    if version.as_deref() == Some("5") {
+        connection.execute(
+            "DELETE FROM background_jobs WHERE operation='index_directory' AND (
+                (?1 IS NOT NULL AND (json_extract(target_json,'$.locator')=?1
+                    OR id IN (SELECT job_id FROM background_directory_manifests
+                        WHERE root_locator=?1 OR root_id IN (SELECT id FROM source_roots WHERE locator=?1))
+                    OR id IN (SELECT job_id FROM background_directory_units WHERE locator=?1)))
+                OR (?2 IS NOT NULL AND id IN (SELECT job_id FROM background_directory_units
+                    WHERE artifact_id=?2 OR locator IN
+                        (SELECT locator FROM artifact_locators WHERE artifact_id=?2 AND kind='file')))
+                OR (?3=1 AND (json_extract(target_json,'$.authorization.ocr_policy') IS NOT NULL
+                    OR id IN (SELECT job_id FROM background_directory_units WHERE media_type LIKE 'image/%'))))",
+            params![locator, artifact_id, images],
+        )?;
+    }
     Ok(())
 }
 
@@ -437,15 +597,42 @@ fn get_job(connection: &Connection, id: &str) -> Result<BackgroundJob> {
             row.get::<_, i64>(8)?, row.get::<_, Option<String>>(9)?, row.get::<_, Option<String>>(10)?,
             row.get::<_, Option<String>>(11)?)),
     ).optional()?.ok_or_else(|| LoomError::JobQueue(format!("job not found: {id}")))?;
+    let directory_progress = if raw.2 == "index_directory" {
+        connection
+            .query_row(
+            "SELECT total_units,next_unit,indexed,unchanged,skipped,bytes_read,last_extraction_json
+            FROM background_directory_manifests WHERE job_id=?1",
+                [id],
+                |row| {
+                    Ok(DirectoryProgress {
+                        total_units: row.get(0)?,
+                        next_unit: row.get(1)?,
+                        indexed: row.get(2)?,
+                        unchanged: row.get(3)?,
+                        skipped: row.get(4)?,
+                    bytes_read: row_bytes(row, 5)?,
+                    last_extraction: row_metrics(row, 6)?,
+                    })
+                },
+            )
+            .optional()?
+    } else {
+        None
+    };
     Ok(BackgroundJob {
         id: raw.0,
         idempotency_key: raw.1,
         operation: raw.2,
         // Invalid typed payloads must remain inspectable after a failed dispatch.
         target_locator: raw.11.as_deref().and_then(|json| {
-            serde_json::from_str::<crate::store::IndexFileTarget>(json)
+            serde_json::from_str::<serde_json::Value>(json)
                 .ok()
-                .map(|target| target.locator)
+                .and_then(|target| {
+                    target
+                        .get("locator")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_owned)
+                })
         }),
         state: JobState::parse(&raw.3)?,
         priority: JobPriority::parse(raw.4)?,
@@ -458,7 +645,30 @@ fn get_job(connection: &Connection, id: &str) -> Result<BackgroundJob> {
             .10
             .map(|value| serde_json::from_str(&value))
             .transpose()?,
+        directory_progress,
     })
+}
+
+pub(crate) fn row_bytes(row: &rusqlite::Row<'_>, index: usize) -> rusqlite::Result<u64> {
+    let value: i64 = row.get(index)?;
+    u64::try_from(value).map_err(|_| rusqlite::Error::IntegralValueOutOfRange(index, value))
+}
+
+pub(crate) fn row_metrics(
+    row: &rusqlite::Row<'_>,
+    index: usize,
+) -> rusqlite::Result<Option<loom_extraction::ExtractionMetrics>> {
+    row.get::<_, Option<String>>(index)?
+        .map(|json| {
+            serde_json::from_str(&json).map_err(|error| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    index,
+                    rusqlite::types::Type::Text,
+                    Box::new(error),
+                )
+            })
+        })
+        .transpose()
 }
 
 impl Library {
@@ -521,6 +731,33 @@ impl Library {
         Ok(job)
     }
 
+    /// Complete finite metadata discovery before admitting one already-approved directory.
+    /// This does not grant/reselect consent and does not read or extract file content.
+    pub fn enqueue_index_directory(
+        &self,
+        path: impl AsRef<Path>,
+        key: &str,
+        priority: JobPriority,
+    ) -> Result<BackgroundJob> {
+        validate_key(key)?;
+        // Validate runtime before walking, but hold neither SQLite nor a source-grant transaction.
+        drop(self.queue_connection()?);
+        let admission = self.prepare_directory_admission(path.as_ref())?;
+        let mut connection = self.queue_connection()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let json = admission.target_json(&transaction)?;
+        let existing: bool = transaction.query_row(
+            "SELECT EXISTS(SELECT 1 FROM background_jobs WHERE idempotency_key=?1)",
+            [key],
+            |row| row.get(0),
+        )?;
+        let job = admit(&transaction, key, priority, "index_directory", Some(&json))?;
+        admission.insert_manifest(&transaction, &job, existing)?;
+        let job = get_job(&transaction, &job.id)?;
+        transaction.commit()?;
+        Ok(job)
+    }
+
     pub fn background_job(&self, id: &str) -> Result<BackgroundJob> {
         get_job(&*self.queue_connection()?, id)
     }
@@ -548,6 +785,11 @@ impl Library {
             "UPDATE background_jobs SET cancel_requested = 1,
                 state = CASE WHEN state = 'running' THEN state ELSE 'cancelled' END
              WHERE id = ?1 AND state IN ('queued','running','retryable')",
+            [id],
+        )?;
+        transaction.execute(
+            "DELETE FROM background_directory_manifests WHERE job_id=?1
+            AND (SELECT state FROM background_jobs WHERE id=?1)='cancelled'",
             [id],
         )?;
         let job = get_job(&transaction, id)?;
@@ -679,6 +921,11 @@ impl JobWorker {
                     last_error = 'worker stopped before completion' WHERE state = 'running'",
                 [Utc::now().timestamp_millis()],
             )?;
+            transaction.execute(
+                "DELETE FROM background_directory_manifests WHERE job_id IN
+                (SELECT id FROM background_jobs WHERE state IN ('cancelled','failed'))",
+                [],
+            )?;
             transaction.commit()?;
             epoch
         };
@@ -800,6 +1047,10 @@ pub(crate) struct JobClaim {
 }
 
 impl JobClaim {
+    pub(crate) fn id(&self) -> &str {
+        &self.id
+    }
+
     pub(crate) fn verify_operation(
         &self,
         connection: &Connection,
@@ -841,6 +1092,25 @@ impl JobClaim {
                 AND epoch = ?3 AND claim_token = ?4 AND cancel_requested = 0",
             params![result, self.id, self.epoch, self.token],
         )?;
+        if changed != 1 {
+            return Err(LoomError::JobClaimStale(self.id.clone()));
+        }
+        connection.execute(
+            "DELETE FROM background_directory_manifests WHERE job_id=?1",
+            [&self.id],
+        )?;
+        get_job(connection, &self.id)
+    }
+
+    /// A successful bounded quantum is not a retry. Append it to the queue for fairness, keeping
+    /// publication/cursor advancement and claim release in the caller's writer transaction.
+    pub(crate) fn yield_progress(&self, connection: &Connection) -> Result<BackgroundJob> {
+        self.verify(connection)?;
+        let sequence = next_sequence(connection)?;
+        let changed = connection.execute("UPDATE background_jobs SET state='queued', epoch=NULL,
+            claim_token=NULL, attempts=attempts-1, sequence=?1, ready_at_ms=?2, last_error=NULL
+            WHERE id=?3 AND state='running' AND epoch=?4 AND claim_token=?5 AND cancel_requested=0 AND attempts>0",
+            params![sequence, Utc::now().timestamp_millis(), self.id, self.epoch, self.token])?;
         if changed != 1 {
             return Err(LoomError::JobClaimStale(self.id.clone()));
         }
@@ -967,6 +1237,11 @@ impl JobWorker {
              WHERE id = ?5",
             params![retryable, reason, due, sequence, claim.id, cancelled],
         )?;
+        transaction.execute(
+            "DELETE FROM background_directory_manifests WHERE job_id=?1
+            AND (SELECT state FROM background_jobs WHERE id=?1) IN ('failed','cancelled')",
+            [&claim.id],
+        )?;
         let settled = get_job(&transaction, &claim.id)?;
         transaction.commit()?;
         Ok(settled)
@@ -999,6 +1274,10 @@ impl JobWorker {
                 ("index_file", Some(json)) => {
                     self.library
                         .job_index_file(&claim, json, self.extractor.as_ref())
+                }
+                ("index_directory", Some(json)) => {
+                    self.library
+                        .job_index_directory(&claim, json, self.extractor.as_ref())
                 }
                 _ => Err(LoomError::JobQueue("invalid operation or target".into())),
             }
@@ -1066,7 +1345,7 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(version, "4", "old workers must refuse before claiming work");
+        assert_eq!(version, "5", "old workers must refuse before claiming work");
     }
 
     #[cfg(target_os = "macos")]
@@ -1497,6 +1776,106 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn live_directory_helpers_obey_consent_purge_restore_ocr_and_cas_fences() {
+        for action in [
+            "cancel",
+            "revoke",
+            "purge",
+            "root-purge",
+            "restore",
+            "ocr",
+            "cas",
+        ] {
+            let (temporary, library) = fixture();
+            let root = temporary.path().join("selected");
+            fs::create_dir(&root).unwrap();
+            let root = root.canonicalize().unwrap();
+            library.set_ocr_enabled(false).unwrap();
+            library.index_path(&root).unwrap();
+            let source = root.join(if action == "ocr" { "a.png" } else { "a.md" });
+            fs::write(
+                &source,
+                if action == "ocr" {
+                    include_bytes!("../../../tests/fixtures/ocr-golden.png").as_slice()
+                } else {
+                    b"Existing directory marker"
+                },
+            )
+            .unwrap();
+            library.index_path(&root).unwrap();
+            if action == "ocr" {
+                library.set_ocr_enabled(true).unwrap();
+            }
+            let archive = library.export_portable().unwrap();
+            let job = library
+                .enqueue_index_directory(&root, "live-directory", JobPriority::Normal)
+                .unwrap();
+            let (_fault_dir, executable, pid) = fault_extractor("hang");
+            let mut worker = library
+                .acquire_job_worker()
+                .unwrap()
+                .with_extractor_path(executable)
+                .unwrap();
+            let started = Instant::now();
+            let thread = std::thread::spawn(move || worker.run_next());
+            wait_for_fixture(&pid);
+            match action {
+                "cancel" => {
+                    library.cancel_background_job(&job.id).unwrap();
+                }
+                "revoke" => {
+                    library.revoke_source_root(root.to_str().unwrap()).unwrap();
+                }
+                "purge" => {
+                    library
+                        .purge_artifact(&file_identity(&library, &source).0)
+                        .unwrap();
+                }
+                "root-purge" => {
+                    library.purge_root(root.to_str().unwrap()).unwrap();
+                }
+                "restore" => {
+                    // Empty canonical precondition without the public operational purge path.
+                    library
+                        .lock()
+                        .unwrap()
+                        .execute_batch("DELETE FROM artifacts; DELETE FROM source_roots;")
+                        .unwrap();
+                    library.import_portable(&archive).unwrap();
+                }
+                "ocr" => {
+                    library.set_ocr_enabled(true).unwrap();
+                }
+                "cas" => {
+                    fs::write(&source, "Foreground directory marker").unwrap();
+                    library.index_path(&root).unwrap();
+                }
+                _ => unreachable!(),
+            }
+            let controller = library.export_portable().unwrap().digest;
+            let outcome = thread.join().unwrap();
+            assert!(
+                started.elapsed() < Duration::from_secs(3),
+                "{action}: interruption delayed"
+            );
+            assert_fixture_reaped(&pid);
+            assert_eq!(
+                library.export_portable().unwrap().digest,
+                controller,
+                "{action}: stale publication"
+            );
+            match action {
+                "purge" | "root-purge" | "restore" => {
+                    assert!(outcome.is_err(), "{action}: {outcome:?}")
+                }
+                "cas" => assert_eq!(outcome.unwrap().unwrap().state, JobState::Retryable),
+                _ => assert_eq!(outcome.unwrap().unwrap().state, JobState::Cancelled),
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn provider_unavailability_is_failure_not_consent_cancellation_and_does_not_publish() {
         let (_directory, library, source) = file_fixture();
         let before = library.export_portable().unwrap().digest;
@@ -1653,14 +2032,7 @@ mod tests {
             .unwrap();
         let before = library.export_portable().unwrap().digest;
         let worker = test_worker(&library).unwrap();
-        library
-            .lock()
-            .unwrap()
-            .execute(
-                "UPDATE schema_meta SET value='3' WHERE key='background_job_schema_version'",
-                [],
-            )
-            .unwrap();
+        downgrade_file_runtime(&library, "3");
         assert!(matches!(
             library.upgrade_job_runtime(),
             Err(LoomError::JobWorkerBusy)
@@ -1672,7 +2044,12 @@ mod tests {
         library.upgrade_job_runtime().unwrap();
         assert_eq!(library.background_job(&queued.id).unwrap(), queued);
         assert_eq!(library.export_portable().unwrap().digest, before);
-        library.lock().unwrap().execute_batch("UPDATE schema_meta SET value='3' WHERE key='background_job_schema_version'; PRAGMA ignore_check_constraints=ON;").unwrap();
+        downgrade_file_runtime(&library, "3");
+        library
+            .lock()
+            .unwrap()
+            .execute_batch("PRAGMA ignore_check_constraints=ON;")
+            .unwrap();
         library
             .lock()
             .unwrap()
@@ -2949,6 +3326,7 @@ mod tests {
     fn downgrade_runtime_layout(library: &Library, versioned: bool) {
         let mut connection = library.lock().unwrap();
         let transaction = connection.transaction().unwrap();
+        drop_directory_fixture_objects(&transaction);
         transaction.execute_batch("ALTER TABLE background_jobs RENAME TO current_jobs; DROP INDEX background_jobs_ready;").unwrap();
         let schema = if versioned {
             RUNTIME_SCHEMA.to_owned()
@@ -2976,6 +3354,89 @@ mod tests {
         if versioned {
             library.lock().unwrap().execute("INSERT INTO schema_meta(key,value) VALUES ('background_job_schema_version','2')", []).unwrap();
         }
+    }
+
+    fn drop_directory_fixture_objects(connection: &Connection) {
+        connection
+            .execute_batch(
+                "DROP TRIGGER background_directory_locator_deleted;
+            DROP TRIGGER background_directory_locator_changed;
+            DROP INDEX background_directory_artifact_root;
+            DROP INDEX background_directory_artifact_locator;
+            DROP TABLE background_directory_units;
+            DROP TABLE background_directory_manifests;",
+            )
+            .unwrap();
+    }
+
+    fn downgrade_file_runtime(library: &Library, version: &str) {
+        let mut connection = library.lock().unwrap();
+        let transaction = connection.transaction().unwrap();
+        drop_directory_fixture_objects(&transaction);
+        transaction.execute_batch("ALTER TABLE background_jobs RENAME TO current_jobs; DROP INDEX background_jobs_ready;").unwrap();
+        transaction.execute_batch(&runtime_schema_v4()).unwrap();
+        transaction
+            .execute("INSERT INTO background_jobs SELECT * FROM current_jobs", [])
+            .unwrap();
+        transaction.execute("DROP TABLE current_jobs", []).unwrap();
+        transaction
+            .execute(
+                "UPDATE schema_meta SET value=?1 WHERE key='background_job_schema_version'",
+                [version],
+            )
+            .unwrap();
+        transaction.commit().unwrap();
+    }
+
+    #[test]
+    fn older_runtime_extra_directory_objects_cannot_silently_survive_purge() {
+        for version in ["legacy", "2", "4"] {
+            let temporary = tempdir().unwrap();
+            let library = Library::open(temporary.path().join("library.sqlite3")).unwrap();
+            let root = temporary.path().join("selected");
+            fs::create_dir(&root).unwrap();
+            fs::write(root.join("a.md"), "Retained evidence marker").unwrap();
+            library.index_path(&root).unwrap();
+            match version {
+                "legacy" => downgrade_runtime_layout(&library, false),
+                "2" => downgrade_runtime_layout(&library, true),
+                "4" => downgrade_file_runtime(&library, "4"),
+                _ => unreachable!(),
+            }
+            library
+                .lock()
+                .unwrap()
+                .execute_batch("CREATE TABLE background_directory_unknown(private_locator TEXT);")
+                .unwrap();
+            let before = library.export_portable().unwrap().digest;
+            assert!(
+                library
+                    .purge_root(root.to_str().unwrap())
+                    .unwrap_err()
+                    .to_string()
+                    .contains("no data was deleted"),
+                "{version}"
+            );
+            assert_eq!(library.export_portable().unwrap().digest, before);
+        }
+    }
+
+    #[test]
+    fn v4_file_runtime_upgrade_preserves_target_and_canonical_evidence() {
+        let (_temporary, library, source) = file_fixture();
+        let queued = library
+            .enqueue_index_file(&source, "v4-file", JobPriority::Normal)
+            .unwrap();
+        let before = library.export_portable().unwrap().digest;
+        downgrade_file_runtime(&library, "4");
+        assert!(library.acquire_job_worker().is_err());
+        library.upgrade_job_runtime().unwrap();
+        assert_eq!(library.background_job(&queued.id).unwrap(), queued);
+        assert_eq!(library.export_portable().unwrap().digest, before);
+        library.upgrade_job_runtime().unwrap();
+        let completed = test_worker(&library).unwrap().run_next().unwrap().unwrap();
+        assert_eq!(completed.id, queued.id);
+        assert_eq!(completed.state, JobState::Completed);
     }
 
     #[test]
@@ -3553,6 +4014,71 @@ mod tests {
     }
 
     #[test]
+    fn killed_directory_worker_recovers_before_and_after_atomic_quantum_commit() {
+        for published in [false, true] {
+            let (temporary, library) = fixture();
+            let root = temporary.path().join("selected");
+            fs::create_dir(&root).unwrap();
+            library.index_path(&root).unwrap();
+            for name in ["a.md", "b.md"] {
+                fs::write(root.join(name), name).unwrap();
+            }
+            let job = library
+                .enqueue_index_directory(&root, "directory-crash", JobPriority::Normal)
+                .unwrap();
+            let canonical = library.export_portable().unwrap().digest;
+            let ready = temporary.path().join("directory-ready");
+            let mut command = Command::new(std::env::current_exe().unwrap());
+            command
+                .args(["jobs::tests::process_lock_child", "--exact", "--nocapture"])
+                .env(
+                    "LOOM_TEST_JOB_LOCK_DATABASE",
+                    temporary.path().join("queue.sqlite3"),
+                )
+                .env("LOOM_TEST_JOB_LOCK_READY", &ready)
+                .stdout(Stdio::null());
+            if published {
+                command.env("LOOM_TEST_DIRECTORY_AFTER_QUANTUM", "1");
+            }
+            let mut child = ChildGuard(command.spawn().unwrap());
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while !ready.exists() && Instant::now() < deadline {
+                assert!(
+                    child.0.try_wait().unwrap().is_none(),
+                    "child exited before directory quantum"
+                );
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            assert!(ready.exists());
+            assert!(matches!(
+                test_worker(&library),
+                Err(LoomError::JobWorkerBusy)
+            ));
+            let before_kill = library.background_job(&job.id).unwrap();
+            assert_eq!(
+                before_kill.directory_progress.unwrap().next_unit,
+                u32::from(published)
+            );
+            if !published {
+                assert_eq!(library.export_portable().unwrap().digest, canonical);
+            }
+            child.0.kill().unwrap();
+            child.0.wait().unwrap();
+            let mut recovered = reacquire_after_deliberate_test_drop(&library).unwrap();
+            loop {
+                let quantum = recovered.run_next().unwrap().unwrap();
+                assert_eq!(quantum.id, job.id);
+                if quantum.state == JobState::Completed {
+                    break;
+                }
+                assert_eq!(quantum.state, JobState::Queued);
+            }
+            assert_eq!(library.stats().unwrap().artifacts, 2);
+            assert_eq!(library.stats().unwrap().versions, 2);
+        }
+    }
+
+    #[test]
     fn process_lock_child() {
         let Some(database) = std::env::var_os("LOOM_TEST_JOB_LOCK_DATABASE") else {
             return;
@@ -3571,22 +4097,41 @@ mod tests {
         })
         .unwrap();
         let claim = worker.claim_at(now()).unwrap().unwrap();
-        let target: Option<String> = worker
+        let (operation, target): (String, Option<String>) = worker
             .library
             .lock()
             .unwrap()
             .query_row(
-                "SELECT target_json FROM background_jobs WHERE id=?1",
+                "SELECT operation,target_json FROM background_jobs WHERE id=?1",
                 [&claim.id],
-                |row| row.get(0),
+                |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .unwrap();
-        let _prepared = target.as_deref().map(|json| {
+        let _prepared = target
+            .as_deref()
+            .filter(|_| operation == "index_file")
+            .map(|json| {
+                worker
+                    .library
+                    .prepare_file_job(&claim, json, Some(&test_extractor()))
+                    .unwrap()
+            });
+        let prepared_directory = target
+            .as_deref()
+            .filter(|_| operation == "index_directory")
+            .map(|json| {
+                worker
+                    .library
+                    .prepare_directory_file(&claim, json, Some(&test_extractor()))
+                    .unwrap()
+                    .unwrap()
+            });
+        if std::env::var_os("LOOM_TEST_DIRECTORY_AFTER_QUANTUM").is_some() {
             worker
                 .library
-                .prepare_file_job(&claim, json, Some(&test_extractor()))
-                .unwrap()
-        });
+                .publish_directory_file(&claim, prepared_directory.as_ref().unwrap())
+                .unwrap();
+        }
         fs::write(
             std::env::var_os("LOOM_TEST_JOB_LOCK_READY").unwrap(),
             "ready",
