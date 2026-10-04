@@ -281,7 +281,7 @@ pub(crate) fn ensure_schema(connection: &Connection) -> Result<()> {
         return Ok(());
     }
     let existing: bool = transaction.query_row(
-        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name GLOB 'background_*')",
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE lower(name) GLOB 'background_*')",
         [],
         |row| row.get(0),
     )?;
@@ -371,7 +371,7 @@ fn legacy_runtime_schema() -> String {
 fn refuse_directory_objects(connection: &Connection) -> Result<()> {
     let extra: bool = connection.query_row(
         "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE
-        name GLOB 'background_directory_*')",
+        lower(name) GLOB 'background_directory_*')",
         [],
         |row| row.get(0),
     )?;
@@ -447,8 +447,8 @@ fn validate_runtime_layout(connection: &Connection) -> Result<()> {
         "background_directory_artifact_changed",
         DIRECTORY_ARTIFACT_FENCE,
     )?;
-    let extra: bool = connection.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name GLOB 'background_*'
-        AND name NOT IN ('background_job_runtime','background_jobs','background_jobs_ready',
+    let extra: bool = connection.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE lower(name) GLOB 'background_*'
+        AND lower(name) NOT IN ('background_job_runtime','background_jobs','background_jobs_ready',
             'background_directory_manifests','background_directory_units','background_directory_unit_locator',
             'background_directory_unit_artifact','background_directory_artifact_root','background_directory_artifact_locator',
             'background_directory_locator_deleted','background_directory_locator_changed','background_directory_artifact_changed'))", [], |row| row.get(0))?;
@@ -1400,6 +1400,36 @@ mod tests {
         time::{Duration, Instant},
     };
     use tempfile::{tempdir, TempDir};
+
+    #[test]
+    fn partial_runtime_namespace_refuses_creation_regardless_of_case() {
+        for name in [
+            "background_unknown",
+            "BACKGROUND_UNKNOWN",
+            "Background_Unknown",
+        ] {
+            let connection = Connection::open_in_memory().unwrap();
+            connection
+                .execute_batch(&format!(
+                    "CREATE TABLE schema_meta(key TEXT PRIMARY KEY, value TEXT NOT NULL);
+                     CREATE TABLE {name}(private_locator TEXT);"
+                ))
+                .unwrap();
+            ensure_schema(&connection).unwrap();
+            let tables: i64 = connection
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE type='table'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(tables, 2, "{name}");
+            let markers: i64 = connection
+                .query_row("SELECT COUNT(*) FROM schema_meta", [], |row| row.get(0))
+                .unwrap();
+            assert_eq!(markers, 0, "{name}");
+        }
+    }
 
     #[test]
     fn fresh_queue_requires_supervised_extraction_runtime() {
@@ -3486,6 +3516,23 @@ mod tests {
                 "{version}"
             );
             assert_eq!(library.export_portable().unwrap().digest, before);
+            library
+                .lock()
+                .unwrap()
+                .execute_batch(
+                    "DROP TABLE background_directory_unknown;
+                CREATE TABLE BACKGROUND_DIRECTORY_UNKNOWN(private_locator TEXT);",
+                )
+                .unwrap();
+            assert!(
+                library
+                    .purge_root(root.to_str().unwrap())
+                    .unwrap_err()
+                    .to_string()
+                    .contains("no data was deleted"),
+                "{version}"
+            );
+            assert_eq!(library.export_portable().unwrap().digest, before);
         }
     }
 
@@ -3526,6 +3573,28 @@ mod tests {
             )
             .unwrap();
         assert_eq!(retained, "synthetic-private-locator");
+        library
+            .lock()
+            .unwrap()
+            .execute_batch(
+                "DROP TABLE background_directory_unknown;
+            CREATE TABLE BACKGROUND_DIRECTORY_UNKNOWN(private_locator TEXT);",
+            )
+            .unwrap();
+        assert!(library
+            .purge_root("/synthetic-absent-root")
+            .unwrap_err()
+            .to_string()
+            .contains("no data was deleted"));
+        assert!(library
+            .import_portable(&export)
+            .unwrap_err()
+            .to_string()
+            .contains("unknown private runtime object"));
+        assert!(library
+            .enqueue_fts_repair("uppercase-unknown-layout", JobPriority::Normal)
+            .is_err());
+        assert_eq!(library.export_portable().unwrap().digest, export.digest);
     }
 
     #[test]
