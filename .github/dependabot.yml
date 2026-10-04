@@ -22,6 +22,11 @@ updates:
       # together with a typescript-eslint release that supports them.
       - dependency-name: typescript
         update-types: ["version-update:semver-major"]
+      # Temporary until #329 resolves the Rust 1.88/Tauri compatibility policy.
+      - dependency-name: "@tauri-apps/api"
+        versions: [">= 2.12"]
+      - dependency-name: "@tauri-apps/cli"
+        versions: [">= 2.12"]
 
   - package-ecosystem: github-actions
     directory: /
