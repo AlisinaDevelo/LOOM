@@ -391,7 +391,9 @@ describe("desktop truth path", () => {
     render(<App />);
     fireEvent.change(screen.getByRole("textbox", { name: "Search your local sources" }), { target: { value: "evidence" } });
     fireEvent.submit(screen.getByRole("search"));
-    fireEvent.click(await screen.findByRole("button", { name: "View evidence" }));
+    const resultTrigger = await screen.findByRole("button", { name: "View evidence" });
+    await waitFor(() => expect(screen.getByRole("heading", { name: "Recovered sources" })).toHaveFocus());
+    fireEvent.click(resultTrigger);
     fireEvent.click(await screen.findByRole("button", { name: "Show relationships" }));
     fireEvent.click(await screen.findByRole("button", { name: "Inspect current source and versions for related.md" }));
     expect(invokeMock).toHaveBeenCalledWith("artifact_version_history", { artifactId: target.artifact_id });
@@ -407,6 +409,8 @@ describe("desktop truth path", () => {
       version_id: targetReference.version_id,
       content_hash: targetReference.content_hash,
     } }));
+    fireEvent.keyDown(window, { key: "Escape" });
+    await waitFor(() => expect(resultTrigger).toHaveFocus());
   });
 
   it("discloses stale related evidence without opening the locator or restoring the old result", async () => {
