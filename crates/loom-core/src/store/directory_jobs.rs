@@ -16,6 +16,7 @@ struct SourceIdentity {
 }
 
 impl SourceIdentity {
+    #[cfg(test)]
     fn capture(path: &Path, directory: bool) -> Result<Self> {
         let metadata = fs::symlink_metadata(path).map_err(|error| namespace_error(path, error))?;
         Self::from_metadata(&metadata, path, directory)
@@ -203,6 +204,27 @@ fn valid_locator(locator: &str) -> bool {
         })
 }
 
+struct DirectoryRoot {
+    locator: String,
+    identity: SourceIdentity,
+    change: (i64, i64),
+}
+
+fn directory_root(requested: &Path) -> Result<DirectoryRoot> {
+    let root = canonical_selected_root(requested)?;
+    let metadata = fs::symlink_metadata(&root).map_err(|error| namespace_error(&root, error))?;
+    let identity = SourceIdentity::from_metadata(&metadata, &root, true)?;
+    let locator = utf8_path(&root)?;
+    if !valid_locator(&locator) {
+        return Err(invalid("queued directory requires a bounded UTF-8 root"));
+    }
+    Ok(DirectoryRoot {
+        locator,
+        identity,
+        change: directory_change(&metadata),
+    })
+}
+
 #[derive(PartialEq, Eq)]
 struct DirectoryUnit {
     ordinal: u32,
@@ -278,17 +300,121 @@ impl DirectoryUnit {
     }
 }
 
+/// Read-only consent observation, captured before discovery and never itself a source grant.
+pub(crate) struct DirectorySelection {
+    locator: String,
+    selection: SourceSelection,
+    root_identity: SourceIdentity,
+    root_change: (i64, i64),
+}
+
+impl DirectorySelection {
+    pub(crate) fn matches_target(&self, json: &str) -> Result<bool> {
+        Ok(IndexDirectoryTarget::parse(json)?.locator == self.locator)
+    }
+}
+
+struct DirectoryDiscovery {
+    locator: String,
+    root_identity: SourceIdentity,
+    root_change: (i64, i64),
+    max_files: u32,
+    namespace: crate::discovery::NamespaceSnapshot,
+}
+
+impl DirectoryDiscovery {
+    fn capture_fenced(
+        locator: String,
+        file_limit: usize,
+        root_identity: SourceIdentity,
+        root_change: (i64, i64),
+    ) -> Result<Self> {
+        let root = Path::new(&locator);
+        let verify_root = || {
+            let metadata =
+                fs::symlink_metadata(root).map_err(|error| namespace_error(root, error))?;
+            root_identity.verify_metadata(&metadata, root, true)?;
+            if directory_change(&metadata) != root_change {
+                return Err(LoomError::SourceChanged(locator.clone()));
+            }
+            Ok(())
+        };
+        verify_root()?;
+        let max_files = file_limit.min(MAX_DIRECTORY_UNITS);
+        if max_files == 0 {
+            return Err(invalid("directory file limit must be positive"));
+        }
+        let namespace = crate::discovery::walk_snapshot(
+            root,
+            crate::discovery::DiscoveryLimits::for_files(max_files),
+            |_| Ok(()),
+        )?;
+        if namespace.file_identities.len() != namespace.files.len() {
+            return Err(invalid("directory discovery has no exact file identities"));
+        }
+        for path in &namespace.files {
+            if !valid_locator(&utf8_path(path)?) {
+                return Err(invalid(
+                    "queued directory requires exact bounded UTF-8 paths",
+                ));
+            }
+        }
+        verify_root()?;
+        Ok(Self {
+            locator,
+            root_identity,
+            root_change,
+            max_files: max_files as u32,
+            namespace,
+        })
+    }
+
+    fn bind(self, authorization: SourceAuthorization) -> DirectoryAdmission {
+        DirectoryAdmission {
+            target: IndexDirectoryTarget {
+                locator: self.locator,
+                authorization,
+                root_identity: self.root_identity,
+                root_change: self.root_change,
+                namespace_fingerprint: self.namespace.fingerprint.clone(),
+                max_files: self.max_files,
+                total_units: self.namespace.files.len() as u32,
+            },
+            namespace: self.namespace,
+        }
+    }
+}
+
+pub(crate) struct SelectedDirectoryAdmission {
+    selection: SourceSelection,
+    discovery: DirectoryDiscovery,
+}
+
+impl SelectedDirectoryAdmission {
+    pub(crate) fn matches_target(&self, json: &str) -> Result<bool> {
+        Ok(IndexDirectoryTarget::parse(json)?.locator == self.discovery.locator)
+    }
+
+    pub(crate) fn authorize(self, transaction: &Transaction<'_>) -> Result<DirectoryAdmission> {
+        let authorization =
+            self.selection
+                .authorize_in(transaction, &self.discovery.locator, true)?;
+        let admission = self.discovery.bind(authorization);
+        admission.target.verify(transaction)?;
+        Ok(admission)
+    }
+}
+
 pub(crate) struct DirectoryAdmission {
     target: IndexDirectoryTarget,
-    paths: Vec<PathBuf>,
-    identities: Vec<crate::discovery::SourceIdentityStamp>,
+    namespace: crate::discovery::NamespaceSnapshot,
 }
 
 impl DirectoryAdmission {
     pub(crate) fn target_json(&self, connection: &Connection) -> Result<String> {
         self.target.verify(connection)?;
         let mut target = self.target.clone();
-        if self.paths.iter().any(|path| {
+        if self.namespace.files.iter().any(|path| {
             ingest::supported_media_type(path).is_some_and(|media| media.starts_with("image/"))
         }) {
             target.authorization.ocr_policy = Some(OcrPolicy::load(connection)?);
@@ -314,6 +440,7 @@ impl DirectoryAdmission {
             }
             return Ok(());
         }
+        self.verify_namespace()?;
         let (retained_units, retained_bytes): (u64, u64) = connection.query_row(
             "SELECT COALESCE(SUM(total_units),0),COALESCE(SUM(encoded_bytes),0)
              FROM background_directory_manifests",
@@ -345,8 +472,12 @@ impl DirectoryAdmission {
             "INSERT INTO background_directory_manifests(job_id,root_id,root_locator,encoded_bytes,total_units) VALUES (?1,?2,?3,?4,?5)",
             params![job.id, self.target.authorization.root_id, self.target.locator, sql_i64(encoded_bytes,"directory manifest bytes")?, self.target.total_units],
         )?;
-        for (ordinal, (path, &(device, inode, created))) in
-            self.paths.iter().zip(&self.identities).enumerate()
+        for (ordinal, (path, &(device, inode, created))) in self
+            .namespace
+            .files
+            .iter()
+            .zip(&self.namespace.file_identities)
+            .enumerate()
         {
             let locator = utf8_path(path)?;
             let relative = path
@@ -411,7 +542,16 @@ impl DirectoryAdmission {
             params![sql_i64(encoded_bytes, "directory manifest bytes")?, job.id],
         )?;
         self.target.verify(connection)?;
+        self.verify_namespace()?;
         Ok(())
+    }
+
+    fn verify_namespace(&self) -> Result<()> {
+        self.target.verify_root()?;
+        self.namespace.verify_directories(
+            Path::new(&self.target.locator),
+            crate::discovery::DiscoveryLimits::for_files(self.target.max_files as usize),
+        )
     }
 }
 
@@ -516,19 +656,50 @@ pub(crate) struct PreparedDirectoryFile {
 }
 
 impl Library {
+    pub(crate) fn prepare_directory_selection(
+        &self,
+        requested: &Path,
+    ) -> Result<DirectorySelection> {
+        let root = directory_root(requested)?;
+        let selection = SourceSelection::capture(&*self.lock()?, &root.locator)?;
+        Ok(DirectorySelection {
+            locator: root.locator,
+            selection,
+            root_identity: root.identity,
+            root_change: root.change,
+        })
+    }
+
+    pub(crate) fn discover_directory_selection(
+        &self,
+        selected: DirectorySelection,
+    ) -> Result<SelectedDirectoryAdmission> {
+        let discovery = DirectoryDiscovery::capture_fenced(
+            selected.locator,
+            self.limits.max_files_per_request,
+            selected.root_identity,
+            selected.root_change,
+        )?;
+        Ok(SelectedDirectoryAdmission {
+            selection: selected.selection,
+            discovery,
+        })
+    }
+
     pub(crate) fn prepare_directory_admission(
         &self,
         requested: &Path,
     ) -> Result<DirectoryAdmission> {
-        let root = canonical_selected_root(requested)?;
-        let root_identity = SourceIdentity::capture(&root, true)?;
-        let root_change = directory_change(
-            &fs::symlink_metadata(&root).map_err(|error| namespace_error(&root, error))?,
-        );
-        let locator = utf8_path(&root)?;
-        if !valid_locator(&locator) {
-            return Err(invalid("queued directory requires a bounded UTF-8 root"));
-        }
+        self.prepare_directory_before_discovery(requested, || {})
+    }
+
+    fn prepare_directory_before_discovery(
+        &self,
+        requested: &Path,
+        before_discovery: impl FnOnce(),
+    ) -> Result<DirectoryAdmission> {
+        let root = directory_root(requested)?;
+        let locator = root.locator;
         let authorization = {
             let connection = self.lock()?;
             connection.query_row("SELECT id,scope_generation,(SELECT value FROM schema_meta WHERE key='authorization_incarnation'),kind
@@ -536,40 +707,14 @@ impl Library {
                 root_id: row.get(0)?, generation: row.get(1)?, incarnation: row.get(2)?, kind: row.get(3)?, ocr_policy: None,
             })).optional()?.ok_or_else(|| LoomError::SourceRevoked(locator.clone()))?
         };
-        let max_files = self.limits.max_files_per_request.min(MAX_DIRECTORY_UNITS);
-        if max_files == 0 {
-            return Err(invalid("directory file limit must be positive"));
-        }
-        let namespace = crate::discovery::walk_snapshot(
-            &root,
-            crate::discovery::DiscoveryLimits::for_files(max_files),
-            |_| Ok(()),
-        )?;
-        if namespace.file_identities.len() != namespace.files.len() {
-            return Err(invalid("directory discovery has no exact file identities"));
-        }
-        // Reject non-UTF-8/control paths before any operational writes; never lossy-stringify them.
-        for path in &namespace.files {
-            if !valid_locator(&utf8_path(path)?) {
-                return Err(invalid(
-                    "queued directory requires exact bounded UTF-8 paths",
-                ));
-            }
-        }
-        root_identity.verify(&root, true)?;
-        Ok(DirectoryAdmission {
-            target: IndexDirectoryTarget {
-                locator,
-                authorization,
-                root_identity,
-                root_change,
-                namespace_fingerprint: namespace.fingerprint,
-                max_files: max_files as u32,
-                total_units: namespace.files.len() as u32,
-            },
-            paths: namespace.files,
-            identities: namespace.file_identities,
-        })
+        before_discovery();
+        Ok(DirectoryDiscovery::capture_fenced(
+            locator,
+            self.limits.max_files_per_request,
+            root.identity,
+            root.change,
+        )?
+        .bind(authorization))
     }
 
     pub(crate) fn job_index_directory(
@@ -989,6 +1134,59 @@ mod tests {
         loom_extraction::ExtractionSupervisor::new(path).unwrap()
     }
 
+    #[test]
+    fn first_selection_pins_the_directory_before_discovery() {
+        for mutation in ["replacement", "namespace"] {
+            let temporary = tempdir().unwrap();
+            let root = temporary.path().join("selected");
+            fs::create_dir(&root).unwrap();
+            fs::write(root.join("a.md"), "Original selected directory marker").unwrap();
+            let library = Library::open(temporary.path().join("library.sqlite3")).unwrap();
+            let selected = library.prepare_directory_selection(&root).unwrap();
+            if mutation == "replacement" {
+                let moved = temporary.path().join("moved");
+                fs::rename(&root, &moved).unwrap();
+                fs::create_dir(&root).unwrap();
+                fs::hard_link(moved.join("a.md"), root.join("a.md")).unwrap();
+            } else {
+                fs::write(root.join("b.md"), "Added after explicit selection").unwrap();
+            }
+            let before = library.export_portable().unwrap().digest;
+            let result = library.discover_directory_selection(selected);
+            assert!(
+                matches!(
+                    result,
+                    Err(LoomError::SourceRevoked(_) | LoomError::SourceChanged(_))
+                ),
+                "{mutation} reached discovery"
+            );
+            assert!(library.source_roots().unwrap().is_empty());
+            assert_eq!(library.export_portable().unwrap().digest, before);
+        }
+    }
+
+    #[test]
+    fn refresh_admission_pins_the_directory_before_discovery() {
+        let (temporary, library, root) = fixture();
+        fs::write(root.join("a.md"), "Approved original directory marker").unwrap();
+        let before = library.export_portable().unwrap().digest;
+        let result = library.prepare_directory_before_discovery(&root, || {
+            let moved = temporary.path().join("moved");
+            fs::rename(&root, &moved).unwrap();
+            fs::create_dir(&root).unwrap();
+            fs::hard_link(moved.join("a.md"), root.join("a.md")).unwrap();
+        });
+        assert!(
+            matches!(
+                result,
+                Err(LoomError::SourceRevoked(_) | LoomError::SourceChanged(_))
+            ),
+            "replacement reached refresh admission"
+        );
+        assert_eq!(library.export_portable().unwrap().digest, before);
+        assert!(library.background_jobs(128).unwrap().is_empty());
+    }
+
     fn claim(library: &Library) -> (crate::JobWorker, JobClaim, String) {
         let mut worker = library.acquire_job_worker().unwrap();
         let claim = worker.claim_for_test().unwrap().unwrap();
@@ -1270,7 +1468,7 @@ mod tests {
             .enqueue_index_directory(&root, "discovery-gap", JobPriority::Normal)
             .unwrap();
         // Model an inode recycled after discovery with a different filesystem birth time.
-        admission.identities[0].2 .0 -= 1;
+        admission.namespace.file_identities[0].2 .0 -= 1;
         let before = library.export_portable().unwrap().digest;
         {
             let mut connection = library.lock().unwrap();

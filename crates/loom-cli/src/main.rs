@@ -133,6 +133,15 @@ enum Command {
         #[arg(long)]
         low: bool,
     },
+    /// Explicitly select a folder and queue its first scan atomically, without extracting content.
+    SelectAndEnqueueDirectory {
+        path: PathBuf,
+        idempotency_key: String,
+        #[arg(long, conflicts_with = "low")]
+        high: bool,
+        #[arg(long)]
+        low: bool,
+    },
     /// Queue already indexed passages; each run-next-job embeds one bounded passage.
     EnqueueSemanticRebuild {
         idempotency_key: String,
@@ -675,6 +684,29 @@ fn main() -> Result<(), Box<dyn Error>> {
             println!(
                 "{}",
                 serde_json::to_string_pretty(&library.enqueue_index_directory(
+                    path,
+                    &idempotency_key,
+                    priority
+                )?)?
+            );
+        }
+        Command::SelectAndEnqueueDirectory {
+            path,
+            idempotency_key,
+            high,
+            low,
+        } => {
+            let library = Library::open_for_jobs(arguments.database)?;
+            let priority = if high {
+                JobPriority::High
+            } else if low {
+                JobPriority::Low
+            } else {
+                JobPriority::Normal
+            };
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&library.select_and_enqueue_directory(
                     path,
                     &idempotency_key,
                     priority
