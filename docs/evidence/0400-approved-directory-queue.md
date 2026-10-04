@@ -2,7 +2,7 @@
 
 ## Scope and device
 
-Code verified at `eb946e9e1b615e4464a9786541f82065a808b4e3`, based on main
+Code verified at `ef60a78b71d1136dc960f1e4b5014f3d8c2dce4f`, based on main
 `6ef8993cca5ccd1a089b928c64821ef630530b4f`. Verification date: 2026-10-04.
 Device: MacBookPro17,1, Apple M1 arm64, 8 GiB RAM, macOS 26.6.2 build 25G83.
 Toolchains: Rust 1.96.0 and 1.88.0, Node 26.7.0, npm 11.19.0, Python 3.9.6.
@@ -20,8 +20,8 @@ See [the operational contract](../BACKGROUND_JOBS.md) for bounds and explicit ru
 This was a local command-by-command pipeline, not a successful hosted CI run or release approval.
 The security step failed; the overall verification is not globally green.
 
-- Full Rust workspace: **373 tests passed**, repeated against the committed candidate.
-- Rust 1.88 full-workspace/all-target check and **308 core/extraction tests**: PASS.
+- Full Rust workspace: **374 tests passed**, repeated against the committed candidate.
+- Rust 1.88 full-workspace/all-target check and **309 core/extraction tests**: PASS.
 - Full-workspace/all-target Clippy with warnings denied, format and diff checks: PASS.
 - Frontend lint/typecheck/build, **43 UI, 12 extension and 6 Markdown-tooling tests**: PASS.
 - Five-year manifest/graph and **33 Python repository tests**: PASS.
@@ -65,6 +65,10 @@ prevent absent/create/purge ABA on managed foreign-key-enabled connections. Port
 encrypted backup restore retain evidence but exclude/clear operational manifests and claims.
 Unknown v5 private runtime objects refuse purge and restore. Job-bound unit digests and
 canonical relations prevent malformed valid-shape units from evading artifact purge.
+An uppercase unknown-table regression first reproduced a purge bypass. The repaired checks
+and lowercase/uppercase/mixed-case fixtures now refuse partial creation, queue work and deletion.
+Only the exact current v5 layout is supported; earlier unreleased prototype shapes are not
+silently inferred from their marker.
 Bulk deletion validates once in its writer transaction; a permit cannot apply to another connection.
 These are application-level deletion checks, not secure-erasure proofs for SQLite/WAL or storage.
 
@@ -75,9 +79,9 @@ Measured helper quanta use a 25 ms sample interval and an installed address-spac
 
 | Unit | Helper wall ms | CPU ms | Peak resident bytes |
 | --- | ---: | ---: | ---: |
-| First text | 139 | 4 | 9,273,344 |
-| Second text | 67 | 4 | 9,273,344 |
-| PDF | 62 | 6 | 10,633,216 |
+| First text | 154 | 4 | 9,273,344 |
+| Second text | 64 | 3 | 9,273,344 |
+| PDF | 60 | 6 | 10,633,216 |
 
 These are three functional-fixture measurements, not a large-folder latency/memory gate.
 Admission/final discovery and capped reconciliation remain synchronous bounded phases.
@@ -99,10 +103,10 @@ only synthetic measurements and digests, not raw paths, logs or source documents
 
 | Artifact | SHA-256 |
 | --- | --- |
-| Staged CLI | `7de0a5d574a5f70175a875d04ebd6382da2559d08c6f941d448edb4a30681c8d` |
+| Staged CLI | `09428873802b9cec05ca9630c0d727177e4856ccb73182b253b3f08a36682060` |
 | Staged helper | `52c9e5f99fc181ed51df8ec030b9d6bd783c784571e9918024ed122eca683766` |
-| MSRV tests | `f7e2afa21f77bead3b9b38666b585f6e6d44d97264fbc3b5f8452c4036ee09d1` |
-| CLI measurements | `3a7983a2e715e3b5985ba33dfb68066204c11092a5dc9c875e902550906e2ec8` |
+| MSRV tests | `108310fe530ab4c6ff7a75c96a5d7c1f32112a931622785c21824d4e26625ec5` |
+| CLI measurements | `0696ebb484de371cb6507be96684359bc19b2e239ec858a35616c9e806a092c2` |
 
 Merged-main reproduction will be recorded separately after merge; this document does not
 claim the candidate has already merged or that the remaining engine acceptance gates passed.

@@ -173,7 +173,7 @@ def main():
             assert command("jobs", database_path=old_database) == [old_job]
             command("run-next-job", executable=previous, database_path=old_database, rejected=True)
             assert command("search", "queued source marker", executable=previous, database_path=old_database)
-            measured(command("run-next-job", database_path=old_database), "text/markdown (v3->v4)")
+            measured(command("run-next-job", database_path=old_database), "text/markdown (v3->v5)")
             with sqlite3.connect(old_database) as connection:
                 assert connection.execute("SELECT value FROM schema_meta WHERE key='background_job_schema_version'").fetchone()[0] == "5"
         if args.report:
