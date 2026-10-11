@@ -48,7 +48,8 @@ path, content hash, excerpt, and exact text or pixel-region anchor with every re
   endpoints can be inspected the same way. Only current passage-bearing selected local files offer
   a verified-evidence action; older original bytes are not retained, and URL-only or revoked sources
   are metadata only. Inspection-time metadata can differ from an earlier relationship projection.
-- The CLI and Tauri desktop UI use the same Rust core and local database.
+- The CLI and Tauri desktop UI share the Rust core and SQLite schema. The CLI defaults to
+  `.loom/library.sqlite3`; the desktop stores `library.sqlite3` in its application-data directory.
 - Saved desktop scopes persist as exact read-only locators. Missing, denied, moved, unsafe, and
   revoked roots are visible; re-selection is explicit and never broadens access.
 - Indexing reports a stable run ID, bounded attempted/indexed/skipped/failed/cancelled counts, and

@@ -30,9 +30,10 @@ as [Mirowl](https://www.mirowl.com/), [Magnifind](https://magnifind.app/),
 [Gisti](https://gisti.app/), and [Screengrep](https://www.screengrep.com/). Their public positioning
 reinforces the category overlap; it does not establish comparative retrieval quality.
 
-One reliability signal is [Rewind’s shutdown notice](https://rewind.ai/what-happened-to-rewind/),
-which says the product was discontinued after the Meta acquisition. **Inference:** portable local
-records and export are product requirements, not optional goodwill.
+One reliability signal is [Limitless’s acquisition announcement](https://www.limitless.ai/),
+which announces Meta’s acquisition of Limitless and Rewind screen and audio capture ending on
+2025-12-19. **Inference:** portable local records and export are product requirements, not optional
+goodwill.
 
 ## Table stakes
 

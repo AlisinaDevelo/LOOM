@@ -1088,7 +1088,7 @@ function App() {
     () =>
       stats.artifacts === 0
         ? "Start with a folder you intentionally choose."
-        : `${stats.artifacts} original source${stats.artifacts === 1 ? "" : "s"} ready to recover.`,
+        : `${stats.artifacts} source${stats.artifacts === 1 ? "" : "s"} in your local library.`,
     [stats.artifacts],
   );
 

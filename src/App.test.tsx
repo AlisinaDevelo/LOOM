@@ -959,7 +959,7 @@ describe("desktop truth path", () => {
 
     expect(await screen.findByRole("alert")).toHaveTextContent("source exceeds limit");
     expect(screen.getByRole("status")).toHaveTextContent("Indexed 1; 0 unchanged; 1 unsupported; 1 failed.");
-    expect(screen.getByText("1 original source ready to recover.")).toBeInTheDocument();
+    expect(screen.getByText("1 source in your local library.")).toBeInTheDocument();
   });
 
   it("names a no-readable-text OCR outcome in the index notice", async () => {
@@ -1075,6 +1075,35 @@ describe("desktop truth path", () => {
     await waitFor(() => {
       expect(invokeMock).toHaveBeenCalledWith("revoke_source_root", { locator: "/Users/test/notes" });
     });
+  });
+
+  it("describes retained sources accurately after a revoked scope yields no matching evidence", async () => {
+    mockPrivacyLibrary();
+    const baseline = invokeMock.getMockImplementation();
+    let revoked = false;
+    const rootStatus = () => ({ ...selectedRoot, enabled: !revoked, status: revoked ? "revoked" : "available" });
+    invokeMock.mockImplementation(async (command, args) => {
+      if (command === "library_stats") return { ...readyStats, artifacts: 3, versions: 3, passages: 3, indexed_bytes: 533 };
+      if (command === "list_source_roots") return [rootStatus()];
+      if (command === "revoke_source_root") {
+        revoked = true;
+        return rootStatus();
+      }
+      if (command === "search") return revoked ? [] : [hit];
+      return baseline?.(command, args);
+    });
+    render(<App />);
+    await searchAndViewEvidence();
+    fireEvent.click(screen.getByRole("button", { name: "Revoke /Users/test/notes" }));
+    await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent("Folder revoked."));
+    expect(screen.getByText("revoked")).toBeInTheDocument();
+    expect(screen.queryByText("Verified sensitive passage")).not.toBeInTheDocument();
+
+    fireEvent.submit(screen.getByRole("search"));
+    expect(await screen.findByRole("heading", { name: "No matching evidence" })).toBeInTheDocument();
+    expect(screen.getByRole("status")).toHaveTextContent("No evidence met this lexical query.");
+    expect(screen.getByText("3 sources in your local library.")).toBeInTheDocument();
+    expect(screen.queryByText(/ready to recover/i)).not.toBeInTheDocument();
   });
 
   it("exposes a local OCR disable and purge control", async () => {
