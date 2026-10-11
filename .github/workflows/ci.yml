@@ -48,6 +48,11 @@ jobs:
           cargo run --locked -q -p loom-cli -- benchmark
           --corpus benchmarks/retrieval/v0/corpus
           --queries benchmarks/retrieval/v0/queries.jsonl
+      - name: Fresh text recovery and forced-termination CLI contract
+        run: >-
+          python3 -B scripts/verify-foundation-cli.py
+          --loom target/debug/loom --repo . --expected-commit "$GITHUB_SHA"
+          --out-dir "$RUNNER_TEMP/foundation-cli" --network-mode unconstrained
       - name: Durable maintenance queue CLI contract
         run: python3 scripts/test-background-jobs.py --loom target/debug/loom
       - name: Approved-file queue CLI contract

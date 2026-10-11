@@ -2,6 +2,8 @@
 
 Research snapshot: 2026-08-23. This is a public-source review of the retrieval,
 knowledge-management, screenshot-memory, and local-AI landscape relevant to LOOM.
+The Limitless/Rewind primary citation was corrected on 2026-10-11; the rest of the market
+snapshot has not been refreshed.
 
 ## How to read this memo
 

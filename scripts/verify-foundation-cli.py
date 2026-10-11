@@ -224,6 +224,19 @@ def verify_hits(runner, database, root, fixture_manifest, queries):
     return hits_by_query
 
 
+def source_evidence_projection(hits_by_query):
+    """Retained historical passages can change BM25 corpus statistics after an edit."""
+    return {
+        query: [
+            {**{field: value for field, value in hit.items() if field != "score"},
+             "contributions": {field: value for field, value in hit["contributions"].items()
+                               if field != "lexical"}}
+            for hit in hits
+        ]
+        for query, hits in hits_by_query.items()
+    }
+
+
 def forced_termination(runner, root):
     selected = root / "kill-selected"
     selected.mkdir()
@@ -377,10 +390,17 @@ def verify(runner, repo, root, report):
             and recovered[0]["content_hash"] != prior_hit["content_hash"]
             and runner.run("stale-source-old-marker", database, "search", queries[0]["query"]) == [],
             "stale explicit rescan did not replace the active projection")
+    edited_stats = runner.run("edited-version-counts", database, "stats")
     shutil.copyfile(fixture_root / "corpus/isolation.md", edited)
     runner.run("restore-synthetic-original", database, "index", selected)
-    require(verify_hits(runner, database, selected, manifest, queries) == initial_hits,
+    restored_hits = verify_hits(runner, database, selected, manifest, queries)
+    # Returning bytes reactivates the exact original version/passages. The retained edited
+    # historical passage changes BM25's corpus statistics, so score/lexical weight need not
+    # equal the initial three-passage corpus. All identity, evidence and rank fields must match.
+    require(source_evidence_projection(restored_hits) == source_evidence_projection(initial_hits),
             "returning to original bytes did not reuse original projection")
+    require(runner.run("restored-version-counts", database, "stats") == edited_stats,
+            "returning to original bytes duplicated a retained version or passage")
     report["checks"].extend(["nested and explicit symlink refusal", "unselected sibling excluded",
                              "stale-source explicit rescan and source-version reuse"])
 
@@ -401,7 +421,7 @@ def verify(runner, repo, root, report):
     final_health = runner.run("fts-repeatable-digest", database, "fts-health")
     for field in ("canonical_digest", "expected_derivative_digest", "derivative_digest"):
         require(final_health[field] == health[field], f"FTS {field} not reproducible")
-    require(verify_hits(runner, database, selected, manifest, queries) == initial_hits,
+    require(verify_hits(runner, database, selected, manifest, queries) == restored_hits,
             "FTS repair changed ranked search identities")
     report["checks"].append("real damaged-FTS diagnosis, transactional repair, canonical/rank/digest preservation")
 
