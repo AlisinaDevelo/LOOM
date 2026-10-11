@@ -1,9 +1,14 @@
 # LOOM 0109 device evidence
 
+Status correction, 2026-10-11: [#18](https://github.com/AlisinaDevelo/LOOM/issues/18) is reopened.
+The historical record below verifies reconciliation of supplied hints, not an active watcher.
+See [the current foundation audit](foundation-2026-10-11.md) for the remaining acceptance gap.
+
 This artifact records approved-root observation hints, deterministic coalescing, content-hash
 reconciliation, and restart recovery for issue [#18](https://github.com/AlisinaDevelo/LOOM/issues/18).
-The observation implementation is present on current `main`; this evidence closes the roadmap item
-after the evidence/status merge. Hosted Actions are not used as evidence here.
+The historical observation-hint implementation was on `main` when the issue was closed after
+the evidence/status merge. That closure is superseded by the correction above: it did not establish
+an active watcher. Hosted Actions were not used as evidence for this historical record.
 
 ## Device and toolchain
 
