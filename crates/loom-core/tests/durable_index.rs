@@ -101,6 +101,59 @@ fn interrupted_job_commits_units_and_resumes_idempotently() {
 }
 
 #[test]
+fn startup_reconciliation_revalidates_the_interrupted_completed_prefix() {
+    let directory = tempdir().unwrap();
+    let root = directory.path().join("selected");
+    fs::create_dir(&root).unwrap();
+    let first = root.join("01-first.md");
+    fs::write(&first, "oldstartup evidence").unwrap();
+    fs::write(root.join("02-pending.md"), "pendingstartup evidence").unwrap();
+    fs::write(
+        directory.path().join("unapproved.md"),
+        "outsidestartup evidence",
+    )
+    .unwrap();
+    let database = directory.path().join("library.sqlite3");
+    let library = Library::open(&database).unwrap();
+    assert!(matches!(
+        library.index_path_with_fault(&root, Some(1)),
+        Err(LoomError::IndexInterrupted(_))
+    ));
+    let interrupted = checkpoint(&library, &root);
+    let roots_before = library.export_portable().unwrap().tables["source_roots"].clone();
+    drop(library);
+    fs::write(&first, "newstartup evidence").unwrap();
+
+    let restarted = Library::open(&database).unwrap();
+    let report = restarted.reconcile_approved_roots().unwrap();
+    let hits = |text: &str| {
+        restarted
+            .search(&SearchRequest {
+                text: text.into(),
+                limit: 10,
+            })
+            .unwrap()
+    };
+    assert_eq!(hits("newstartup").len(), 1);
+    assert!(hits("oldstartup").is_empty());
+    assert!(hits("outsidestartup").is_empty());
+    assert_eq!(hits("pendingstartup").len(), 1);
+    assert_eq!(report.roots_scanned, 1);
+    assert_eq!(report.roots_failed, 0);
+    assert_eq!(report.indexed, 2);
+    assert!(report.failures.is_empty());
+    let completed = checkpoint(&restarted, &root);
+    assert_eq!(completed.job_id, interrupted.job_id);
+    assert_eq!(completed.state, "completed");
+    assert_eq!(completed.next_unit, 2);
+    assert_eq!(
+        restarted.export_portable().unwrap().tables["source_roots"],
+        roots_before
+    );
+    assert_eq!(restarted.stats().unwrap().versions, 3);
+}
+
+#[test]
 fn approved_root_observation_reconciles_rename_delete_overflow_and_restart() {
     let directory = tempdir().unwrap();
     let database = tempdir().unwrap();

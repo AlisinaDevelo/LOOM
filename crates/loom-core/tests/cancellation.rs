@@ -89,6 +89,152 @@ fn cancellation_commits_complete_units_and_resumes_to_uninterrupted_rows() {
 }
 
 #[test]
+fn resumed_scan_revalidates_an_edited_completed_prefix() {
+    let root = tempdir().unwrap();
+    let database = tempdir().unwrap();
+    let unchanged = root.path().join("01-unchanged.md");
+    let edited = root.path().join("02-edited.md");
+    fs::write(&unchanged, "unchangedprefix evidence").unwrap();
+    fs::write(&edited, "oldprefix evidence").unwrap();
+    fs::write(root.path().join("03-pending.md"), "pendingprefix evidence").unwrap();
+    let library = Library::open(database.path().join("library.sqlite3")).unwrap();
+    let cancelled = library
+        .index_path_with_cancellation_after(root.path(), 2)
+        .unwrap();
+    assert_eq!(cancelled.indexed, 2);
+    let unchanged_before = library.inspect_source(&unchanged).unwrap();
+    let edited_before = library.inspect_source(&edited).unwrap();
+    let metadata = fs::metadata(&edited).unwrap();
+    let modified = metadata.modified().unwrap();
+    fs::write(&edited, "newprefix evidence").unwrap();
+    fs::File::open(&edited)
+        .unwrap()
+        .set_modified(modified)
+        .unwrap();
+    assert_eq!(fs::metadata(&edited).unwrap().len(), metadata.len());
+    assert_eq!(fs::metadata(&edited).unwrap().modified().unwrap(), modified);
+
+    let resumed = library.index_path(root.path()).unwrap();
+    assert_eq!(marker_hits(&library, "newprefix"), 1);
+    assert_eq!(marker_hits(&library, "oldprefix"), 0);
+    assert_eq!(marker_hits(&library, "pendingprefix"), 1);
+    assert_eq!(resumed.run_id, cancelled.run_id);
+    assert_eq!(resumed.attempted, 2);
+    assert_eq!(resumed.indexed, 2);
+    assert!(resumed.failures.is_empty());
+    assert_eq!(
+        library.inspect_source(&unchanged).unwrap(),
+        unchanged_before
+    );
+    assert_ne!(
+        library.inspect_source(&edited).unwrap().content_hash,
+        edited_before.content_hash
+    );
+    assert_eq!(library.stats().unwrap().versions, 4);
+    assert_eq!(library.index_path(root.path()).unwrap().unchanged, 3);
+    assert_eq!(library.stats().unwrap().versions, 4);
+}
+
+#[test]
+fn resumed_scan_retries_a_recovered_completed_failure() {
+    let root = tempdir().unwrap();
+    let database = tempdir().unwrap();
+    let recovered = root.path().join("01-recovered.md");
+    fs::write(&recovered, [0xff]).unwrap();
+    fs::write(
+        root.path().join("02-pending.md"),
+        "pending recovery evidence",
+    )
+    .unwrap();
+    let library = Library::open(database.path().join("library.sqlite3")).unwrap();
+    let cancelled = library
+        .index_path_with_cancellation_after(root.path(), 1)
+        .unwrap();
+    assert_eq!(cancelled.failed, 1);
+    fs::write(&recovered, "recoveredprefix evidence").unwrap();
+
+    let resumed = library.index_path(root.path()).unwrap();
+    assert_eq!(marker_hits(&library, "recoveredprefix"), 1);
+    assert_eq!(resumed.run_id, cancelled.run_id);
+    assert_eq!(resumed.attempted, 2);
+    assert_eq!(resumed.indexed, 2);
+    assert!(resumed.failures.is_empty());
+}
+
+#[test]
+fn resumed_scan_keeps_unsupported_and_ocr_disabled_prefix_units_skipped() {
+    let root = tempdir().unwrap();
+    let database = tempdir().unwrap();
+    fs::write(
+        root.path().join("01-unsupported.bin"),
+        "unsupported evidence",
+    )
+    .unwrap();
+    fs::write(
+        root.path().join("02-disabled.png"),
+        include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../tests/fixtures/ocr-golden.png"
+        )),
+    )
+    .unwrap();
+    let pending_text = "pendingprefix evidence";
+    fs::write(root.path().join("03-pending.md"), pending_text).unwrap();
+    let library = Library::open(database.path().join("library.sqlite3")).unwrap();
+    library.set_ocr_enabled(false).unwrap();
+    let cancelled = library
+        .index_path_with_cancellation_after(root.path(), 2)
+        .unwrap();
+    assert_eq!(cancelled.skipped, 2);
+    assert_eq!(cancelled.bytes_read, 0);
+
+    let resumed = library.index_path(root.path()).unwrap();
+    assert_eq!(resumed.run_id, cancelled.run_id);
+    assert_eq!(resumed.attempted, 1);
+    assert_eq!(resumed.indexed, 1);
+    assert_eq!(resumed.skipped, 0);
+    assert_eq!(resumed.bytes_read, pending_text.len() as u64);
+    assert!(resumed.failures.is_empty());
+    assert_eq!(library.ocr_status().unwrap().derived_versions, 0);
+}
+
+#[test]
+fn pre_cancelled_resume_keeps_the_completed_prefix_and_checkpoint() {
+    let root = tempdir().unwrap();
+    let database = tempdir().unwrap();
+    let first = root.path().join("01-first.md");
+    fs::write(&first, "oldprefix evidence").unwrap();
+    fs::write(root.path().join("02-pending.md"), "pendingprefix evidence").unwrap();
+    let library = Library::open(database.path().join("library.sqlite3")).unwrap();
+    library
+        .index_path_with_cancellation_after(root.path(), 1)
+        .unwrap();
+    let before = library.index_checkpoint(root.path()).unwrap();
+    let canonical_before = library.export_portable().unwrap().tables;
+    fs::write(&first, "newprefix evidence").unwrap();
+    let token = IndexCancellationToken::new();
+    token.cancel();
+
+    let report = library
+        .index_path_with_cancellation(root.path(), &token)
+        .unwrap();
+    assert_eq!(report.attempted, 0);
+    assert_eq!(report.bytes_read, 0);
+    assert_eq!(report.cancelled, 1);
+    assert_eq!(library.index_checkpoint(root.path()).unwrap(), before);
+    // Explicit selection may refresh root last-seen time; canonical evidence stays untouched.
+    let after = library.export_portable().unwrap().tables;
+    for table in [
+        "artifacts",
+        "artifact_locators",
+        "artifact_versions",
+        "passages",
+    ] {
+        assert_eq!(after[table], canonical_before[table]);
+    }
+}
+
+#[test]
 fn pre_cancelled_token_reports_all_remaining_units_without_writing() {
     let root = tempdir().unwrap();
     let database = tempdir().unwrap();

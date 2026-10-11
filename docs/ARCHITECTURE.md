@@ -143,6 +143,10 @@ extractor identity. A content observation is keyed by source artifact, byte hash
 extractor version so changed extraction logic cannot silently reuse old passages. Each indexing
 unit advances a fingerprint-bound checkpoint in the same transaction as canonical writes, allowing
 an interrupted or cancelled scan to resume without making a partially committed artifact searchable.
+Before skipping completed supported units, resume verifies their current bounded source bytes and
+active artifact/version/extractor projection without invoking parsers or OCR. The first changed or
+unverified unit rewinds progress under the source/OCR consent fences; an unchanged prefix keeps its
+existing versions and resume boundary. This also applies to startup reconciliation of approved roots.
 The returned report carries the durable job ID plus discovered, attempted, indexed, unchanged,
 skipped, failed, and cancelled counts. The desktop stop command sets a cooperative token; the
 worker observes it between units, marks the checkpoint interrupted with `cancelled by request`,
