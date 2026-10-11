@@ -1,0 +1,30 @@
+{
+  "status": "PASS",
+  "browser": "155.0.8059.40",
+  "url": "http://127.0.0.1:1420/",
+  "viewports": [
+    [
+      1280,
+      900
+    ],
+    [
+      390,
+      844
+    ]
+  ],
+  "checks": [
+    "persisted OCR disabled",
+    "source evidence inspection",
+    "revocation removes excerpts/viewer",
+    "no error overlay",
+    "no console/page errors",
+    "narrow reflow",
+    "serialized raw collector UTF8 cap"
+  ],
+  "collection": {
+    "truncated": true,
+    "bytes": 8388607,
+    "replacement": false
+  },
+  "limitation": "Synthetic Tauri IPC; native window/permission sessions not exercised"
+}

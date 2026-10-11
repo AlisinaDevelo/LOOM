@@ -1,0 +1,13 @@
+{
+  "status": "PASS",
+  "checks": [
+    "explicit enable then disable",
+    "portable export/import",
+    "encrypted backup/restore",
+    "reopened retention remains disabled",
+    "exact source identity/hash/anchor/search preserved",
+    "wrong password refuses without creating database"
+  ],
+  "artifacts": 1,
+  "limit": "synthetic text fixture; no original bytes copied; no independent crypto review"
+}

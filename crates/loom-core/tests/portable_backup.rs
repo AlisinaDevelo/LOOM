@@ -225,6 +225,44 @@ fn export_import_round_trip_preserves_every_canonical_row_and_setting() {
 }
 
 #[test]
+fn disabled_retention_survives_portable_round_trip() {
+    let (_directory, library) = populated();
+    library.set_retention_days(None).unwrap();
+    let export = library.export_portable().unwrap();
+
+    let restored = Library::open_in_memory().unwrap();
+    restored.set_retention_days(Some(7)).unwrap();
+    assert!(restored.import_portable(&export).unwrap().fts_healthy);
+    assert_eq!(restored.retention_policy().unwrap().days, None);
+    assert_eq!(restored.stats().unwrap(), library.stats().unwrap());
+    assert_eq!(
+        comparable(restored.export_portable().unwrap()),
+        comparable(export)
+    );
+}
+
+#[test]
+fn disabled_retention_survives_encrypted_backup_restore() {
+    let (directory, library) = populated();
+    library.set_retention_days(None).unwrap();
+    let backup = directory.path().join("disabled-retention.loombak");
+    library
+        .write_encrypted_backup(&backup, PASSWORD, FAST)
+        .unwrap();
+
+    let restored_path = directory.path().join("disabled-retention.sqlite3");
+    let report = Library::restore_encrypted_backup(&backup, PASSWORD, &restored_path).unwrap();
+    assert!(report.import.fts_healthy);
+    let restored = Library::open(&restored_path).unwrap();
+    assert_eq!(restored.retention_policy().unwrap().days, None);
+    assert_eq!(restored.stats().unwrap(), library.stats().unwrap());
+    assert_eq!(
+        comparable(restored.export_portable().unwrap()),
+        comparable(library.export_portable().unwrap())
+    );
+}
+
+#[test]
 fn schema_v9_export_without_generation_imports_with_safe_default() {
     let (_directory, library) = populated();
     let mut export = library.export_portable().unwrap();
@@ -504,12 +542,14 @@ fn corrupted_and_hostile_exports_fail_closed_without_partial_rows() {
     missing_required.seal().unwrap();
     assert_rejected_and_empty(&missing_required, "missing required column");
 
-    let mut bad_setting = export.clone();
-    bad_setting
-        .settings
-        .insert("retention_days".into(), "0".into());
-    bad_setting.seal().unwrap();
-    assert_rejected_and_empty(&bad_setting, "invalid setting");
+    for invalid_days in ["0", "36501", "-1", "invalid", " ", " 90"] {
+        let mut bad_setting = export.clone();
+        bad_setting
+            .settings
+            .insert("retention_days".into(), invalid_days.into());
+        bad_setting.seal().unwrap();
+        assert_rejected_and_empty(&bad_setting, "invalid retention setting");
+    }
 
     let mut wrong_format = export.clone();
     wrong_format.format_version = 2;

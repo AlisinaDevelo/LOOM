@@ -32,7 +32,9 @@ A portable export is one JSON document:
 | `relationships`, `relationship_compactions` | Typed provenance links with origin, method, evidence passage, confidence, and metadata, plus digest-linked records of compacted edges |
 | `bookmark_imports`, `bookmark_records`, `bookmark_import_items`, `bookmark_import_failures` | Bookmark exports with their connector metadata, records, per-import outcomes, and per-record failures |
 
-`settings` carries the user settings `ocr_enabled` and `retention_days`. Derived state is never
+`settings` carries the user settings `ocr_enabled` and `retention_days`. An empty
+`retention_days` value explicitly disables retention; configured values are 1–36,500 days.
+Both forms survive portable import and encrypted backup restore. Derived state is never
 exported: the FTS5 projection is refilled from passages on import, and semantic vectors, index
 checkpoints, captures, and caches can be rebuilt. Source files themselves are not copied; an
 imported artifact whose original path is missing shows as unavailable.

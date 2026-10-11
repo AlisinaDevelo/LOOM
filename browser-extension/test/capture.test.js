@@ -1,12 +1,17 @@
 import assert from "node:assert/strict";
+import { createHash, createHmac } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 
 import {
   LIFECYCLE_MESSAGES,
   MAX_SNAPSHOT_BYTES,
+  MAX_SELECTED_TEXT_BYTES,
+  MAX_TITLE_BYTES,
   buildCaptureMessages,
+  canonicalJson,
   captureActiveTab,
+  collectPageFromTab,
   describeCaptureResponse,
   sanitizeHtml,
 } from "../src/capture.js";
@@ -115,6 +120,80 @@ test("caps oversized snapshots as partial instead of sending unbounded bytes", a
   assert.equal(result.request.snapshot.failure_code, "snapshot_truncated");
   assert.ok(result.request.snapshot.bytes <= MAX_SNAPSHOT_BYTES);
   assert.ok(result.payloads.length > 1);
+});
+
+test("multibyte truncation preserves protocol caps and authenticated payload bytes", async () => {
+  for (const character of ["é", "€", "😀"]) {
+    const result = await messages({page: page({
+      title: `x${character.repeat(MAX_TITLE_BYTES)}`,
+      selectedText: `x${character.repeat(MAX_SELECTED_TEXT_BYTES)}`,
+      html: `x${character.repeat(Math.ceil(MAX_SNAPSHOT_BYTES / Buffer.byteLength(character)))}`,
+    })});
+    assert.ok(Buffer.byteLength(result.request.source.title) <= MAX_TITLE_BYTES);
+    assert.ok(Buffer.byteLength(result.request.source.selected_text) <= MAX_SELECTED_TEXT_BYTES);
+    assert.ok(result.request.snapshot.bytes <= MAX_SNAPSHOT_BYTES);
+    const bytes = Buffer.concat(result.payloads.map((payload) => Buffer.from(payload.body, "base64")));
+    const decoded = new TextDecoder("utf-8", {fatal: true}).decode(bytes);
+    assert.ok(!decoded.includes("\ufffd"));
+    assert.ok(!result.request.source.title.includes("\ufffd"));
+    assert.ok(!result.request.source.selected_text.includes("\ufffd"));
+    assert.equal(bytes.length, result.request.snapshot.bytes);
+    assert.equal(result.request.snapshot.content_hash, `sha256:${createHash("sha256").update(bytes).digest("hex")}`);
+    assert.equal(result.request.snapshot.state, "partial");
+    for (const frame of [result.request, ...result.payloads]) {
+      const unsigned = structuredClone(frame);
+      delete unsigned.auth.mac;
+      assert.equal(frame.auth.mac, createHmac("sha256", Buffer.from(SESSION.secretBase64, "base64"))
+        .update(canonicalJson(unsigned)).digest("hex"));
+    }
+  }
+});
+
+test("raw DOM truncation stays partial when sanitization shrinks the captured prefix", async () => {
+  const leadingScript = `<script>${"x".repeat(1024 * 1024)}</script>`;
+  const previousDocument = Object.getOwnPropertyDescriptor(globalThis, "document");
+  const previousLocation = Object.getOwnPropertyDescriptor(globalThis, "location");
+  Object.defineProperty(globalThis, "document", {configurable: true, value: {
+    title: "Synthetic large page", documentElement: {outerHTML: `${leadingScript}<p>${"x".repeat(MAX_SNAPSHOT_BYTES)}</p>missing-tail`},
+  }});
+  Object.defineProperty(globalThis, "location", {configurable: true, value: {href: "https://example.test/article"}});
+  try {
+    const collected = collectPageFromTab();
+    assert.equal(collected.truncated, true);
+    const result = await messages({page: page(collected)});
+    assert.ok(result.request.snapshot.bytes < MAX_SNAPSHOT_BYTES);
+    assert.equal(result.request.snapshot.state, "partial");
+    assert.equal(result.request.snapshot.failure_code, "snapshot_truncated");
+    const text = Buffer.concat(result.payloads.map((payload) => Buffer.from(payload.body, "base64"))).toString("utf8");
+    assert.ok(!text.includes("missing-tail"));
+    assert.ok(!text.includes("<script>"));
+  } finally {
+    if (previousDocument) Object.defineProperty(globalThis, "document", previousDocument);
+    else delete globalThis.document;
+    if (previousLocation) Object.defineProperty(globalThis, "location", previousLocation);
+    else delete globalThis.location;
+  }
+});
+
+test("raw DOM collection bounds multibyte text before crossing the browser boundary", () => {
+  const previousDocument = Object.getOwnPropertyDescriptor(globalThis, "document");
+  const previousLocation = Object.getOwnPropertyDescriptor(globalThis, "location");
+  Object.defineProperty(globalThis, "document", {configurable: true, value: {
+    title: "Synthetic unicode page", documentElement: {outerHTML: "😀".repeat(MAX_SNAPSHOT_BYTES / 2)},
+  }});
+  Object.defineProperty(globalThis, "location", {configurable: true, value: {href: "https://example.test/article"}});
+  try {
+    const collected = collectPageFromTab();
+    assert.equal(collected.truncated, true);
+    assert.ok(Buffer.byteLength(collected.html) <= MAX_SNAPSHOT_BYTES + 1);
+    assert.ok(!collected.html.includes("\ufffd"));
+    assert.equal(new TextDecoder("utf-8", {fatal: true}).decode(Buffer.from(collected.html)), collected.html);
+  } finally {
+    if (previousDocument) Object.defineProperty(globalThis, "document", previousDocument);
+    else delete globalThis.document;
+    if (previousLocation) Object.defineProperty(globalThis, "location", previousLocation);
+    else delete globalThis.location;
+  }
 });
 
 test("offline pages retain source metadata but do not emit snapshot payloads", async () => {
