@@ -62,6 +62,29 @@ derived or diagnostic and may be rebuilt.
 
 ## Support policy
 
+The background queue has its own operational version, independent of canonical schema 10.
+Runtime v6 adds bounded semantic staging and active-pointer publication with canonical/policy
+mutation fences. Released v5 adds directory manifests/quanta and locator deletion/update fences.
+Recognized v5/v4/v3/v2 and legacy queues require explicit `upgrade-job-runtime` under kernel worker
+ownership; ordinary
+canonical open never silently upgrades them. Existing FTS/file/directory jobs and manifest units
+survive the transactional upgrade; v5 migration copies children/parents with reviewed FK ordering.
+Unknown layouts, stale extension objects under older markers and invalid copied rows roll back. Older
+workers must refuse v6 before claiming work. Portable exports exclude runtime rows/indexes/triggers;
+restore validates the runtime and clears its manifests and claims. See [background jobs](BACKGROUND_JOBS.md).
+
+Current semantic queries/foreground rebuild require runtime v6. Earlier runtimes have no semantic
+capability fences: upgrade discards their unverifiable legacy vectors/manifests, while preserving
+canonical evidence and queued file/directory work. Rebuild afterward. Semantic deletion remains
+available on recognized older layouts; this is not a guarantee about an older binary's no-op drop.
+
+Runtime v6 supports only its exact checked-in layout. Released v5 is a supported, explicitly
+migrated input with unit checksums and all ownership
+fences. Earlier unpushed, unreleased development prototypes also used the v5 marker; they are not
+supported migration inputs. A marker alone never authorizes migration or deletion: an unrecognized
+shape remains canonically readable but refuses queue operations and destructive runtime changes.
+Private runtime namespace checks are case-insensitive, matching SQLite identifier semantics.
+
 Schema version 10 is the supported local format. Versions 2 through 9 are supported by reviewed
 transactional migrations. Version 1 and unknown/future versions are intentionally rejected; LOOM
 does not promise to infer or rewrite an unrecognized format. Users with a rejected database keep

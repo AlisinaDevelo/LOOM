@@ -152,6 +152,51 @@ describe("accessibility of the primary search workflow", () => {
     expect(screen.queryByRole("region", { name: hit.title })).not.toBeInTheDocument();
   });
 
+  it.each(["Close", "Escape"])("returns focus after a pointer-opened viewer closes with %s", async (action) => {
+    render(<App />);
+    fireEvent.change(screen.getByRole("textbox", { name: "Search your local sources" }), {
+      target: { value: "retry anomalies" },
+    });
+    fireEvent.submit(screen.getByRole("search"));
+    const trigger = await screen.findByRole("button", { name: "View evidence" });
+    await waitFor(() => expect(screen.getByRole("heading", { name: "Recovered sources" })).toHaveFocus());
+    // WebKit on macOS need not focus a button on pointer activation. Do not pre-focus it.
+    expect(trigger).not.toHaveFocus();
+    fireEvent.click(trigger);
+    await screen.findByRole("heading", { name: hit.title, level: 2 });
+    if (action === "Close") fireEvent.click(screen.getByRole("button", { name: "Close" }));
+    else fireEvent.keyDown(window, { key: "Escape" });
+    await waitFor(() => expect(trigger).toHaveFocus());
+    expect(screen.queryByRole("region", { name: hit.title })).not.toBeInTheDocument();
+  });
+
+  it("returns focus to a newly clicked result rather than the previous viewer's trigger", async () => {
+    const secondHit = { ...hit, passage_id: "44444444-4444-4444-8444-444444444444", title: "second.md" };
+    const baseline = invokeMock.getMockImplementation();
+    invokeMock.mockImplementation(async (command, args) => {
+      if (command === "search") return [hit, secondHit];
+      if (command === "resolve_evidence") {
+        const reference = (args as { request: { passage_id: string } }).request;
+        return { ...evidenceView, ...(reference.passage_id === secondHit.passage_id ? secondHit : hit) };
+      }
+      return baseline?.(command, args);
+    });
+    render(<App />);
+    fireEvent.change(screen.getByRole("textbox", { name: "Search your local sources" }), {
+      target: { value: "retry anomalies" },
+    });
+    fireEvent.submit(screen.getByRole("search"));
+    const triggers = await screen.findAllByRole("button", { name: "View evidence" });
+    triggers[0].focus();
+    fireEvent.click(triggers[0]);
+    await screen.findByRole("heading", { name: hit.title, level: 2 });
+    await waitFor(() => expect(triggers[1]).toBeEnabled());
+    fireEvent.click(triggers[1]);
+    await screen.findByRole("heading", { name: secondHit.title, level: 2 });
+    fireEvent.keyDown(window, { key: "Escape" });
+    await waitFor(() => expect(triggers[1]).toHaveFocus());
+  });
+
   it("announces search progress and outcomes through one polite live region", async () => {
     render(<App />);
     const regions = document.querySelectorAll("[aria-live]");

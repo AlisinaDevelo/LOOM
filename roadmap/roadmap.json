@@ -1130,7 +1130,7 @@
     {
       "id": "0302",
       "title": "Implement artifact provenance and relationship records",
-      "status": "review",
+      "status": "done",
       "quarter": "Q05",
       "phase": "v0.3 Pattern",
       "workstream": "foundation",
@@ -1154,7 +1154,7 @@
         "area:evidence",
         "area:core"
       ],
-      "closure_evidence": "Implementation evidence: [docs/evidence/0302-device.md](https://github.com/AlisinaDevelo/LOOM/blob/main/docs/evidence/0302-device.md), PRs #223, #310 and #311; latest merged runtime 6cf16040c59f896649c163ffa9273ffd37db91f8. Typed/versioned edges, method/evidence/confidence checks, bounded endpoint and current-first version projections, exact current-file evidence resolution, metadata-only historical/non-file versions, stale refusal and async response guards are covered by Rust and UI tests. The packaged debug app on Apple M1/macOS 26.6.2 navigated a synthetic related source through native IPC to its verified passage and refused it after bytes changed; the app-only screenshot and retained build/session record contain no private material. Current merged-main regression and digest links are in the evidence document. Status remains review: dependent 0301 browser permission/release gates and a consented person-driven workflow study are not complete. No historical-byte archive or human study success is claimed.",
+      "closure_evidence": "All three criteria are mapped in [docs/evidence/0302-device.md](https://github.com/AlisinaDevelo/LOOM/blob/main/docs/evidence/0302-device.md). PRs #223, #310 and #311 cover typed/versioned relationships, unknown kinds, method/evidence/confidence/timestamp validation, bounded source/version views and stale refusal. PR #335 fixes macOS pointer focus return. The agent-driven packaged desktop session was repeated at merged main 0a533a6f142fb7713eeb81cb8abbf8dd16ac5ca6 on Apple M1/macOS 26.6.2 arm64: search, exact passage, edited-source versions, related-source/current-evidence traversal, changed-byte refusal/recovery, Escape/Close focus return and Return reopen passed. Cropped path-free panels, executable/build/check/purge digests and local verification are retained in the evidence document. Five synthetic artifacts, six versions/passages and one relationship were purged; post-purge counts were zero and isolated app data was removed. Browser release, strict audit and participant usability remain separate open gates; no historical-byte archive or person-run study is claimed.",
       "product_boundary": "LOOM remains local-first and evidence-first. Canonical source identity and evidence stay authoritative; derived indexes, model output, snapshots, and transport state remain inspectable, rebuildable, and explicitly uncertain."
     },
     {

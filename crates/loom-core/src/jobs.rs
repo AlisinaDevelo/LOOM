@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::{error::io_error, Library, LoomError, Result};
+mod semantic_schema;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -115,6 +116,26 @@ pub struct BackgroundJob {
     pub ready_at_ms: i64,
     pub last_error: Option<String>,
     pub result: Option<serde_json::Value>,
+    pub directory_progress: Option<DirectoryProgress>,
+    pub semantic_progress: Option<SemanticProgress>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SemanticProgress {
+    pub total_units: u32,
+    pub next_unit: u32,
+    pub vector_bytes: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DirectoryProgress {
+    pub total_units: u32,
+    pub next_unit: u32,
+    pub indexed: u32,
+    pub unchanged: u32,
+    pub skipped: u32,
+    pub bytes_read: u64,
+    pub last_extraction: Option<loom_extraction::ExtractionMetrics>,
 }
 
 const RUNTIME_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS background_job_runtime(
@@ -144,7 +165,7 @@ const RUNTIME_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS background_job_runtime(
          ) STRICT;
          CREATE INDEX IF NOT EXISTS background_jobs_ready ON background_jobs(state, ready_at_ms, sequence);";
 
-fn current_runtime_schema() -> String {
+fn runtime_schema_v4() -> String {
     RUNTIME_SCHEMA
         .replace("CHECK(operation = 'fts_repair')", "CHECK(operation IN ('fts_repair','index_file'))")
         .replace(
@@ -154,6 +175,105 @@ fn current_runtime_schema() -> String {
                 OR (operation = 'index_file' AND target_json IS NOT NULL)),
             CHECK((state = 'running'",
         )
+}
+
+const RUNTIME_SCHEMA_V5: &str = "CREATE TABLE IF NOT EXISTS background_job_runtime(
+    slot INTEGER PRIMARY KEY CHECK(slot = 1),
+    epoch INTEGER NOT NULL CHECK(epoch >= 0),
+    next_sequence INTEGER NOT NULL CHECK(next_sequence >= 1),
+    priority_streak INTEGER NOT NULL CHECK(priority_streak BETWEEN 0 AND 8),
+    policy_json TEXT NOT NULL
+) STRICT;
+CREATE TABLE IF NOT EXISTS background_jobs(
+    id TEXT PRIMARY KEY,
+    idempotency_key TEXT NOT NULL UNIQUE CHECK(length(idempotency_key) BETWEEN 1 AND 128),
+    operation TEXT NOT NULL CHECK(operation IN ('fts_repair','index_file','index_directory')),
+    priority INTEGER NOT NULL CHECK(priority BETWEEN 0 AND 2),
+    state TEXT NOT NULL CHECK(state IN ('queued','running','retryable','failed','cancelled','completed')),
+    attempts INTEGER NOT NULL CHECK(attempts BETWEEN 0 AND 8),
+    max_attempts INTEGER NOT NULL CHECK(max_attempts BETWEEN 1 AND 8),
+    sequence INTEGER NOT NULL UNIQUE CHECK(sequence > 0),
+    ready_at_ms INTEGER NOT NULL,
+    epoch INTEGER,
+    claim_token TEXT,
+    cancel_requested INTEGER NOT NULL DEFAULT 0 CHECK(cancel_requested IN (0,1)),
+    last_error TEXT CHECK(length(CAST(last_error AS BLOB)) <= 4096),
+    result_json TEXT CHECK(length(CAST(result_json AS BLOB)) <= 65536 AND json_valid(result_json)),
+    target_json TEXT CHECK(length(CAST(target_json AS BLOB)) <= 16384 AND json_valid(target_json)),
+    CHECK((operation = 'fts_repair' AND target_json IS NULL)
+        OR (operation IN ('index_file','index_directory') AND target_json IS NOT NULL)),
+    CHECK((state = 'running' AND epoch IS NOT NULL AND claim_token IS NOT NULL)
+        OR (state != 'running' AND epoch IS NULL AND claim_token IS NULL))
+) STRICT;
+CREATE INDEX IF NOT EXISTS background_jobs_ready ON background_jobs(state, ready_at_ms, sequence);
+CREATE TABLE IF NOT EXISTS background_directory_manifests(
+    job_id TEXT PRIMARY KEY REFERENCES background_jobs(id) ON DELETE CASCADE,
+    root_id TEXT NOT NULL CHECK(length(root_id) = 36),
+    root_locator TEXT NOT NULL CHECK(length(CAST(root_locator AS BLOB)) BETWEEN 1 AND 4096),
+    encoded_bytes INTEGER NOT NULL CHECK(encoded_bytes BETWEEN 0 AND 67108864),
+    total_units INTEGER NOT NULL CHECK(total_units BETWEEN 0 AND 20000),
+    next_unit INTEGER NOT NULL DEFAULT 0 CHECK(next_unit BETWEEN 0 AND total_units),
+    indexed INTEGER NOT NULL DEFAULT 0 CHECK(indexed BETWEEN 0 AND total_units),
+    unchanged INTEGER NOT NULL DEFAULT 0 CHECK(unchanged BETWEEN 0 AND total_units),
+    skipped INTEGER NOT NULL DEFAULT 0 CHECK(skipped BETWEEN 0 AND total_units),
+    bytes_read INTEGER NOT NULL DEFAULT 0 CHECK(bytes_read BETWEEN 0 AND 167772160000),
+    last_extraction_json TEXT CHECK(length(CAST(last_extraction_json AS BLOB)) <= 4096 AND json_valid(last_extraction_json)),
+    CHECK(indexed + unchanged + skipped = next_unit)
+) STRICT;
+CREATE TABLE IF NOT EXISTS background_directory_units(
+    job_id TEXT NOT NULL REFERENCES background_directory_manifests(job_id) ON DELETE CASCADE,
+    ordinal INTEGER NOT NULL CHECK(ordinal BETWEEN 0 AND 19999),
+    relative_path TEXT NOT NULL CHECK(length(CAST(relative_path AS BLOB)) BETWEEN 1 AND 4096),
+    locator TEXT NOT NULL CHECK(length(CAST(locator AS BLOB)) BETWEEN 1 AND 4096),
+    media_type TEXT,
+    identity_json TEXT NOT NULL CHECK(length(CAST(identity_json AS BLOB)) <= 256 AND json_valid(identity_json)),
+    artifact_id TEXT,
+    unit_hash TEXT NOT NULL CHECK(length(unit_hash)=71 AND substr(unit_hash,1,7)='blake3:'),
+    PRIMARY KEY(job_id, ordinal),
+    UNIQUE(job_id, locator)
+) STRICT;
+CREATE INDEX IF NOT EXISTS background_directory_unit_locator ON background_directory_units(locator, job_id);
+CREATE INDEX IF NOT EXISTS background_directory_unit_artifact ON background_directory_units(artifact_id, job_id);
+CREATE INDEX IF NOT EXISTS background_directory_artifact_root ON artifacts(source_root_id, state, id);
+CREATE INDEX IF NOT EXISTS background_directory_artifact_locator ON artifact_locators(artifact_id, kind, active, locator);";
+
+// A canonical-only writer can delete a newly created artifact after an empty admission. Its
+// locator deletion must also invalidate the manifest: NULL -> artifact -> NULL is not consent.
+const DIRECTORY_DELETE_FENCE: &str =
+    "CREATE TRIGGER IF NOT EXISTS background_directory_locator_deleted
+AFTER DELETE ON artifact_locators WHEN OLD.kind = 'file'
+BEGIN
+    DELETE FROM background_jobs WHERE operation='index_directory' AND id IN
+        (SELECT job_id FROM background_directory_units WHERE locator = OLD.locator);
+END";
+
+const DIRECTORY_UPDATE_FENCE: &str =
+    "CREATE TRIGGER IF NOT EXISTS background_directory_locator_changed
+AFTER UPDATE OF locator,artifact_id,kind,active ON artifact_locators
+WHEN OLD.kind='file' AND (NEW.locator<>OLD.locator OR NEW.artifact_id<>OLD.artifact_id
+    OR NEW.kind<>OLD.kind OR (OLD.active=1 AND NEW.active=0))
+BEGIN
+    DELETE FROM background_jobs WHERE operation='index_directory' AND id IN
+        (SELECT job_id FROM background_directory_units WHERE locator IN (OLD.locator,NEW.locator));
+END";
+
+const DIRECTORY_ARTIFACT_FENCE: &str =
+    "CREATE TRIGGER IF NOT EXISTS background_directory_artifact_changed
+AFTER UPDATE OF source_root_id,state ON artifacts
+WHEN NEW.source_root_id<>OLD.source_root_id OR (NEW.state='tombstoned' AND OLD.state<>'tombstoned')
+BEGIN
+    DELETE FROM background_jobs WHERE operation='index_directory' AND id IN
+        (SELECT job_id FROM background_directory_units WHERE artifact_id=OLD.id OR locator IN
+            (SELECT locator FROM artifact_locators WHERE artifact_id=OLD.id AND kind='file'));
+END";
+
+#[cfg(test)]
+fn create_runtime_v5(connection: &Connection) -> Result<()> {
+    connection.execute_batch(RUNTIME_SCHEMA_V5)?;
+    connection.execute_batch(DIRECTORY_DELETE_FENCE)?;
+    connection.execute_batch(DIRECTORY_UPDATE_FENCE)?;
+    connection.execute_batch(DIRECTORY_ARTIFACT_FENCE)?;
+    Ok(())
 }
 
 pub(crate) fn ensure_schema(connection: &Connection) -> Result<()> {
@@ -171,7 +291,7 @@ pub(crate) fn ensure_schema(connection: &Connection) -> Result<()> {
         return Ok(());
     }
     let existing: bool = transaction.query_row(
-        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name = 'background_jobs')",
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE lower(name) GLOB 'background_*')",
         [],
         |row| row.get(0),
     )?;
@@ -179,13 +299,13 @@ pub(crate) fn ensure_schema(connection: &Connection) -> Result<()> {
         // Existing runtimes migrate only through an explicit kernel-owned upgrade.
         return Ok(());
     }
-    transaction.execute_batch(&current_runtime_schema())?;
+    semantic_schema::create(&transaction)?;
     transaction.execute(
         "INSERT INTO background_job_runtime VALUES (1, 0, 1, 0, ?1) ON CONFLICT(slot) DO NOTHING",
         [serde_json::to_string(&JobQueuePolicy::default())?],
     )?;
     transaction.execute(
-        "INSERT INTO schema_meta(key,value) VALUES ('background_job_schema_version','4')",
+        "INSERT INTO schema_meta(key,value) VALUES ('background_job_schema_version','6')",
         [],
     )?;
     transaction.commit()?;
@@ -202,17 +322,26 @@ fn upgrade_runtime(connection: &Connection) -> Result<()> {
             |row| row.get(0),
         )
         .optional()?;
-    if version.as_deref() == Some("4") {
+    if version.as_deref() == Some("6") {
+        return validate_schema(connection);
+    }
+    if version.as_deref() == Some("5") {
+        semantic_schema::migrate_v5(connection)?;
+        connection.execute(
+            "UPDATE schema_meta SET value='6' WHERE key='background_job_schema_version'",
+            [],
+        )?;
         return validate_schema(connection);
     }
     let recognized = match version.as_deref() {
-        Some("3") => validate_definitions(connection, &current_runtime_schema()),
+        Some("3" | "4") => validate_definitions(connection, &runtime_schema_v4()),
         Some("2") => validate_definitions(connection, RUNTIME_SCHEMA),
         None => validate_definitions(connection, RUNTIME_SCHEMA)
             .or_else(|_| validate_definitions(connection, &legacy_runtime_schema())),
         _ => Err(LoomError::JobQueue("unsupported runtime upgrade".into())),
     };
     recognized?;
+    refuse_directory_objects(connection)?;
     let policy = load_policy(connection)?;
     let count: u32 =
         connection.query_row("SELECT COUNT(*) FROM background_jobs", [], |row| row.get(0))?;
@@ -225,17 +354,25 @@ fn upgrade_runtime(connection: &Connection) -> Result<()> {
         "ALTER TABLE background_jobs RENAME TO background_jobs_previous;
         DROP INDEX background_jobs_ready;",
     )?;
-    connection.execute_batch(&current_runtime_schema())?;
-    let copy = if version.as_deref() == Some("3") {
-        "INSERT INTO background_jobs SELECT * FROM background_jobs_previous"
+    semantic_schema::create(connection)?;
+    let columns = "id,idempotency_key,operation,priority,state,attempts,max_attempts,sequence,
+        ready_at_ms,epoch,claim_token,cancel_requested,last_error,result_json";
+    let target = if matches!(version.as_deref(), Some("3" | "4")) {
+        "target_json"
     } else {
-        "INSERT INTO background_jobs SELECT *, NULL FROM background_jobs_previous"
+        "NULL"
     };
+    let copy = format!(
+        "INSERT INTO background_jobs({columns},target_json)
+        SELECT {columns},{target} FROM background_jobs_previous"
+    );
     // Reapply STRICT/CHECK constraints to every bounded retained row, including v3.
-    connection.execute(copy, [])?;
+    connection.execute(&copy, [])?;
     connection.execute("DROP TABLE background_jobs_previous", [])?;
+    connection
+        .execute_batch("DELETE FROM semantic_embeddings; DELETE FROM semantic_index_meta;")?;
     connection.execute(
-        "INSERT INTO schema_meta(key,value) VALUES ('background_job_schema_version','4')
+        "INSERT INTO schema_meta(key,value) VALUES ('background_job_schema_version','6')
          ON CONFLICT(key) DO UPDATE SET value=excluded.value",
         [],
     )?;
@@ -251,33 +388,51 @@ fn legacy_runtime_schema() -> String {
         )
 }
 
+fn refuse_directory_objects(connection: &Connection) -> Result<()> {
+    let extra: bool = connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE
+        lower(name) GLOB 'background_directory_*' OR lower(name) GLOB 'background_semantic_*')",
+        [],
+        |row| row.get(0),
+    )?;
+    if extra {
+        return Err(LoomError::JobQueue(
+            "older runtime contains unknown directory objects; operation refused".into(),
+        ));
+    }
+    Ok(())
+}
+
 fn validate_definitions(connection: &Connection, schema: &str) -> Result<()> {
+    for definition in schema.split(';').filter(|sql| !sql.trim().is_empty()) {
+        let name = definition
+            .split_whitespace()
+            .nth(5)
+            .and_then(|name| name.split('(').next())
+            .ok_or_else(|| LoomError::JobQueue("invalid runtime definition".into()))?;
+        validate_definition(connection, name, definition)?;
+    }
+    Ok(())
+}
+
+fn validate_definition(connection: &Connection, name: &str, definition: &str) -> Result<()> {
     fn normalized(sql: &str) -> String {
         sql.split_whitespace()
             .collect::<String>()
             .to_ascii_lowercase()
             .replace("ifnotexists", "")
     }
-    for definition in schema.split(';').filter(|sql| !sql.trim().is_empty()) {
-        let name = if definition.contains("CREATE INDEX") {
-            "background_jobs_ready"
-        } else if definition.contains("background_job_runtime(") {
-            "background_job_runtime"
-        } else {
-            "background_jobs"
-        };
-        let actual: Option<String> = connection
-            .query_row(
-                "SELECT sql FROM sqlite_master WHERE name = ?1",
-                [name],
-                |row| row.get(0),
-            )
-            .optional()?;
-        if actual.as_deref().map(normalized) != Some(normalized(definition)) {
-            return Err(LoomError::JobQueue(format!(
-                "missing or unsupported runtime schema: {name}"
-            )));
-        }
+    let actual: Option<String> = connection
+        .query_row(
+            "SELECT sql FROM sqlite_master WHERE name=?1",
+            [name],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if actual.as_deref().map(normalized) != Some(normalized(definition)) {
+        return Err(LoomError::JobQueue(format!(
+            "missing or unsupported runtime schema: {name}"
+        )));
     }
     Ok(())
 }
@@ -291,12 +446,41 @@ fn validate_runtime_layout(connection: &Connection) -> Result<()> {
             |row| row.get(0),
         )
         .optional()?;
-    if version.as_deref() != Some("4") {
+    if version.as_deref() != Some("6") {
         return Err(LoomError::JobQueue(
             "unsupported or unmigrated runtime schema; explicitly run upgrade-job-runtime".into(),
         ));
     }
-    validate_definitions(connection, &current_runtime_schema())?;
+    semantic_schema::validate(connection)
+}
+
+fn validate_runtime_v5(connection: &Connection) -> Result<()> {
+    validate_definitions(connection, RUNTIME_SCHEMA_V5)?;
+    validate_definition(
+        connection,
+        "background_directory_locator_deleted",
+        DIRECTORY_DELETE_FENCE,
+    )?;
+    validate_definition(
+        connection,
+        "background_directory_locator_changed",
+        DIRECTORY_UPDATE_FENCE,
+    )?;
+    validate_definition(
+        connection,
+        "background_directory_artifact_changed",
+        DIRECTORY_ARTIFACT_FENCE,
+    )?;
+    let extra: bool = connection.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE lower(name) GLOB 'background_*'
+        AND lower(name) NOT IN ('background_job_runtime','background_jobs','background_jobs_ready',
+            'background_directory_manifests','background_directory_units','background_directory_unit_locator',
+            'background_directory_unit_artifact','background_directory_artifact_root','background_directory_artifact_locator',
+            'background_directory_locator_deleted','background_directory_locator_changed','background_directory_artifact_changed'))", [], |row| row.get(0))?;
+    if extra {
+        return Err(LoomError::JobQueue(
+            "unknown private runtime object; operation refused".into(),
+        ));
+    }
     Ok(())
 }
 
@@ -304,6 +488,39 @@ pub(crate) fn validate_schema(connection: &Connection) -> Result<()> {
     validate_runtime_layout(connection)?;
     load_policy(connection)?;
     Ok(())
+}
+
+pub(crate) fn clear_semantic(connection: &Connection) -> Result<()> {
+    semantic_schema::clear(connection)
+}
+
+pub(crate) fn validate_semantic_layout(connection: &Connection) -> Result<()> {
+    validate_runtime_layout(connection)
+}
+
+pub(crate) fn validate_legacy_semantic_mutation(
+    connection: &Connection,
+    version: Option<&str>,
+) -> Result<()> {
+    match version {
+        Some("5") => validate_runtime_v5(connection),
+        Some("3" | "4") => {
+            refuse_directory_objects(connection)?;
+            validate_definitions(connection, &runtime_schema_v4())
+        }
+        Some("2") => {
+            refuse_directory_objects(connection)?;
+            validate_definitions(connection, RUNTIME_SCHEMA)
+        }
+        None => {
+            refuse_directory_objects(connection)?;
+            validate_definitions(connection, RUNTIME_SCHEMA)
+                .or_else(|_| validate_definitions(connection, &legacy_runtime_schema()))
+        }
+        _ => Err(LoomError::JobQueue(
+            "unsupported runtime; semantic mutation refused".into(),
+        )),
+    }
 }
 
 fn load_policy(connection: &Connection) -> Result<JobQueuePolicy> {
@@ -330,7 +547,11 @@ fn next_sequence(connection: &Connection) -> Result<i64> {
 }
 
 pub(crate) fn reset_for_restore(connection: &Connection) -> Result<()> {
+    validate_runtime_layout(connection)?;
     advance_epoch(connection)?;
+    semantic_schema::clear(connection)?;
+    connection.execute("DELETE FROM background_directory_units", [])?;
+    connection.execute("DELETE FROM background_directory_manifests", [])?;
     connection.execute("DELETE FROM background_jobs", [])?;
     connection.execute(
         "UPDATE background_job_runtime SET priority_streak = 0 WHERE slot = 1",
@@ -341,7 +562,7 @@ pub(crate) fn reset_for_restore(connection: &Connection) -> Result<()> {
 
 fn purge_runtime_recovery_error() -> LoomError {
     LoomError::JobQueue(
-        "deletion refused: no data was deleted because the durable job runtime is unsupported or malformed; use a compatible LOOM release or run the owned upgrade-job-runtime migration before retrying".into(),
+        "deletion refused: no data was deleted because the durable job runtime is unsupported or malformed; use a compatible LOOM release or run the owned upgrade-job-runtime migration before retrying. For malformed target diagnostics, inspect jobs, cancel-job, then forget-job before retrying".into(),
     )
 }
 
@@ -367,12 +588,12 @@ fn validate_purge_runtime_row(connection: &Connection) -> Result<()> {
 
 /// Purge must also remove bounded operational locators/diagnostics and invalidate running claims.
 /// Known older runtimes contain no file targets; never silently migrate them during deletion.
-pub(crate) fn purge_file_targets(
-    connection: &Connection,
+pub(crate) fn purge_file_targets<'a>(
+    connection: &'a rusqlite::Transaction<'_>,
     locator: Option<&str>,
     artifact_id: Option<&str>,
     images: bool,
-) -> Result<()> {
+) -> Result<ValidatedPurge<'a>> {
     let version: Option<String> = connection
         .query_row(
             "SELECT value FROM schema_meta WHERE key='background_job_schema_version'",
@@ -384,7 +605,10 @@ pub(crate) fn purge_file_targets(
     if version.as_deref() == Some("3") {
         return Err(purge_runtime_recovery_error());
     }
-    if version.as_deref() != Some("4") {
+    if !matches!(version.as_deref(), Some("5" | "6")) {
+        refuse_directory_objects(connection).map_err(|_| purge_runtime_recovery_error())?;
+    }
+    if !matches!(version.as_deref(), Some("4" | "5" | "6")) {
         if version.as_deref() == Some("2") {
             validate_definitions(connection, RUNTIME_SCHEMA)
                 .map_err(|_| purge_runtime_recovery_error())?;
@@ -395,12 +619,67 @@ pub(crate) fn purge_file_targets(
         } else {
             return Err(purge_runtime_recovery_error());
         }
-        return Ok(());
+        return Ok(ValidatedPurge {
+            connection,
+            files: false,
+            directories: false,
+            semantic: false,
+        });
     }
-    validate_runtime_layout(connection).map_err(|_| purge_runtime_recovery_error())?;
+    if version.as_deref() == Some("4") {
+        validate_definitions(connection, &runtime_schema_v4())
+            .map_err(|_| purge_runtime_recovery_error())?;
+    } else {
+        if version.as_deref() == Some("5") {
+            validate_runtime_v5(connection).map_err(|_| purge_runtime_recovery_error())?;
+        } else {
+            validate_runtime_layout(connection).map_err(|_| purge_runtime_recovery_error())?;
+        }
+        crate::store::validate_directory_targets_for_purge(connection)
+            .map_err(|_| purge_runtime_recovery_error())?;
+    }
     validate_purge_runtime_row(connection).map_err(|_| purge_runtime_recovery_error())?;
-    connection.execute(
-        "DELETE FROM background_jobs WHERE operation='index_file' AND (
+    let purge = ValidatedPurge {
+        connection,
+        files: true,
+        directories: matches!(version.as_deref(), Some("5" | "6")),
+        semantic: version.as_deref() == Some("6"),
+    };
+    purge.apply(connection, locator, artifact_id, images)?;
+    Ok(purge)
+}
+
+/// Reuse a validated immutable writer snapshot for bulk deletion instead of rescanning every
+/// unrelated manifest per artifact. This permit cannot be created outside a transaction.
+pub(crate) struct ValidatedPurge<'a> {
+    connection: &'a Connection,
+    files: bool,
+    directories: bool,
+    semantic: bool,
+}
+
+impl ValidatedPurge<'_> {
+    pub(crate) fn apply(
+        &self,
+        transaction: &rusqlite::Transaction<'_>,
+        locator: Option<&str>,
+        artifact_id: Option<&str>,
+        images: bool,
+    ) -> Result<()> {
+        let connection: &Connection = transaction;
+        if !std::ptr::eq(connection, self.connection) {
+            return Err(LoomError::JobQueue(
+                "purge permit belongs to another transaction connection".into(),
+            ));
+        }
+        if !self.files {
+            return Ok(());
+        }
+        if self.semantic {
+            semantic_schema::clear(connection)?;
+        }
+        connection.execute(
+            "DELETE FROM background_jobs WHERE operation='index_file' AND (
             (?1 IS NOT NULL AND (
                 json_extract(target_json,'$.locator') = ?1
                 OR json_extract(target_json,'$.authorization.root_id') IN
@@ -410,9 +689,25 @@ pub(crate) fn purge_file_targets(
                     (SELECT locator FROM artifact_locators WHERE artifact_id=?2 AND kind='file')
                 OR json_extract(target_json,'$.artifact_id') = ?2))
             OR (?3=1 AND json_extract(target_json,'$.media_type') LIKE 'image/%'))",
-        params![locator, artifact_id, images],
-    )?;
-    Ok(())
+            params![locator, artifact_id, images],
+        )?;
+        if self.directories {
+            connection.execute(
+            "DELETE FROM background_jobs WHERE operation='index_directory' AND (
+                (?1 IS NOT NULL AND (json_extract(target_json,'$.locator')=?1
+                    OR id IN (SELECT job_id FROM background_directory_manifests
+                        WHERE root_locator=?1 OR root_id IN (SELECT id FROM source_roots WHERE locator=?1))
+                    OR id IN (SELECT job_id FROM background_directory_units WHERE locator=?1)))
+                OR (?2 IS NOT NULL AND id IN (SELECT job_id FROM background_directory_units
+                    WHERE artifact_id=?2 OR locator IN
+                        (SELECT locator FROM artifact_locators WHERE artifact_id=?2 AND kind='file')))
+                OR (?3=1 AND (json_extract(target_json,'$.authorization.ocr_policy') IS NOT NULL
+                    OR id IN (SELECT job_id FROM background_directory_units WHERE media_type LIKE 'image/%'))))",
+            params![locator, artifact_id, images],
+        )?;
+        }
+        Ok(())
+    }
 }
 
 fn advance_epoch(connection: &Connection) -> Result<i64> {
@@ -437,15 +732,48 @@ fn get_job(connection: &Connection, id: &str) -> Result<BackgroundJob> {
             row.get::<_, i64>(8)?, row.get::<_, Option<String>>(9)?, row.get::<_, Option<String>>(10)?,
             row.get::<_, Option<String>>(11)?)),
     ).optional()?.ok_or_else(|| LoomError::JobQueue(format!("job not found: {id}")))?;
+    let directory_progress = if raw.2 == "index_directory" {
+        connection
+            .query_row(
+            "SELECT total_units,next_unit,indexed,unchanged,skipped,bytes_read,last_extraction_json
+            FROM background_directory_manifests WHERE job_id=?1",
+                [id],
+                |row| {
+                    Ok(DirectoryProgress {
+                        total_units: row.get(0)?,
+                        next_unit: row.get(1)?,
+                        indexed: row.get(2)?,
+                        unchanged: row.get(3)?,
+                        skipped: row.get(4)?,
+                    bytes_read: row_bytes(row, 5)?,
+                    last_extraction: row_metrics(row, 6)?,
+                    })
+                },
+            )
+            .optional()?
+    } else {
+        None
+    };
+    let semantic_progress = if raw.2 == "semantic_rebuild" {
+        connection.query_row("SELECT total_units,next_unit,vector_bytes FROM background_semantic_builds WHERE job_id=?1",
+            [id], |row| Ok(SemanticProgress { total_units: row.get(0)?, next_unit: row.get(1)?, vector_bytes: row_bytes(row,2)? })).optional()?
+    } else {
+        None
+    };
     Ok(BackgroundJob {
         id: raw.0,
         idempotency_key: raw.1,
         operation: raw.2,
         // Invalid typed payloads must remain inspectable after a failed dispatch.
         target_locator: raw.11.as_deref().and_then(|json| {
-            serde_json::from_str::<crate::store::IndexFileTarget>(json)
+            serde_json::from_str::<serde_json::Value>(json)
                 .ok()
-                .map(|target| target.locator)
+                .and_then(|target| {
+                    target
+                        .get("locator")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_owned)
+                })
         }),
         state: JobState::parse(&raw.3)?,
         priority: JobPriority::parse(raw.4)?,
@@ -458,7 +786,67 @@ fn get_job(connection: &Connection, id: &str) -> Result<BackgroundJob> {
             .10
             .map(|value| serde_json::from_str(&value))
             .transpose()?,
+        directory_progress,
+        semantic_progress,
     })
+}
+
+pub(crate) fn row_bytes(row: &rusqlite::Row<'_>, index: usize) -> rusqlite::Result<u64> {
+    let value: i64 = row.get(index)?;
+    u64::try_from(value).map_err(|_| rusqlite::Error::IntegralValueOutOfRange(index, value))
+}
+
+fn replay_directory_selection(
+    connection: &Connection,
+    key: &str,
+    priority: JobPriority,
+    matches_target: impl FnOnce(&str) -> Result<bool>,
+) -> Result<Option<BackgroundJob>> {
+    let existing: Option<(String, Option<String>)> = connection
+        .query_row(
+            "SELECT id,target_json FROM background_jobs WHERE idempotency_key=?1",
+            [key],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?;
+    let Some((id, target)) = existing else {
+        return Ok(None);
+    };
+    let job = get_job(connection, &id)?;
+    if job.operation != "index_directory" || job.priority != priority {
+        return Err(LoomError::JobQueue("idempotency key conflict".into()));
+    }
+    let target = target.ok_or_else(|| LoomError::JobQueue("directory target is missing".into()))?;
+    if !matches_target(&target)? {
+        return Err(LoomError::JobQueue("idempotency key conflict".into()));
+    }
+    if matches!(
+        job.state,
+        JobState::Queued | JobState::Running | JobState::Retryable
+    ) && job.directory_progress.is_none()
+    {
+        return Err(LoomError::JobQueue(
+            "pending directory manifest is missing".into(),
+        ));
+    }
+    Ok(Some(job))
+}
+
+pub(crate) fn row_metrics(
+    row: &rusqlite::Row<'_>,
+    index: usize,
+) -> rusqlite::Result<Option<loom_extraction::ExtractionMetrics>> {
+    row.get::<_, Option<String>>(index)?
+        .map(|json| {
+            serde_json::from_str(&json).map_err(|error| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    index,
+                    rusqlite::types::Type::Text,
+                    Box::new(error),
+                )
+            })
+        })
+        .transpose()
 }
 
 impl Library {
@@ -503,6 +891,31 @@ impl Library {
         Ok(job)
     }
 
+    /// Queue a capped snapshot of already indexed canonical passages, never select a source.
+    pub fn enqueue_semantic_rebuild(
+        &self,
+        key: &str,
+        priority: JobPriority,
+    ) -> Result<BackgroundJob> {
+        validate_key(key)?;
+        let mut connection = self.queue_connection()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let admission = self.prepare_semantic_admission(&transaction)?;
+        let json = admission.target_json()?;
+        let existing: bool = transaction.query_row(
+            "SELECT EXISTS(SELECT 1 FROM background_jobs WHERE idempotency_key=?1)",
+            [key],
+            |row| row.get(0),
+        )?;
+        let job = admit(&transaction, key, priority, "semantic_rebuild", Some(&json))?;
+        if !existing {
+            admission.insert(&transaction, &job)?;
+        }
+        let job = get_job(&transaction, &job.id)?;
+        transaction.commit()?;
+        Ok(job)
+    }
+
     /// Queue one already-approved regular file. Admission never selects a new source or extracts it.
     pub fn enqueue_index_file(
         &self,
@@ -517,6 +930,83 @@ impl Library {
         let target = crate::store::IndexFileTarget::capture(&transaction, &locator)?;
         let json = serde_json::to_string(&target)?;
         let job = admit(&transaction, key, priority, "index_file", Some(&json))?;
+        transaction.commit()?;
+        Ok(job)
+    }
+
+    /// Complete finite metadata discovery before admitting one already-approved directory.
+    /// This does not grant/reselect consent and does not read or extract file content.
+    pub fn enqueue_index_directory(
+        &self,
+        path: impl AsRef<Path>,
+        key: &str,
+        priority: JobPriority,
+    ) -> Result<BackgroundJob> {
+        validate_key(key)?;
+        // Validate runtime before walking, but hold neither SQLite nor a source-grant transaction.
+        drop(self.queue_connection()?);
+        let admission = self.prepare_directory_admission(path.as_ref())?;
+        let mut connection = self.queue_connection()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let json = admission.target_json(&transaction)?;
+        let existing: bool = transaction.query_row(
+            "SELECT EXISTS(SELECT 1 FROM background_jobs WHERE idempotency_key=?1)",
+            [key],
+            |row| row.get(0),
+        )?;
+        let job = admit(&transaction, key, priority, "index_directory", Some(&json))?;
+        admission.insert_manifest(&transaction, &job, existing)?;
+        let job = get_job(&transaction, &job.id)?;
+        transaction.commit()?;
+        Ok(job)
+    }
+
+    /// Explicitly select a folder and atomically admit its first durable scan.
+    /// A repeated key returns its original job without refreshing consent, even after revocation.
+    pub fn select_and_enqueue_directory(
+        &self,
+        path: impl AsRef<Path>,
+        key: &str,
+        priority: JobPriority,
+    ) -> Result<BackgroundJob> {
+        self.select_directory_before_admission(path.as_ref(), key, priority, || {})
+    }
+
+    fn select_directory_before_admission(
+        &self,
+        path: &Path,
+        key: &str,
+        priority: JobPriority,
+        before_admission: impl FnOnce(),
+    ) -> Result<BackgroundJob> {
+        validate_key(key)?;
+        drop(self.queue_connection()?);
+        let selected = self.prepare_directory_selection(path)?;
+        {
+            let mut connection = self.queue_connection()?;
+            let transaction = connection.transaction()?;
+            if let Some(job) = replay_directory_selection(&transaction, key, priority, |json| {
+                selected.matches_target(json)
+            })? {
+                return Ok(job);
+            }
+        }
+        let prepared = self.discover_directory_selection(selected)?;
+        before_admission();
+        let mut connection = self.queue_connection()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        // Another caller may have admitted this request during discovery. Replaying that row
+        // must not reauthorize an older selection observation or mutate last_seen_at.
+        if let Some(job) = replay_directory_selection(&transaction, key, priority, |json| {
+            prepared.matches_target(json)
+        })? {
+            return Ok(job);
+        }
+        let admission = prepared.authorize(&transaction)?;
+        let json = admission.target_json(&transaction)?;
+        let job = admit(&transaction, key, priority, "index_directory", Some(&json))?;
+        admission.insert_manifest(&transaction, &job, false)?;
+        let job = get_job(&transaction, &job.id)?;
         transaction.commit()?;
         Ok(job)
     }
@@ -550,6 +1040,12 @@ impl Library {
              WHERE id = ?1 AND state IN ('queued','running','retryable')",
             [id],
         )?;
+        transaction.execute(
+            "DELETE FROM background_directory_manifests WHERE job_id=?1
+            AND (SELECT state FROM background_jobs WHERE id=?1)='cancelled'",
+            [id],
+        )?;
+        transaction.execute("DELETE FROM background_semantic_builds WHERE job_id=?1 AND (SELECT state FROM background_jobs WHERE id=?1)='cancelled'", [id])?;
         let job = get_job(&transaction, id)?;
         transaction.commit()?;
         Ok(job)
@@ -679,6 +1175,12 @@ impl JobWorker {
                     last_error = 'worker stopped before completion' WHERE state = 'running'",
                 [Utc::now().timestamp_millis()],
             )?;
+            transaction.execute(
+                "DELETE FROM background_directory_manifests WHERE job_id IN
+                (SELECT id FROM background_jobs WHERE state IN ('cancelled','failed'))",
+                [],
+            )?;
+            transaction.execute("DELETE FROM background_semantic_builds WHERE job_id IN (SELECT id FROM background_jobs WHERE state IN ('cancelled','failed'))", [])?;
             transaction.commit()?;
             epoch
         };
@@ -800,6 +1302,10 @@ pub(crate) struct JobClaim {
 }
 
 impl JobClaim {
+    pub(crate) fn id(&self) -> &str {
+        &self.id
+    }
+
     pub(crate) fn verify_operation(
         &self,
         connection: &Connection,
@@ -841,6 +1347,29 @@ impl JobClaim {
                 AND epoch = ?3 AND claim_token = ?4 AND cancel_requested = 0",
             params![result, self.id, self.epoch, self.token],
         )?;
+        if changed != 1 {
+            return Err(LoomError::JobClaimStale(self.id.clone()));
+        }
+        connection.execute(
+            "DELETE FROM background_directory_manifests WHERE job_id=?1",
+            [&self.id],
+        )?;
+        connection.execute(
+            "DELETE FROM background_semantic_builds WHERE job_id=?1",
+            [&self.id],
+        )?;
+        get_job(connection, &self.id)
+    }
+
+    /// A successful bounded quantum is not a retry. Append it to the queue for fairness, keeping
+    /// publication/cursor advancement and claim release in the caller's writer transaction.
+    pub(crate) fn yield_progress(&self, connection: &Connection) -> Result<BackgroundJob> {
+        self.verify(connection)?;
+        let sequence = next_sequence(connection)?;
+        let changed = connection.execute("UPDATE background_jobs SET state='queued', epoch=NULL,
+            claim_token=NULL, attempts=attempts-1, sequence=?1, ready_at_ms=?2, last_error=NULL
+            WHERE id=?3 AND state='running' AND epoch=?4 AND claim_token=?5 AND cancel_requested=0 AND attempts>0",
+            params![sequence, Utc::now().timestamp_millis(), self.id, self.epoch, self.token])?;
         if changed != 1 {
             return Err(LoomError::JobClaimStale(self.id.clone()));
         }
@@ -967,6 +1496,12 @@ impl JobWorker {
              WHERE id = ?5",
             params![retryable, reason, due, sequence, claim.id, cancelled],
         )?;
+        transaction.execute(
+            "DELETE FROM background_directory_manifests WHERE job_id=?1
+            AND (SELECT state FROM background_jobs WHERE id=?1) IN ('failed','cancelled')",
+            [&claim.id],
+        )?;
+        transaction.execute("DELETE FROM background_semantic_builds WHERE job_id=?1 AND (SELECT state FROM background_jobs WHERE id=?1) IN ('failed','cancelled')", [&claim.id])?;
         let settled = get_job(&transaction, &claim.id)?;
         transaction.commit()?;
         Ok(settled)
@@ -1000,6 +1535,11 @@ impl JobWorker {
                     self.library
                         .job_index_file(&claim, json, self.extractor.as_ref())
                 }
+                ("index_directory", Some(json)) => {
+                    self.library
+                        .job_index_directory(&claim, json, self.extractor.as_ref())
+                }
+                ("semantic_rebuild", Some(json)) => self.library.job_semantic_rebuild(&claim, json),
                 _ => Err(LoomError::JobQueue("invalid operation or target".into())),
             }
         })();
@@ -1056,6 +1596,36 @@ mod tests {
     use tempfile::{tempdir, TempDir};
 
     #[test]
+    fn partial_runtime_namespace_refuses_creation_regardless_of_case() {
+        for name in [
+            "background_unknown",
+            "BACKGROUND_UNKNOWN",
+            "Background_Unknown",
+        ] {
+            let connection = Connection::open_in_memory().unwrap();
+            connection
+                .execute_batch(&format!(
+                    "CREATE TABLE schema_meta(key TEXT PRIMARY KEY, value TEXT NOT NULL);
+                     CREATE TABLE {name}(private_locator TEXT);"
+                ))
+                .unwrap();
+            ensure_schema(&connection).unwrap();
+            let tables: i64 = connection
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE type='table'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(tables, 2, "{name}");
+            let markers: i64 = connection
+                .query_row("SELECT COUNT(*) FROM schema_meta", [], |row| row.get(0))
+                .unwrap();
+            assert_eq!(markers, 0, "{name}");
+        }
+    }
+
+    #[test]
     fn fresh_queue_requires_supervised_extraction_runtime() {
         let (_directory, library) = fixture();
         let connection = library.lock().unwrap();
@@ -1066,7 +1636,7 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(version, "4", "old workers must refuse before claiming work");
+        assert_eq!(version, "6", "old workers must refuse before claiming work");
     }
 
     #[cfg(target_os = "macos")]
@@ -1284,6 +1854,149 @@ mod tests {
         (directory, library)
     }
 
+    #[test]
+    fn explicit_directory_selection_refuses_consent_and_identity_races_atomically() {
+        for selected in [false, true] {
+            for action in [
+                "revoke",
+                "reselect",
+                "purge",
+                "restore",
+                "replace",
+                "exact-child",
+            ] {
+                let (temporary, library) = fixture();
+                let root = temporary.path().join("selected");
+                fs::create_dir(&root).unwrap();
+                fs::write(root.join("a.md"), "Synthetic selection race marker").unwrap();
+                let root = root.canonicalize().unwrap();
+                let controller = Library::open(temporary.path().join("queue.sqlite3")).unwrap();
+                if selected {
+                    controller.index_path(&root).unwrap();
+                }
+                let baseline = std::cell::RefCell::new(None);
+                let result = library.select_directory_before_admission(
+                    &root,
+                    "race",
+                    JobPriority::Normal,
+                    || {
+                        match action {
+                            "revoke" | "reselect" => {
+                                if !selected {
+                                    controller.index_path(&root).unwrap();
+                                }
+                                controller
+                                    .revoke_source_root(root.to_str().unwrap())
+                                    .unwrap();
+                                if action == "reselect" {
+                                    controller.index_path(&root).unwrap();
+                                }
+                            }
+                            "purge" => {
+                                controller.purge_root(root.to_str().unwrap()).unwrap();
+                            }
+                            "restore" => {
+                                if selected {
+                                    controller.purge_root(root.to_str().unwrap()).unwrap();
+                                }
+                                let archive = controller.export_portable().unwrap();
+                                controller.import_portable(&archive).unwrap();
+                            }
+                            "replace" => {
+                                let moved = temporary.path().join("moved");
+                                fs::rename(&root, &moved).unwrap();
+                                fs::create_dir(&root).unwrap();
+                                fs::hard_link(moved.join("a.md"), root.join("a.md")).unwrap();
+                            }
+                            "exact-child" => {
+                                if selected {
+                                    controller.purge_root(root.to_str().unwrap()).unwrap();
+                                }
+                                controller.index_path(root.join("a.md")).unwrap();
+                            }
+                            _ => unreachable!(),
+                        }
+                        *baseline.borrow_mut() = Some((
+                            controller.export_portable().unwrap().digest,
+                            controller.source_roots().unwrap(),
+                            controller.background_jobs(128).unwrap(),
+                        ));
+                    },
+                );
+                assert!(
+                    matches!(
+                        result,
+                        Err(LoomError::SourceRevoked(_) | LoomError::SourceChanged(_))
+                    ),
+                    "{selected}/{action}: {result:?}"
+                );
+                let (digest, roots, jobs) = baseline.into_inner().unwrap();
+                assert_eq!(controller.export_portable().unwrap().digest, digest);
+                assert_eq!(controller.source_roots().unwrap(), roots);
+                assert_eq!(controller.background_jobs(128).unwrap(), jobs);
+            }
+        }
+    }
+
+    #[test]
+    fn concurrent_identical_selection_replays_instead_of_reauthorizing() {
+        let (temporary, library) = fixture();
+        let root = temporary.path().join("selected");
+        fs::create_dir(&root).unwrap();
+        fs::write(root.join("a.md"), "Concurrent synthetic selection marker").unwrap();
+        let controller = Library::open(temporary.path().join("queue.sqlite3")).unwrap();
+        let baseline = std::cell::RefCell::new(None);
+        let replay = library
+            .select_directory_before_admission(&root, "same", JobPriority::Normal, || {
+                let admitted = controller
+                    .select_and_enqueue_directory(&root, "same", JobPriority::Normal)
+                    .unwrap();
+                controller
+                    .lock()
+                    .unwrap()
+                    .execute(
+                        "UPDATE source_roots SET last_seen_at='2020-01-01T00:00:00Z'",
+                        [],
+                    )
+                    .unwrap();
+                *baseline.borrow_mut() = Some((
+                    admitted,
+                    controller.export_portable().unwrap().digest,
+                    controller.source_roots().unwrap(),
+                ));
+            })
+            .unwrap();
+        let (admitted, digest, roots) = baseline.into_inner().unwrap();
+        assert_eq!(replay, admitted);
+        assert_eq!(controller.export_portable().unwrap().digest, digest);
+        assert_eq!(controller.source_roots().unwrap(), roots);
+        assert_eq!(controller.background_jobs(128).unwrap(), [admitted]);
+    }
+
+    #[test]
+    fn selected_directory_rejects_nested_namespace_drift_before_writer_admission() {
+        let (temporary, library) = fixture();
+        let root = temporary.path().join("selected");
+        fs::create_dir_all(root.join("nested")).unwrap();
+        fs::write(root.join("nested/a.md"), "Nested selection marker").unwrap();
+        let before = library.export_portable().unwrap().digest;
+        let result = library.select_directory_before_admission(
+            &root,
+            "namespace",
+            JobPriority::Normal,
+            || {
+                fs::write(root.join("nested/b.md"), "Added while waiting for writer").unwrap();
+            },
+        );
+        assert!(
+            matches!(result, Err(LoomError::SourceChanged(_))),
+            "namespace drift was admitted: {result:?}"
+        );
+        assert_eq!(library.export_portable().unwrap().digest, before);
+        assert!(library.source_roots().unwrap().is_empty());
+        assert!(library.background_jobs(128).unwrap().is_empty());
+    }
+
     // Unit race/state fixtures use the Cargo-managed test helper. The
     // extractor_helper integration test makes Cargo build it in this target
     // directory/profile; never search PATH or fall back to an in-process
@@ -1321,12 +2034,42 @@ mod tests {
 
     fn after_deliberate_test_drop<T>(mut operation: impl FnMut() -> Result<T>) -> Result<T> {
         // Other test threads can fork with a transient copy of the CLOEXEC lock
-        // descriptor. This applies only after a known owner release; production
-        // acquisition and all live-contention assertions remain immediate.
+        // descriptor. This applies only after a known logical owner release or
+        // test-child startup with no expected live owner; production acquisition
+        // and all live-contention assertions remain immediate.
         let start = Instant::now();
         loop {
             match operation() {
                 Err(LoomError::JobWorkerBusy) if start.elapsed() < Duration::from_millis(500) => {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                result => return result,
+            }
+        }
+    }
+
+    fn restore_fixture_while_old_worker_settles(
+        library: &Library,
+        export: &crate::PortableExport,
+    ) -> Result<crate::PortableImportReport> {
+        // Emptying this fixture invalidates the running child. Its terminal queue write can
+        // race the deferred import snapshot. Only a clean transactional Busy/Locked rollback
+        // may be retried; never hide a partial import or change the production restore policy.
+        let empty = library.export_portable()?.digest;
+        let start = Instant::now();
+        loop {
+            match library.import_portable(export) {
+                Err(LoomError::Database(rusqlite::Error::SqliteFailure(ref error, _)))
+                    if matches!(
+                        error.code,
+                        rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked
+                    ) && start.elapsed() < Duration::from_millis(500) =>
+                {
+                    assert_eq!(
+                        library.export_portable()?.digest,
+                        empty,
+                        "busy import changed canonical evidence"
+                    );
                     std::thread::sleep(Duration::from_millis(5));
                 }
                 result => return result,
@@ -1453,7 +2196,7 @@ mod tests {
                         .unwrap()
                         .execute_batch("DELETE FROM artifacts; DELETE FROM source_roots;")
                         .unwrap();
-                    library.import_portable(&restore).unwrap();
+                    restore_fixture_while_old_worker_settles(&library, &restore).unwrap();
                 }
                 "target" => {
                     library.lock().unwrap().execute("UPDATE background_jobs SET target_json=json_set(target_json,'$.locator','/wrong.md') WHERE id=?1", [&job.id]).unwrap();
@@ -1490,6 +2233,106 @@ mod tests {
                 "target" => assert_eq!(outcome.unwrap().unwrap().state, JobState::Failed),
                 "cas" => assert_eq!(outcome.unwrap().unwrap().state, JobState::Retryable),
                 _ => unreachable!(),
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn live_directory_helpers_obey_consent_purge_restore_ocr_and_cas_fences() {
+        for action in [
+            "cancel",
+            "revoke",
+            "purge",
+            "root-purge",
+            "restore",
+            "ocr",
+            "cas",
+        ] {
+            let (temporary, library) = fixture();
+            let root = temporary.path().join("selected");
+            fs::create_dir(&root).unwrap();
+            let root = root.canonicalize().unwrap();
+            library.set_ocr_enabled(false).unwrap();
+            library.index_path(&root).unwrap();
+            let source = root.join(if action == "ocr" { "a.png" } else { "a.md" });
+            fs::write(
+                &source,
+                if action == "ocr" {
+                    include_bytes!("../../../tests/fixtures/ocr-golden.png").as_slice()
+                } else {
+                    b"Existing directory marker"
+                },
+            )
+            .unwrap();
+            library.index_path(&root).unwrap();
+            if action == "ocr" {
+                library.set_ocr_enabled(true).unwrap();
+            }
+            let archive = library.export_portable().unwrap();
+            let job = library
+                .enqueue_index_directory(&root, "live-directory", JobPriority::Normal)
+                .unwrap();
+            let (_fault_dir, executable, pid) = fault_extractor("hang");
+            let mut worker = library
+                .acquire_job_worker()
+                .unwrap()
+                .with_extractor_path(executable)
+                .unwrap();
+            let started = Instant::now();
+            let thread = std::thread::spawn(move || worker.run_next());
+            wait_for_fixture(&pid);
+            match action {
+                "cancel" => {
+                    library.cancel_background_job(&job.id).unwrap();
+                }
+                "revoke" => {
+                    library.revoke_source_root(root.to_str().unwrap()).unwrap();
+                }
+                "purge" => {
+                    library
+                        .purge_artifact(&file_identity(&library, &source).0)
+                        .unwrap();
+                }
+                "root-purge" => {
+                    library.purge_root(root.to_str().unwrap()).unwrap();
+                }
+                "restore" => {
+                    // Empty canonical precondition without the public operational purge path.
+                    library
+                        .lock()
+                        .unwrap()
+                        .execute_batch("DELETE FROM artifacts; DELETE FROM source_roots;")
+                        .unwrap();
+                    library.import_portable(&archive).unwrap();
+                }
+                "ocr" => {
+                    library.set_ocr_enabled(true).unwrap();
+                }
+                "cas" => {
+                    fs::write(&source, "Foreground directory marker").unwrap();
+                    library.index_path(&root).unwrap();
+                }
+                _ => unreachable!(),
+            }
+            let controller = library.export_portable().unwrap().digest;
+            let outcome = thread.join().unwrap();
+            assert!(
+                started.elapsed() < Duration::from_secs(3),
+                "{action}: interruption delayed"
+            );
+            assert_fixture_reaped(&pid);
+            assert_eq!(
+                library.export_portable().unwrap().digest,
+                controller,
+                "{action}: stale publication"
+            );
+            match action {
+                "purge" | "root-purge" | "restore" => {
+                    assert!(outcome.is_err(), "{action}: {outcome:?}")
+                }
+                "cas" => assert_eq!(outcome.unwrap().unwrap().state, JobState::Retryable),
+                _ => assert_eq!(outcome.unwrap().unwrap().state, JobState::Cancelled),
             }
         }
     }
@@ -1652,14 +2495,7 @@ mod tests {
             .unwrap();
         let before = library.export_portable().unwrap().digest;
         let worker = test_worker(&library).unwrap();
-        library
-            .lock()
-            .unwrap()
-            .execute(
-                "UPDATE schema_meta SET value='3' WHERE key='background_job_schema_version'",
-                [],
-            )
-            .unwrap();
+        downgrade_file_runtime(&library, "3");
         assert!(matches!(
             library.upgrade_job_runtime(),
             Err(LoomError::JobWorkerBusy)
@@ -1671,7 +2507,12 @@ mod tests {
         library.upgrade_job_runtime().unwrap();
         assert_eq!(library.background_job(&queued.id).unwrap(), queued);
         assert_eq!(library.export_portable().unwrap().digest, before);
-        library.lock().unwrap().execute_batch("UPDATE schema_meta SET value='3' WHERE key='background_job_schema_version'; PRAGMA ignore_check_constraints=ON;").unwrap();
+        downgrade_file_runtime(&library, "3");
+        library
+            .lock()
+            .unwrap()
+            .execute_batch("PRAGMA ignore_check_constraints=ON;")
+            .unwrap();
         library
             .lock()
             .unwrap()
@@ -2948,6 +3789,7 @@ mod tests {
     fn downgrade_runtime_layout(library: &Library, versioned: bool) {
         let mut connection = library.lock().unwrap();
         let transaction = connection.transaction().unwrap();
+        drop_directory_fixture_objects(&transaction);
         transaction.execute_batch("ALTER TABLE background_jobs RENAME TO current_jobs; DROP INDEX background_jobs_ready;").unwrap();
         let schema = if versioned {
             RUNTIME_SCHEMA.to_owned()
@@ -2975,6 +3817,381 @@ mod tests {
         if versioned {
             library.lock().unwrap().execute("INSERT INTO schema_meta(key,value) VALUES ('background_job_schema_version','2')", []).unwrap();
         }
+    }
+
+    fn drop_directory_fixture_objects(connection: &Connection) {
+        drop_semantic_fixture_objects(connection);
+        connection
+            .execute_batch(
+                "DROP TRIGGER background_directory_locator_deleted;
+            DROP TRIGGER background_directory_locator_changed;
+            DROP TRIGGER background_directory_artifact_changed;
+            DROP INDEX background_directory_artifact_root;
+            DROP INDEX background_directory_artifact_locator;
+            DROP TABLE background_directory_units;
+            DROP TABLE background_directory_manifests;",
+            )
+            .unwrap();
+    }
+
+    fn drop_semantic_fixture_objects(connection: &Connection) {
+        for (name, _) in semantic_schema::fences() {
+            connection
+                .execute_batch(&format!("DROP TRIGGER {name};"))
+                .unwrap();
+        }
+        connection
+            .execute_batch(
+                "DROP TABLE background_semantic_active;
+            DROP TABLE background_semantic_units; DROP TABLE background_semantic_builds;",
+            )
+            .unwrap();
+    }
+
+    fn downgrade_file_runtime(library: &Library, version: &str) {
+        let mut connection = library.lock().unwrap();
+        let transaction = connection.transaction().unwrap();
+        drop_directory_fixture_objects(&transaction);
+        transaction.execute_batch("ALTER TABLE background_jobs RENAME TO current_jobs; DROP INDEX background_jobs_ready;").unwrap();
+        transaction.execute_batch(&runtime_schema_v4()).unwrap();
+        transaction
+            .execute("INSERT INTO background_jobs SELECT * FROM current_jobs", [])
+            .unwrap();
+        transaction.execute("DROP TABLE current_jobs", []).unwrap();
+        transaction
+            .execute(
+                "UPDATE schema_meta SET value=?1 WHERE key='background_job_schema_version'",
+                [version],
+            )
+            .unwrap();
+        transaction.commit().unwrap();
+    }
+
+    fn downgrade_v5_for_fixture(library: &Library) {
+        let mut connection = library.lock().unwrap();
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .unwrap();
+        drop_semantic_fixture_objects(&transaction);
+        transaction.execute_batch("DROP TRIGGER background_directory_locator_deleted;
+            DROP TRIGGER background_directory_locator_changed; DROP TRIGGER background_directory_artifact_changed;
+            ALTER TABLE background_directory_units RENAME TO background_directory_units_previous;
+            ALTER TABLE background_directory_manifests RENAME TO background_directory_manifests_previous;
+            ALTER TABLE background_jobs RENAME TO background_jobs_previous;
+            DROP INDEX background_jobs_ready; DROP INDEX background_directory_unit_locator; DROP INDEX background_directory_unit_artifact;").unwrap();
+        create_runtime_v5(&transaction).unwrap();
+        transaction.execute_batch("INSERT INTO background_jobs SELECT * FROM background_jobs_previous;
+            INSERT INTO background_directory_manifests SELECT * FROM background_directory_manifests_previous;
+            INSERT INTO background_directory_units SELECT * FROM background_directory_units_previous;
+            DROP TABLE background_directory_units_previous; DROP TABLE background_directory_manifests_previous; DROP TABLE background_jobs_previous;
+            UPDATE schema_meta SET value='5' WHERE key='background_job_schema_version';").unwrap();
+        transaction.commit().unwrap();
+    }
+
+    #[test]
+    fn released_v5_migration_preserves_directory_payload_policy_and_all_states() {
+        let (temporary, library) = fixture();
+        let root = temporary.path().join("selected");
+        fs::create_dir(&root).unwrap();
+        fs::write(root.join("a.md"), "Released v5 canonical fixture").unwrap();
+        library.index_path(&root).unwrap();
+        let policy = JobQueuePolicy {
+            priority_burst: 2,
+            ..JobQueuePolicy::default()
+        };
+        library.set_job_queue_policy(policy).unwrap();
+        let directory = library
+            .enqueue_index_directory(&root, "v5-directory", JobPriority::Normal)
+            .unwrap();
+        for state in [
+            "queued",
+            "running",
+            "retryable",
+            "completed",
+            "failed",
+            "cancelled",
+        ] {
+            let job = library.enqueue_fts_repair(state, JobPriority::Low).unwrap();
+            library
+                .lock()
+                .unwrap()
+                .execute(
+                    "UPDATE background_jobs SET state=?1,attempts=1,
+                epoch=CASE WHEN ?1='running' THEN 0 ELSE NULL END,
+                claim_token=CASE WHEN ?1='running' THEN 'old-claim' ELSE NULL END WHERE id=?2",
+                    params![state, job.id],
+                )
+                .unwrap();
+        }
+        let before = library.export_portable().unwrap().digest;
+        downgrade_v5_for_fixture(&library);
+        let payload: Vec<(String, u32, String)> = library
+            .lock()
+            .unwrap()
+            .prepare(
+                "SELECT job_id,ordinal,unit_hash FROM background_directory_units ORDER BY ordinal",
+            )
+            .unwrap()
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert!(library.acquire_job_worker().is_err());
+        assert!(!library
+            .search(&crate::SearchRequest {
+                text: "canonical fixture".into(),
+                limit: 5
+            })
+            .unwrap()
+            .is_empty());
+        after_deliberate_test_drop(|| library.upgrade_job_runtime()).unwrap();
+        assert_eq!(library.job_queue_policy().unwrap(), policy);
+        assert_eq!(library.background_job(&directory.id).unwrap(), directory);
+        let rows = library.background_jobs(128).unwrap();
+        for row in rows {
+            let expected = if row.idempotency_key == "running" {
+                JobState::Retryable
+            } else {
+                JobState::parse(&row.idempotency_key).unwrap_or(JobState::Queued)
+            };
+            assert_eq!(row.state, expected);
+        }
+        let connection = library.lock().unwrap();
+        let after: Vec<(String, u32, String)> = connection
+            .prepare(
+                "SELECT job_id,ordinal,unit_hash FROM background_directory_units ORDER BY ordinal",
+            )
+            .unwrap()
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(payload, after);
+        let fk: u64 = connection
+            .query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |row| {
+                row_bytes(row, 0)
+            })
+            .unwrap();
+        assert_eq!(fk, 0);
+        drop(connection);
+        after_deliberate_test_drop(|| library.upgrade_job_runtime()).unwrap();
+        assert_eq!(library.export_portable().unwrap().digest, before);
+    }
+
+    #[test]
+    fn released_v5_unknown_or_missing_objects_roll_back_owned_migration() {
+        for damage in ["extra", "missing"] {
+            let (_temporary, library) = fixture();
+            library
+                .enqueue_fts_repair("preserved", JobPriority::Normal)
+                .unwrap();
+            downgrade_v5_for_fixture(&library);
+            library
+                .lock()
+                .unwrap()
+                .execute_batch(if damage == "extra" {
+                    "CREATE TABLE BACKGROUND_PRIVATE_SECRET(value TEXT);"
+                } else {
+                    "DROP TRIGGER background_directory_locator_deleted;"
+                })
+                .unwrap();
+            assert!(library.upgrade_job_runtime().is_err());
+            let connection = library.lock().unwrap();
+            let (version,epoch,count): (String,i64,i64)=connection.query_row("SELECT (SELECT value FROM schema_meta WHERE key='background_job_schema_version'),
+                (SELECT epoch FROM background_job_runtime),(SELECT COUNT(*) FROM background_jobs)",[],|row| Ok((row.get(0)?,row.get(1)?,row.get(2)?))).unwrap();
+            assert_eq!((version, epoch, count), ("5".into(), 0, 1));
+            assert!(connection
+                .prepare("SELECT * FROM background_semantic_builds")
+                .is_err());
+        }
+    }
+
+    #[test]
+    fn unfenced_v5_semantic_reads_require_upgrade_and_upgrade_discards_unverifiable_vectors() {
+        for action in ["none", "ocr-reassert", "empty-purge"] {
+            let (temporary, library, source) = file_fixture();
+            library.semantic_rebuild().unwrap();
+            assert!(library.semantic_status().unwrap().healthy);
+            let before = library.stats().unwrap();
+            downgrade_v5_for_fixture(&library);
+            match action {
+                "none" => {}
+                "ocr-reassert" => {
+                    library
+                        .set_ocr_enabled(library.ocr_status().unwrap().enabled)
+                        .unwrap();
+                }
+                "empty-purge" => {
+                    library
+                        .purge_root(temporary.path().join("absent").to_str().unwrap())
+                        .unwrap();
+                }
+                _ => unreachable!(),
+            }
+            assert!(!library.semantic_status().unwrap().healthy, "{action}");
+            assert!(library.semantic_search("marker", 10).is_err());
+            assert!(library.semantic_rebuild().is_err());
+            assert_eq!(library.stats().unwrap(), before);
+            after_deliberate_test_drop(|| library.upgrade_job_runtime()).unwrap();
+            assert!(
+                !library.semantic_status().unwrap().healthy,
+                "{action}: unverifiable old vectors survived upgrade"
+            );
+            library.semantic_rebuild().unwrap();
+            assert!(library.semantic_status().unwrap().healthy);
+            assert_eq!(library.stats().unwrap(), before);
+            assert!(source.exists());
+        }
+    }
+
+    #[test]
+    fn older_runtime_extra_directory_objects_cannot_silently_survive_purge() {
+        for version in ["legacy", "2", "4"] {
+            let temporary = tempdir().unwrap();
+            let library = Library::open(temporary.path().join("library.sqlite3")).unwrap();
+            let root = temporary.path().join("selected");
+            fs::create_dir(&root).unwrap();
+            fs::write(root.join("a.md"), "Retained evidence marker").unwrap();
+            library.index_path(&root).unwrap();
+            match version {
+                "legacy" => downgrade_runtime_layout(&library, false),
+                "2" => downgrade_runtime_layout(&library, true),
+                "4" => downgrade_file_runtime(&library, "4"),
+                _ => unreachable!(),
+            }
+            library
+                .lock()
+                .unwrap()
+                .execute_batch("CREATE TABLE background_directory_unknown(private_locator TEXT);")
+                .unwrap();
+            let before = library.export_portable().unwrap().digest;
+            assert!(
+                library
+                    .purge_root(root.to_str().unwrap())
+                    .unwrap_err()
+                    .to_string()
+                    .contains("no data was deleted"),
+                "{version}"
+            );
+            assert_eq!(library.export_portable().unwrap().digest, before);
+            library
+                .lock()
+                .unwrap()
+                .execute_batch(
+                    "DROP TABLE background_directory_unknown;
+                CREATE TABLE BACKGROUND_DIRECTORY_UNKNOWN(private_locator TEXT);",
+                )
+                .unwrap();
+            assert!(
+                library
+                    .purge_root(root.to_str().unwrap())
+                    .unwrap_err()
+                    .to_string()
+                    .contains("no data was deleted"),
+                "{version}"
+            );
+            assert_eq!(library.export_portable().unwrap().digest, before);
+        }
+    }
+
+    #[test]
+    fn current_runtime_unknown_objects_refuse_purge_restore_and_queue_commands() {
+        let temporary = tempdir().unwrap();
+        let library = Library::open(temporary.path().join("library.sqlite3")).unwrap();
+        let export = library.export_portable().unwrap();
+        library
+            .lock()
+            .unwrap()
+            .execute_batch(
+                "CREATE TABLE background_directory_unknown(private_locator TEXT);
+            INSERT INTO background_directory_unknown VALUES ('synthetic-private-locator');",
+            )
+            .unwrap();
+        assert!(library
+            .purge_root("/synthetic-absent-root")
+            .unwrap_err()
+            .to_string()
+            .contains("no data was deleted"));
+        assert!(library
+            .import_portable(&export)
+            .unwrap_err()
+            .to_string()
+            .contains("unknown private runtime object"));
+        assert!(library
+            .enqueue_fts_repair("unknown-layout", JobPriority::Normal)
+            .is_err());
+        assert_eq!(library.export_portable().unwrap().digest, export.digest);
+        let retained: String = library
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT private_locator FROM background_directory_unknown",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(retained, "synthetic-private-locator");
+        library
+            .lock()
+            .unwrap()
+            .execute_batch(
+                "DROP TABLE background_directory_unknown;
+            CREATE TABLE BACKGROUND_DIRECTORY_UNKNOWN(private_locator TEXT);",
+            )
+            .unwrap();
+        assert!(library
+            .purge_root("/synthetic-absent-root")
+            .unwrap_err()
+            .to_string()
+            .contains("no data was deleted"));
+        assert!(library
+            .import_portable(&export)
+            .unwrap_err()
+            .to_string()
+            .contains("unknown private runtime object"));
+        assert!(library
+            .enqueue_fts_repair("uppercase-unknown-layout", JobPriority::Normal)
+            .is_err());
+        assert_eq!(library.export_portable().unwrap().digest, export.digest);
+    }
+
+    #[test]
+    fn purge_validation_permit_cannot_apply_to_another_connection() {
+        let temporary = tempdir().unwrap();
+        let first = Library::open(temporary.path().join("first.sqlite3")).unwrap();
+        let second = Library::open(temporary.path().join("second.sqlite3")).unwrap();
+        let mut first_connection = first.lock().unwrap();
+        let transaction = first_connection.transaction().unwrap();
+        let permit = purge_file_targets(&transaction, None, None, false).unwrap();
+        let mut second_connection = second.lock().unwrap();
+        let other = second_connection.transaction().unwrap();
+        assert!(permit
+            .apply(&other, None, None, false)
+            .unwrap_err()
+            .to_string()
+            .contains("another transaction connection"));
+    }
+
+    #[test]
+    fn v4_file_runtime_upgrade_preserves_target_and_canonical_evidence() {
+        let (_temporary, library, source) = file_fixture();
+        let queued = library
+            .enqueue_index_file(&source, "v4-file", JobPriority::Normal)
+            .unwrap();
+        let before = library.export_portable().unwrap().digest;
+        downgrade_file_runtime(&library, "4");
+        assert!(library.acquire_job_worker().is_err());
+        after_deliberate_test_drop(|| library.upgrade_job_runtime()).unwrap();
+        assert_eq!(library.background_job(&queued.id).unwrap(), queued);
+        assert_eq!(library.export_portable().unwrap().digest, before);
+        after_deliberate_test_drop(|| library.upgrade_job_runtime()).unwrap();
+        let completed = reacquire_after_deliberate_test_drop(&library)
+            .unwrap()
+            .run_next()
+            .unwrap()
+            .unwrap();
+        assert_eq!(completed.id, queued.id);
+        assert_eq!(completed.state, JobState::Completed);
     }
 
     #[test]
@@ -3552,29 +4769,216 @@ mod tests {
     }
 
     #[test]
+    fn killed_directory_worker_recovers_before_and_after_atomic_quantum_commit() {
+        for published in [false, true] {
+            let (temporary, library) = fixture();
+            let root = temporary.path().join("selected");
+            fs::create_dir(&root).unwrap();
+            library.index_path(&root).unwrap();
+            for name in ["a.md", "b.md"] {
+                fs::write(root.join(name), name).unwrap();
+            }
+            let job = library
+                .enqueue_index_directory(&root, "directory-crash", JobPriority::Normal)
+                .unwrap();
+            let canonical = library.export_portable().unwrap().digest;
+            let ready = temporary.path().join("directory-ready");
+            let mut command = Command::new(std::env::current_exe().unwrap());
+            command
+                .args(["jobs::tests::process_lock_child", "--exact", "--nocapture"])
+                .env(
+                    "LOOM_TEST_JOB_LOCK_DATABASE",
+                    temporary.path().join("queue.sqlite3"),
+                )
+                .env("LOOM_TEST_JOB_LOCK_READY", &ready)
+                .stdout(Stdio::null());
+            if published {
+                command.env("LOOM_TEST_DIRECTORY_AFTER_QUANTUM", "1");
+            }
+            let mut child = ChildGuard(command.spawn().unwrap());
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while !ready.exists() && Instant::now() < deadline {
+                assert!(
+                    child.0.try_wait().unwrap().is_none(),
+                    "child exited before directory quantum"
+                );
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            assert!(ready.exists());
+            assert!(matches!(
+                test_worker(&library),
+                Err(LoomError::JobWorkerBusy)
+            ));
+            let before_kill = library.background_job(&job.id).unwrap();
+            assert_eq!(
+                before_kill.directory_progress.unwrap().next_unit,
+                u32::from(published)
+            );
+            if !published {
+                assert_eq!(library.export_portable().unwrap().digest, canonical);
+            }
+            child.0.kill().unwrap();
+            child.0.wait().unwrap();
+            let mut recovered = reacquire_after_deliberate_test_drop(&library).unwrap();
+            loop {
+                let quantum = recovered.run_next().unwrap().unwrap();
+                assert_eq!(quantum.id, job.id);
+                if quantum.state == JobState::Completed {
+                    break;
+                }
+                assert_eq!(quantum.state, JobState::Queued);
+            }
+            assert_eq!(library.stats().unwrap().artifacts, 2);
+            assert_eq!(library.stats().unwrap().versions, 2);
+        }
+    }
+
+    #[test]
+    fn killed_semantic_worker_recovers_before_and_after_atomic_quantum_commit() {
+        for committed in [false, true] {
+            let (temporary, library) = fixture();
+            let root = temporary.path().join("selected");
+            fs::create_dir(&root).unwrap();
+            for name in ["a", "b"] {
+                fs::write(
+                    root.join(format!("{name}.md")),
+                    format!("Synthetic crash marker {name}"),
+                )
+                .unwrap();
+            }
+            library.index_path(&root).unwrap();
+            let expected = library.semantic_rebuild().unwrap();
+            let canonical = library.export_portable().unwrap().digest;
+            let job = library
+                .enqueue_semantic_rebuild("semantic-crash", JobPriority::Normal)
+                .unwrap();
+            let ready = temporary.path().join("semantic-ready");
+            let mut command = Command::new(std::env::current_exe().unwrap());
+            command
+                .args(["jobs::tests::process_lock_child", "--exact", "--nocapture"])
+                .env(
+                    "LOOM_TEST_JOB_LOCK_DATABASE",
+                    temporary.path().join("queue.sqlite3"),
+                )
+                .env("LOOM_TEST_JOB_LOCK_READY", &ready)
+                .stdout(Stdio::null());
+            if committed {
+                command.env("LOOM_TEST_SEMANTIC_AFTER_QUANTUM", "1");
+            }
+            let mut child = ChildGuard(command.spawn().unwrap());
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while !ready.exists() && Instant::now() < deadline {
+                assert!(child.0.try_wait().unwrap().is_none());
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            assert!(ready.exists());
+            assert!(matches!(
+                test_worker(&library),
+                Err(LoomError::JobWorkerBusy)
+            ));
+            assert_eq!(
+                library
+                    .background_job(&job.id)
+                    .unwrap()
+                    .semantic_progress
+                    .unwrap()
+                    .next_unit,
+                u32::from(committed)
+            );
+            assert!(library.semantic_status().unwrap().healthy);
+            child.0.kill().unwrap();
+            child.0.wait().unwrap();
+            let mut recovered = reacquire_after_deliberate_test_drop(&library).unwrap();
+            let completed = loop {
+                let quantum = recovered.run_next().unwrap().unwrap();
+                assert_eq!(quantum.id, job.id);
+                if quantum.state == JobState::Completed {
+                    break quantum;
+                }
+            };
+            assert_eq!(
+                completed.result,
+                Some(serde_json::to_value(&expected).unwrap())
+            );
+            assert_eq!(library.export_portable().unwrap().digest, canonical);
+            assert!(library.semantic_status().unwrap().healthy);
+        }
+    }
+
+    #[test]
     fn process_lock_child() {
         let Some(database) = std::env::var_os("LOOM_TEST_JOB_LOCK_DATABASE") else {
             return;
         };
         let library = Library::open_for_jobs(database).unwrap();
-        let mut worker = test_worker(&library).unwrap();
+        // The parent fixture has no live owner. Parallel test forks can
+        // still retain a CLOEXEC descriptor briefly, just as in drop/reacquire.
+        let mut worker = after_deliberate_test_drop(|| {
+            let acquisition = test_worker(&library);
+            if matches!(acquisition, Err(LoomError::JobWorkerBusy)) {
+                if let Some(blocked) = std::env::var_os("LOOM_TEST_JOB_LOCK_BLOCKED") {
+                    fs::write(blocked, "blocked").unwrap();
+                }
+            }
+            acquisition
+        })
+        .unwrap();
         let claim = worker.claim_at(now()).unwrap().unwrap();
-        let target: Option<String> = worker
+        let (operation, target): (String, Option<String>) = worker
             .library
             .lock()
             .unwrap()
             .query_row(
-                "SELECT target_json FROM background_jobs WHERE id=?1",
+                "SELECT operation,target_json FROM background_jobs WHERE id=?1",
                 [&claim.id],
-                |row| row.get(0),
+                |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .unwrap();
-        let _prepared = target.as_deref().map(|json| {
+        if operation == "semantic_rebuild" {
+            let json = target.as_deref().unwrap();
+            if std::env::var_os("LOOM_TEST_SEMANTIC_AFTER_QUANTUM").is_some() {
+                worker.library.job_semantic_rebuild(&claim, json).unwrap();
+            } else {
+                worker
+                    .library
+                    .job_semantic_rebuild_with_hook(&claim, json, || {
+                        fs::write(
+                            std::env::var_os("LOOM_TEST_JOB_LOCK_READY").unwrap(),
+                            "ready",
+                        )
+                        .unwrap();
+                        loop {
+                            std::thread::park();
+                        }
+                    })
+                    .unwrap();
+            }
+        }
+        let _prepared = target
+            .as_deref()
+            .filter(|_| operation == "index_file")
+            .map(|json| {
+                worker
+                    .library
+                    .prepare_file_job(&claim, json, Some(&test_extractor()))
+                    .unwrap()
+            });
+        let prepared_directory = target
+            .as_deref()
+            .filter(|_| operation == "index_directory")
+            .map(|json| {
+                worker
+                    .library
+                    .prepare_directory_file(&claim, json, Some(&test_extractor()))
+                    .unwrap()
+                    .unwrap()
+            });
+        if std::env::var_os("LOOM_TEST_DIRECTORY_AFTER_QUANTUM").is_some() {
             worker
                 .library
-                .prepare_file_job(&claim, json, Some(&test_extractor()))
-                .unwrap()
-        });
+                .publish_directory_file(&claim, prepared_directory.as_ref().unwrap())
+                .unwrap();
+        }
         fs::write(
             std::env::var_os("LOOM_TEST_JOB_LOCK_READY").unwrap(),
             "ready",
@@ -3583,6 +4987,82 @@ mod tests {
         loop {
             std::thread::park();
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn process_child_recovers_after_a_released_owners_descriptor_copy_closes() {
+        let (directory, library) = fixture();
+        let job = library
+            .enqueue_fts_repair("inherited-lock-copy", JobPriority::Normal)
+            .unwrap();
+        let canonical = library.export_portable().unwrap().digest;
+        let owner = test_worker(&library).unwrap();
+        // A duplicate shares the same open file description, as an unrelated
+        // test thread's fork does before CLOEXEC. The logical owner is released.
+        let inherited = owner._ownership.try_clone().unwrap();
+        drop(owner);
+        assert!(matches!(
+            test_worker(&library),
+            Err(LoomError::JobWorkerBusy)
+        ));
+        let ready = directory.path().join("child-ready");
+        let blocked = directory.path().join("child-blocked");
+        let child = Command::new(std::env::current_exe().unwrap())
+            .args(["jobs::tests::process_lock_child", "--exact", "--nocapture"])
+            .env(
+                "LOOM_TEST_JOB_LOCK_DATABASE",
+                directory.path().join("queue.sqlite3"),
+            )
+            .env("LOOM_TEST_JOB_LOCK_READY", &ready)
+            .env("LOOM_TEST_JOB_LOCK_BLOCKED", &blocked)
+            .stdout(Stdio::null())
+            .spawn()
+            .unwrap();
+        let mut child = ChildGuard(child);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !blocked.exists() && Instant::now() < deadline {
+            assert!(
+                child.0.try_wait().unwrap().is_none(),
+                "child exited before observing the copy"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(
+            blocked.exists(),
+            "child did not observe the retained descriptor"
+        );
+        assert!(!ready.exists(), "child took over a still-locked descriptor");
+        assert_eq!(
+            library.background_job(&job.id).unwrap().state,
+            JobState::Queued
+        );
+        assert_eq!(library.export_portable().unwrap().digest, canonical);
+        drop(inherited);
+        while !ready.exists() && Instant::now() < deadline {
+            assert!(
+                child.0.try_wait().unwrap().is_none(),
+                "child exited before locking"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(ready.exists(), "child did not acquire the released lock");
+        assert!(matches!(
+            test_worker(&library),
+            Err(LoomError::JobWorkerBusy)
+        ));
+        assert_eq!(
+            library.background_job(&job.id).unwrap().state,
+            JobState::Running
+        );
+        assert_eq!(library.export_portable().unwrap().digest, canonical);
+        child.0.kill().unwrap();
+        child.0.wait().unwrap();
+        let mut recovered = reacquire_after_deliberate_test_drop(&library).unwrap();
+        let completed = recovered.run_next().unwrap().unwrap();
+        assert_eq!(completed.id, job.id);
+        assert_eq!(completed.state, JobState::Completed);
+        assert_eq!(completed.attempts, 2);
     }
 
     #[test]
@@ -3636,7 +5116,7 @@ mod tests {
             assert_eq!(library.export_portable().unwrap().digest, canonical);
             child.0.kill().unwrap();
             child.0.wait().unwrap();
-            let mut recovered = test_worker(&library).unwrap();
+            let mut recovered = reacquire_after_deliberate_test_drop(&library).unwrap();
             let completed = recovered.run_next().unwrap().unwrap();
             assert_eq!(completed.state, JobState::Completed);
             assert_eq!(completed.id, job.id);

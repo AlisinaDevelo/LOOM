@@ -27,7 +27,8 @@ fn populated_v9_migration_adds_scope_generation_without_rewriting_evidence() {
     let connection = Connection::open(&database).unwrap();
     connection
         .execute_batch(
-            "ALTER TABLE source_roots DROP COLUMN scope_generation;
+            "DROP TRIGGER background_semantic_source_changed;
+        ALTER TABLE source_roots DROP COLUMN scope_generation;
         DELETE FROM schema_meta WHERE key = 'authorization_incarnation';
         UPDATE schema_meta SET value = '9' WHERE key = 'schema_version';",
         )
@@ -75,7 +76,7 @@ fn malformed_v10_without_scope_generation_is_rejected_before_migration() {
     drop(Library::open(&database).unwrap());
     let connection = Connection::open(&database).unwrap();
     connection
-        .execute_batch("ALTER TABLE source_roots DROP COLUMN scope_generation;")
+        .execute_batch("DROP TRIGGER background_semantic_source_changed; ALTER TABLE source_roots DROP COLUMN scope_generation;")
         .unwrap();
     assert!(
         matches!(Library::open(&database), Err(LoomError::UnsupportedSchemaVersion(message))

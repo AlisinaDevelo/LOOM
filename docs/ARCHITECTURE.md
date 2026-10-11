@@ -79,9 +79,10 @@ stored extraction, checks or repairs the derived FTS5 projection, runs the retri
 benchmark, imports a local Chrome/Firefox Netscape HTML export without fetching URLs, lists
 bookmark provenance, and exposes the explicit semantic status/rebuild/benchmark/drop/search
 commands. Its default database is .loom/library.sqlite3; callers can provide another path.
-The opt-in queue commands expose real FTS repair and single already-approved file refresh
-(text/PDF/OCR), with explicit owned runtime upgrade. See [BACKGROUND_JOBS.md](BACKGROUND_JOBS.md).
-Directory ingestion, semantic rebuild, and desktop scheduling are not yet routed through this queue.
+The opt-in queue commands expose FTS repair, single approved-file refresh (text/PDF/OCR),
+approved-directory file quanta and canonical-passage semantic rebuild quanta, with explicit
+owned runtime upgrade. See [BACKGROUND_JOBS.md](BACKGROUND_JOBS.md).
+Desktop scheduling and whole-workload admission/resource gates are not yet routed through this queue.
 
 ### Tauri shell and UI
 

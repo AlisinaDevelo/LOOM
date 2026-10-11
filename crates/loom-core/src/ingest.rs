@@ -242,8 +242,17 @@ pub(crate) fn verify_stable_hash(path: &Path, max_bytes: u64, expected: &str) ->
 }
 
 pub(crate) fn read_stable_bytes(path: &Path, root: &Path, max_bytes: u64) -> Result<StableBytes> {
+    read_stable_bytes_fenced(path, root, max_bytes, |_, _| Ok(()))
+}
+
+pub(crate) fn read_stable_bytes_fenced(
+    path: &Path,
+    root: &Path,
+    max_bytes: u64,
+    mut verify: impl FnMut(&Metadata, &Metadata) -> Result<()>,
+) -> Result<StableBytes> {
     for _ in 0..3 {
-        match read_stable_bytes_once(path, root, max_bytes) {
+        match read_stable_bytes_once(path, root, max_bytes, &mut verify) {
             Err(LoomError::SourceChanged(_)) => continue,
             result => return result,
         }
@@ -251,7 +260,12 @@ pub(crate) fn read_stable_bytes(path: &Path, root: &Path, max_bytes: u64) -> Res
     Err(LoomError::SourceChanged(path.display().to_string()))
 }
 
-fn read_stable_bytes_once(path: &Path, root: &Path, max_bytes: u64) -> Result<StableBytes> {
+fn read_stable_bytes_once(
+    path: &Path,
+    root: &Path,
+    max_bytes: u64,
+    verify: &mut impl FnMut(&Metadata, &Metadata) -> Result<()>,
+) -> Result<StableBytes> {
     let canonical_root = fs::canonicalize(root).map_err(|source| io_error(root, source))?;
     let before_path = fs::symlink_metadata(path).map_err(|source| io_error(path, source))?;
     if before_path.file_type().is_symlink() || !before_path.is_file() {
@@ -263,9 +277,15 @@ fn read_stable_bytes_once(path: &Path, root: &Path, max_bytes: u64) -> Result<St
     let canonical_before = fs::canonicalize(path).map_err(|source| io_error(path, source))?;
     ensure_within_root(&canonical_root, &canonical_before, path)?;
 
-    let file =
-        open_readonly_no_follow(&canonical_before).map_err(|source| io_error(path, source))?;
+    let (file, root_file) = open_readonly_within_root(&canonical_before, &canonical_root)
+        .map_err(|source| io_error(path, source))?;
     let before_file = file.metadata().map_err(|source| io_error(path, source))?;
+    let before_root = root_file
+        .as_ref()
+        .unwrap_or(&file)
+        .metadata()
+        .map_err(|source| io_error(root, source))?;
+    verify(&before_root, &before_file)?; // Before allocating/reading or giving bytes to a provider.
     if !metadata_matches(&before_path, &before_file) {
         return Err(LoomError::SourceChanged(path.display().to_string()));
     }
@@ -289,6 +309,12 @@ fn read_stable_bytes_once(path: &Path, root: &Path, max_bytes: u64) -> Result<St
         .map_err(|source| io_error(path, source))?;
 
     let after_file = file.metadata().map_err(|source| io_error(path, source))?;
+    let after_root = root_file
+        .as_ref()
+        .unwrap_or(&file)
+        .metadata()
+        .map_err(|source| io_error(root, source))?;
+    verify(&after_root, &after_file)?;
     let after_path = fs::symlink_metadata(path).map_err(|source| io_error(path, source))?;
     if after_path.file_type().is_symlink()
         || !metadata_matches(&before_file, &after_file)
@@ -329,6 +355,44 @@ fn open_readonly_no_follow(path: &Path) -> std::io::Result<File> {
     #[cfg(unix)]
     options.custom_flags(libc::O_NOFOLLOW);
     options.open(path)
+}
+
+fn open_readonly_within_root(path: &Path, root: &Path) -> std::io::Result<(File, Option<File>)> {
+    if path == root {
+        return open_readonly_no_follow(path).map(|file| (file, None));
+    }
+    #[cfg(unix)]
+    {
+        use rustix::fs::{open, openat, Mode, OFlags};
+        let relative = path
+            .strip_prefix(root)
+            .map_err(|_| std::io::Error::other("source outside root"))?;
+        let directory_flags =
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+        let root_fd = open(root, directory_flags, Mode::empty())?;
+        let mut parent = None;
+        let mut components = relative.components().peekable();
+        while let Some(component) = components.next() {
+            if !matches!(component, std::path::Component::Normal(_)) {
+                return Err(std::io::Error::other("invalid relative source path"));
+            }
+            let flags = if components.peek().is_some() {
+                directory_flags
+            } else {
+                OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC | OFlags::NONBLOCK
+            };
+            parent = Some(openat(
+                parent.as_ref().unwrap_or(&root_fd),
+                component.as_os_str(),
+                flags,
+                Mode::empty(),
+            )?);
+        }
+        let child = parent.ok_or_else(|| std::io::Error::other("empty relative source path"))?;
+        Ok((File::from(child), Some(File::from(root_fd))))
+    }
+    #[cfg(not(unix))]
+    open_readonly_no_follow(path).map(|file| (file, None))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -691,6 +691,7 @@ pub struct EvidenceView {
 /// This metadata is part of the derivative contract, never canonical source identity. A provider
 /// change must produce a new index revision or be rejected rather than mixing incompatible vectors.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SemanticIndexConfig {
     pub provider_id: String,
     pub model_id: String,
