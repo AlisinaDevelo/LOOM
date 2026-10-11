@@ -18,7 +18,7 @@ type StorageEntry = {
   source_uri: string | null;
   bytes: number;
   files: number;
-  exists: boolean;
+  exists: boolean | null;
 };
 
 type StorageInspection = {
@@ -1170,12 +1170,15 @@ function App() {
               {storageBusy === "inspect" ? "Inspecting…" : "Inspect local storage"}
             </button>
             {storageInspection && (
-              <dl className="storage-summary" aria-label="Storage summary">
-                <div><dt>All counted</dt><dd>{formatBytes(storageInspection.total_bytes)}</dd></div>
-                <div><dt>Sources</dt><dd>{formatBytes(storageInspection.source_bytes)}</dd></div>
-                <div><dt>Derived</dt><dd>{formatBytes(storageInspection.derived_bytes)}</dd></div>
-                <div><dt>Disposable</dt><dd>{formatBytes(storageInspection.disposable_bytes)}</dd></div>
-              </dl>
+              <>
+                <dl className="storage-summary" aria-label="Storage summary" aria-describedby="storage-accounting-note">
+                  <div><dt>Combined estimate</dt><dd>{formatBytes(storageInspection.total_bytes)}</dd></div>
+                  <div><dt>Source versions</dt><dd>{formatBytes(storageInspection.source_bytes)}</dd></div>
+                  <div><dt>Derived</dt><dd>{formatBytes(storageInspection.derived_bytes)}</dd></div>
+                  <div><dt>Disposable</dt><dd>{formatBytes(storageInspection.disposable_bytes)}</dd></div>
+                </dl>
+                <p className="scope-note" id="storage-accounting-note">Source sizes include history; older originals are not retained or measured. Logical rows overlap database file size, so this is not disk usage.</p>
+              </>
             )}
             <button
               type="button"

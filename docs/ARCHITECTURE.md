@@ -181,6 +181,15 @@ WAL/SHM/journal, capture, and fixed disposable-directory sizes. The walker uses 
 and never follows links or scans arbitrary sibling directories. Derived FTS5, semantic vectors,
 and OCR records remain rebuildable; they are included in the derived estimate.
 
+Source sizes sum every recorded version, including history; they do not measure the current
+original files or imply that older original bytes are retained. Inspection does not read or stat
+original source/URL locators or grant access. Source and logical canonical/derived entries report
+unmeasured availability as `exists: null` in CLI/Tauri JSON. Managed filesystem entries retain
+boolean availability observed through no-follow metadata. The combined total adds logical
+estimates to measured file lengths; SQLite payload estimates overlap the database file, so this
+total is not physical disk usage. This expands the report's availability field to nullable without
+changing the database schema, portable records or byte-accounting formulas.
+
 Artifact, exact-root, and RFC3339-cutoff deletion run in one transaction with foreign-key cascades,
 then rebuild FTS5 and run a checkpoint/vacuum cycle before returning. A retention policy is stored
 in `schema_meta` but is inert until an explicit apply command. Disposable cleanup removes only
