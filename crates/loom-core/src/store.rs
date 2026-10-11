@@ -1322,10 +1322,19 @@ impl Library {
             &discovery_fingerprint,
             discovered.len(),
         )?;
+        let (job, revalidation_bytes) = self.revalidate_index_job_prefix(
+            &authorization,
+            &selected_path,
+            &discovered,
+            &discovery_fingerprint,
+            job,
+            cancellation,
+        )?;
 
         let mut report = IndexReport {
             run_id: job.job_id.clone(),
             discovered: discovered.len() as u64,
+            bytes_read: revalidation_bytes,
             ..IndexReport::default()
         };
         let mut seen = HashSet::new();
@@ -2198,7 +2207,165 @@ impl Library {
             }
         };
         transaction.commit()?;
-        Ok(IndexJobProgress { job_id, next_unit })
+        Ok(IndexJobProgress {
+            job_id,
+            next_unit,
+            updated_at: now,
+        })
+    }
+
+    /// Membership alone cannot prove that a completed unit still reflects current source bytes.
+    /// Hash the completed prefix without running providers; resume at its first invalid unit.
+    fn revalidate_index_job_prefix(
+        &self,
+        authorization: &SourceAuthorization,
+        root: &Path,
+        discovered: &[PathBuf],
+        fingerprint: &str,
+        job: IndexJobProgress,
+        cancellation: &IndexCancellationToken,
+    ) -> Result<(IndexJobProgress, u64)> {
+        let mut bytes_read = 0;
+        for (unit, path) in discovered.iter().take(job.next_unit as usize).enumerate() {
+            if cancellation.is_cancelled() {
+                break;
+            }
+            let Some(media_type) = ingest::supported_media_type(path) else {
+                continue;
+            };
+            if media_type.starts_with("image/")
+                && !authorization
+                    .ocr_policy
+                    .as_ref()
+                    .is_some_and(|policy| policy.enabled)
+            {
+                continue;
+            }
+            let before = {
+                let connection = self.lock()?;
+                authorization.verify(&connection)?;
+                self.resume_source_projection(&connection, authorization, path, media_type)?
+            };
+            let actual_hash = if before.is_some() {
+                match ingest::read_stable_bytes(path, root, self.limits.max_file_bytes) {
+                    Ok(stable) => {
+                        bytes_read += stable.bytes.len() as u64;
+                        Some(format!("blake3:{}", blake3::hash(&stable.bytes).to_hex()))
+                    }
+                    Err(error) if preserves_active_evidence(&error) => return Err(error),
+                    // A genuine unavailable/invalid source must be retried through the normal
+                    // per-unit failure path, which owns missing-source reconciliation.
+                    Err(_) => None,
+                }
+            } else {
+                None
+            };
+            if cancellation.is_cancelled() {
+                break;
+            }
+
+            let mut connection = self.lock()?;
+            let transaction = source_write_transaction(&mut connection)?;
+            authorization.verify(&transaction)?;
+            require_index_job_snapshot(&transaction, authorization, &job, fingerprint)?;
+            let current =
+                self.resume_source_projection(&transaction, authorization, path, media_type)?;
+            if before.as_ref().is_some_and(|projection| {
+                current.as_ref() == Some(projection)
+                    && actual_hash.as_ref() == Some(&projection.content_hash)
+            }) {
+                transaction.commit()?;
+                continue;
+            }
+
+            let now = Utc::now().to_rfc3339();
+            let updated = transaction.execute(
+                "UPDATE index_jobs SET next_unit = ?1, updated_at = ?2
+                 WHERE id = ?3 AND source_root_id = ?4 AND state = 'running'
+                   AND next_unit = ?5 AND discovery_fingerprint = ?6 AND updated_at = ?7",
+                params![
+                    sql_i64(unit as u64, "index job resume unit")?,
+                    now,
+                    job.job_id,
+                    authorization.root_id,
+                    sql_i64(job.next_unit, "index job progress")?,
+                    fingerprint,
+                    job.updated_at,
+                ],
+            )?;
+            require_job_update(updated, &job.job_id)?;
+            transaction.commit()?;
+            return Ok((
+                IndexJobProgress {
+                    job_id: job.job_id,
+                    next_unit: unit as u64,
+                    updated_at: now,
+                },
+                bytes_read,
+            ));
+        }
+        // Even a healthy or deliberately skipped prefix must not continue from a cursor that
+        // another invocation advanced, completed, or restarted during validation.
+        let mut connection = self.lock()?;
+        let transaction = source_write_transaction(&mut connection)?;
+        authorization.verify(&transaction)?;
+        require_index_job_snapshot(&transaction, authorization, &job, fingerprint)?;
+        transaction.commit()?;
+        Ok((job, bytes_read))
+    }
+
+    fn resume_source_projection(
+        &self,
+        connection: &Connection,
+        authorization: &SourceAuthorization,
+        path: &Path,
+        media_type: &str,
+    ) -> Result<Option<ResumeSourceProjection>> {
+        let Ok(locator) = utf8_path(path) else {
+            return Ok(None);
+        };
+        let (extractor_id, extractor_version) = match media_type {
+            "application/pdf" => (PDF_EXTRACTOR_ID, PDF_EXTRACTOR_VERSION),
+            media if media.starts_with("image/") => (
+                IMAGE_OCR_EXTRACTOR_ID,
+                crate::ocr::IMAGE_OCR_EXTRACTOR_VERSION,
+            ),
+            _ => (EXTRACTOR_ID, EXTRACTOR_VERSION),
+        };
+        let projection = connection
+            .query_row(
+                "SELECT a.id, v.id, v.content_hash, v.byte_size, v.page_count
+                 FROM artifacts a JOIN artifact_versions v ON v.id = a.active_version_id
+                 JOIN artifact_locators l ON l.artifact_id = a.id
+                 WHERE a.source_root_id = ?1 AND a.state = 'active' AND a.media_type = ?2
+                   AND l.kind = 'file' AND l.locator = ?3 AND l.active = 1
+                   AND v.status = 'ready' AND v.extractor_id = ?4 AND v.extractor_version = ?5",
+                params![
+                    authorization.root_id,
+                    media_type,
+                    locator,
+                    extractor_id,
+                    extractor_version
+                ],
+                |row| {
+                    Ok(ResumeSourceProjection {
+                        artifact_id: row.get(0)?,
+                        version_id: row.get(1)?,
+                        content_hash: row.get(2)?,
+                        byte_size: row.get(3)?,
+                        page_count: row.get(4)?,
+                    })
+                },
+            )
+            .optional()?;
+        Ok(projection.filter(|projection| {
+            u64::try_from(projection.byte_size)
+                .is_ok_and(|bytes| bytes <= self.limits.max_file_bytes)
+                && (media_type != "application/pdf"
+                    || projection
+                        .page_count
+                        .is_some_and(|pages| pages as usize <= self.limits.max_pdf_pages))
+        }))
     }
 
     fn approved_root_authorization(&self, locator: &str) -> Result<SourceAuthorization> {
@@ -3841,6 +4008,16 @@ fn merge_observation_index(report: &mut ObservationReport, index: &IndexReport) 
 struct IndexJobProgress {
     job_id: String,
     next_unit: u64,
+    updated_at: String,
+}
+
+#[derive(PartialEq, Eq)]
+struct ResumeSourceProjection {
+    artifact_id: String,
+    version_id: String,
+    content_hash: String,
+    byte_size: i64,
+    page_count: Option<u32>,
 }
 
 struct PreparedIndexDocument {
@@ -4340,6 +4517,31 @@ fn update_index_job_checkpoint(
 fn require_job_update(updated: usize, job_id: &str) -> Result<()> {
     if updated != 1 {
         return Err(LoomError::IndexJobStale(job_id.to_owned()));
+    }
+    Ok(())
+}
+
+fn require_index_job_snapshot(
+    connection: &Connection,
+    authorization: &SourceAuthorization,
+    job: &IndexJobProgress,
+    fingerprint: &str,
+) -> Result<()> {
+    let current: bool = connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM index_jobs
+         WHERE id = ?1 AND source_root_id = ?2 AND state = 'running'
+           AND next_unit = ?3 AND discovery_fingerprint = ?4 AND updated_at = ?5)",
+        params![
+            job.job_id,
+            authorization.root_id,
+            sql_i64(job.next_unit, "index job progress")?,
+            fingerprint,
+            job.updated_at,
+        ],
+        |row| row.get(0),
+    )?;
+    if !current {
+        return Err(LoomError::IndexJobStale(job.job_id.clone()));
     }
     Ok(())
 }
@@ -6207,6 +6409,209 @@ mod tests {
             super::discovery_fingerprint(&[second], None, 10)
         );
         assert_ne!(first_hash, super::discovery_fingerprint(&[first], None, 11));
+    }
+
+    #[test]
+    fn resume_prefix_revalidation_cannot_rewind_a_newer_checkpoint_revision() {
+        let temporary = tempdir().unwrap();
+        let root = temporary.path().join("selected");
+        fs::create_dir(&root).unwrap();
+        let first = root.join("01-first.md");
+        fs::write(&first, "oldprefix evidence").unwrap();
+        fs::write(root.join("02-pending.md"), "pendingprefix evidence").unwrap();
+        let library = Library::open(temporary.path().join("library.sqlite3")).unwrap();
+        library
+            .index_path_with_cancellation_after(&root, 1)
+            .unwrap();
+        let root = root.canonicalize().unwrap();
+        let authorization = library
+            .approved_root_authorization(root.to_str().unwrap())
+            .unwrap();
+        let paths = ingest::discover(&root, library.limits.max_files_per_request).unwrap();
+        let fingerprint =
+            super::discovery_fingerprint(&paths, None, library.limits.max_files_per_request);
+        let stale = library
+            .start_index_job(
+                &authorization,
+                root.to_str().unwrap(),
+                &fingerprint,
+                paths.len(),
+            )
+            .unwrap();
+
+        // Another invocation completes and starts the same job ID/membership/cursor again.
+        library
+            .complete_index_job(&authorization, &stale.job_id, None)
+            .unwrap();
+        let newer = library
+            .start_index_job(
+                &authorization,
+                root.to_str().unwrap(),
+                &fingerprint,
+                paths.len(),
+            )
+            .unwrap();
+        assert_eq!(newer.job_id, stale.job_id);
+        library
+            .advance_index_job(&authorization, &newer.job_id, stale.next_unit)
+            .unwrap();
+        fs::write(&first, "newprefix evidence").unwrap();
+        let checkpoint = library.index_checkpoint(&root).unwrap();
+        let canonical = library.export_portable().unwrap().tables;
+        let result = library.revalidate_index_job_prefix(
+            &authorization,
+            &root,
+            &paths,
+            &fingerprint,
+            stale,
+            &Default::default(),
+        );
+        assert!(matches!(result, Err(LoomError::IndexJobStale(_))));
+        assert_eq!(library.index_checkpoint(&root).unwrap(), checkpoint);
+        assert_eq!(library.export_portable().unwrap().tables, canonical);
+    }
+
+    #[test]
+    fn resume_prefix_revalidation_rejects_stale_healthy_or_skipped_prefixes() {
+        for prefix in ["text", "unsupported", "ocr_disabled"] {
+            for terminal in [false, true] {
+                let temporary = tempdir().unwrap();
+                let root = temporary.path().join("selected");
+                fs::create_dir(&root).unwrap();
+                let extension = match prefix {
+                    "unsupported" => "bin",
+                    "ocr_disabled" => "png",
+                    _ => "md",
+                };
+                fs::write(
+                    root.join(format!("01-prefix.{extension}")),
+                    "prefix evidence",
+                )
+                .unwrap();
+                fs::write(root.join("02-pending.md"), "pendingprefix evidence").unwrap();
+                let library = Library::open(temporary.path().join("library.sqlite3")).unwrap();
+                if prefix == "ocr_disabled" {
+                    library.set_ocr_enabled(false).unwrap();
+                }
+                library
+                    .index_path_with_cancellation_after(&root, 1)
+                    .unwrap();
+                let root = root.canonicalize().unwrap();
+                let mut authorization = library
+                    .approved_root_authorization(root.to_str().unwrap())
+                    .unwrap();
+                if prefix == "ocr_disabled" {
+                    authorization.ocr_policy =
+                        Some(super::OcrPolicy::load(&library.lock().unwrap()).unwrap());
+                }
+                let paths = ingest::discover(&root, library.limits.max_files_per_request).unwrap();
+                let fingerprint = super::discovery_fingerprint(
+                    &paths,
+                    authorization.ocr_policy.as_ref(),
+                    library.limits.max_files_per_request,
+                );
+                let stale = library
+                    .start_index_job(
+                        &authorization,
+                        root.to_str().unwrap(),
+                        &fingerprint,
+                        paths.len(),
+                    )
+                    .unwrap();
+                library
+                    .complete_index_job(&authorization, &stale.job_id, None)
+                    .unwrap();
+                if !terminal {
+                    let newer = library
+                        .start_index_job(
+                            &authorization,
+                            root.to_str().unwrap(),
+                            &fingerprint,
+                            paths.len(),
+                        )
+                        .unwrap();
+                    library
+                        .advance_index_job(&authorization, &newer.job_id, stale.next_unit)
+                        .unwrap();
+                }
+                let checkpoint = library.index_checkpoint(&root).unwrap();
+                let canonical = library.export_portable().unwrap().tables;
+                let result = library.revalidate_index_job_prefix(
+                    &authorization,
+                    &root,
+                    &paths,
+                    &fingerprint,
+                    stale,
+                    &Default::default(),
+                );
+                assert!(
+                    matches!(result, Err(LoomError::IndexJobStale(_))),
+                    "{prefix}/terminal={terminal} accepted an obsolete continuation"
+                );
+                assert_eq!(library.index_checkpoint(&root).unwrap(), checkpoint);
+                assert_eq!(library.export_portable().unwrap().tables, canonical);
+            }
+        }
+    }
+
+    #[test]
+    fn resume_prefix_revalidation_refuses_superseded_source_consent() {
+        for action in ["revoke", "reselect", "replace", "restore"] {
+            let temporary = tempdir().unwrap();
+            let root = temporary.path().join("selected");
+            fs::create_dir(&root).unwrap();
+            let first = root.join("01-first.md");
+            fs::write(&first, "oldprefix evidence").unwrap();
+            fs::write(root.join("02-pending.md"), "pendingprefix evidence").unwrap();
+            let database = temporary.path().join("library.sqlite3");
+            let worker = Library::open(&database).unwrap();
+            worker.index_path_with_cancellation_after(&root, 1).unwrap();
+            let root = root.canonicalize().unwrap();
+            let locator = root.to_str().unwrap();
+            let authorization = worker.approved_root_authorization(locator).unwrap();
+            let paths = ingest::discover(&root, worker.limits.max_files_per_request).unwrap();
+            let fingerprint =
+                super::discovery_fingerprint(&paths, None, worker.limits.max_files_per_request);
+            let job = worker
+                .start_index_job(&authorization, locator, &fingerprint, paths.len())
+                .unwrap();
+            fs::write(&first, "newprefix evidence").unwrap();
+            let controller = Library::open(&database).unwrap();
+            match action {
+                "revoke" | "reselect" => {
+                    controller.revoke_source_root(locator).unwrap();
+                    if action == "reselect" {
+                        controller.index_path(&root).unwrap();
+                    }
+                }
+                "replace" => {
+                    controller.purge_root(locator).unwrap();
+                    controller.index_path(&root).unwrap();
+                }
+                "restore" => {
+                    let archive = controller.export_portable().unwrap();
+                    controller.purge_root(locator).unwrap();
+                    controller.import_portable(&archive).unwrap();
+                }
+                _ => unreachable!(),
+            }
+            let canonical = controller.export_portable().unwrap().tables;
+            let checkpoint = controller.index_checkpoint(&root).unwrap();
+            let result = worker.revalidate_index_job_prefix(
+                &authorization,
+                &root,
+                &paths,
+                &fingerprint,
+                job,
+                &Default::default(),
+            );
+            assert!(
+                matches!(result, Err(LoomError::SourceRevoked(_))),
+                "{action}"
+            );
+            assert_eq!(controller.export_portable().unwrap().tables, canonical);
+            assert_eq!(controller.index_checkpoint(&root).unwrap(), checkpoint);
+        }
     }
 
     // Deterministic prepared-provider boundary fixture. Native Vision quality is covered by

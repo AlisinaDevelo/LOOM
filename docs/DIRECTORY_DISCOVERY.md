@@ -77,7 +77,13 @@ the former filename-sorted DFS ordering. No lossy string conversion is used for 
 fingerprinting. Checkpoints hash length-prefixed native path bytes, the discovery version and
 all bounds, plus OCR policy where relevant. An older fingerprint or changed bound resets the
 existing checkpoint rather than resuming past possibly different work. Same-contract interrupted
-checkpoints retain their existing idempotent resume behavior.
+checkpoints additionally revalidate the completed supported prefix through bounded no-follow byte
+reads and the active canonical artifact/version/extractor contract. Unchanged prefix units skip
+providers and canonical writes; the first changed or unverified unit rewinds the checkpoint under
+the existing source/OCR consent fences. Supported units that previously failed can recover on this
+same resume. These reads use current file/page limits, observe cancellation between files, and
+grant no new source scope. Content edits after a check can still occur; this is not an atomic
+filesystem snapshot.
 
 ## Verification
 

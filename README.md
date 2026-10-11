@@ -104,8 +104,10 @@ cargo run --locked -p loom-cli -- benchmark \
   --queries benchmarks/retrieval/v0/queries.jsonl
 ```
 
-At the current pre-alpha baseline, the shared checkout passes npm run check and cargo test
---workspace --locked. These are local checks, not a release or compatibility guarantee.
+Run these checks on the target device. The [2026-10-11 verification receipt](docs/evidence/2026-10-11-recovery-fixes.md)
+records passing frontend checks and a local full-workspace native OCR failure tracked in
+[issue #338](https://github.com/AlisinaDevelo/LOOM/issues/338). Hosted CI success does not replace
+that device result or establish a release or compatibility guarantee.
 
 ## Five-year execution program
 

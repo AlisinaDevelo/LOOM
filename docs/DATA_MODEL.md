@@ -263,10 +263,22 @@ The indexing report exposes the durable job ID as `run_id` and separates `attemp
 `unchanged`, `skipped`, `failed`, and `cancelled` counts. A local cancellation token is checked only
 between units. When cancellation is observed, the job remains `interrupted` with the explicit
 `cancelled by request` reason; complete canonical versions and the next-unit checkpoint are kept so
-the next invocation resumes from the exact boundary.
+the next invocation can validate the completed prefix before resuming.
 
 An interrupted or still-running row resumes from its durable `next_unit` when the fingerprint and
-unit count match. Completion records `state = completed` and the next run starts a fresh scan, so
+unit count match **and** bounded, no-follow byte reads still match the completed supported prefix's
+active artifact/version, media type, extractor contract, and current byte/page limits. Prefix
+validation runs no parser or OCR provider and holds no connection mutex or transaction while reading
+bytes. Each post-read check reserves the writer before verifying source/OCR consent and the current
+canonical projection. A changed, unavailable, failed, or missing canonical unit rewinds to the first
+affected ordinal; the rewind also compares the captured checkpoint cursor, fingerprint, and update
+revision so it cannot overwrite intervening progress. Healthy and deliberate skip-only prefixes
+also verify that checkpoint snapshot before continuing. Unsupported files and images skipped under
+the same disabled OCR policy remain deliberate skips. Cancellation is also checked between prefix
+reads; a pre-cancelled invocation reads no prefix bytes and retains its checkpoint. `bytes_read`
+includes successful prefix validation reads, while `attempted` counts the subsequently processed
+units. These checks observe current bytes; they do not create an atomic filesystem snapshot.
+Completion records `state = completed` and the next run starts a fresh scan, so
 retries of unchanged bytes reuse the existing content version. The row is intentionally diagnostic
 and rebuildable; canonical artifact, version, passage, and hash records remain authoritative. A
 cancelled report identifies the same job ID and counts the remaining units as resumable; cancellation
