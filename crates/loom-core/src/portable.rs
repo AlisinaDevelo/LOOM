@@ -169,9 +169,12 @@ fn table_exists(connection: &Connection, table: &str) -> Result<bool> {
 fn validate_setting(key: &str, value: &str) -> Result<()> {
     let valid = match key {
         "ocr_enabled" => matches!(value, "0" | "1"),
-        "retention_days" => value
-            .parse::<u32>()
-            .is_ok_and(|days| (1..=36_500).contains(&days)),
+        "retention_days" => {
+            value.is_empty()
+                || value
+                    .parse::<u32>()
+                    .is_ok_and(|days| (1..=36_500).contains(&days))
+        }
         _ => false,
     };
     if valid {

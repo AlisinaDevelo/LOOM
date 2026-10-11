@@ -70,7 +70,9 @@ function truncateUtf8(value, maximumBytes) {
   if (bytes.byteLength <= maximumBytes) {
     return {value, truncated: false};
   }
-  return {value: TEXT_DECODER.decode(bytes.slice(0, maximumBytes)), truncated: true};
+  let end = maximumBytes;
+  while (end > 0 && (bytes[end] & 0xc0) === 0x80) end -= 1;
+  return {value: TEXT_DECODER.decode(bytes.subarray(0, end)), truncated: true};
 }
 
 function encodeBase64(bytes) {
@@ -198,8 +200,9 @@ function snapshotState(page, sanitizedHtml) {
     return {state: "failed", failureCode: "empty_snapshot", text: ""};
   }
   const limited = truncateUtf8(sanitizedHtml, MAX_SNAPSHOT_BYTES);
-  let state = limited.truncated ? "partial" : "complete";
-  let failureCode = limited.truncated ? "snapshot_truncated" : null;
+  const truncated = limited.truncated || page.truncated === true;
+  let state = truncated ? "partial" : "complete";
+  let failureCode = truncated ? "snapshot_truncated" : null;
   if (!sameOrigin(page.liveUrl, page.finalUrl)) {
     state = "partial";
     failureCode = "cross_origin_redirect";
@@ -313,12 +316,18 @@ export async function buildCaptureMessages({page, session, intentToken, requestI
 export function collectPageFromTab() {
   const maximumRawBytes = 8 * 1024 * 1024 + 1;
   const rawHtml = document.documentElement?.outerHTML || "";
+  // This function is serialized into the active tab, so it cannot use module helpers.
+  const bytes = new TextEncoder().encode(rawHtml.slice(0, maximumRawBytes));
+  let end = Math.min(bytes.byteLength, maximumRawBytes);
+  if (end < bytes.byteLength) {
+    while (end > 0 && (bytes[end] & 0xc0) === 0x80) end -= 1;
+  }
   return {
     finalUrl: location.href,
     title: document.title || "",
     selectedText: globalThis.getSelection?.()?.toString() || "",
-    html: rawHtml.slice(0, maximumRawBytes),
-    truncated: rawHtml.length > maximumRawBytes,
+    html: new TextDecoder().decode(bytes.subarray(0, end)),
+    truncated: rawHtml.length > maximumRawBytes || bytes.byteLength > maximumRawBytes,
     online: navigator.onLine !== false,
   };
 }

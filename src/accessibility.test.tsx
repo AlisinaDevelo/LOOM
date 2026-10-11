@@ -55,6 +55,7 @@ function mockLibrary() {
     if (command === "reconcile_approved_roots") return {};
     if (command === "list_source_roots") return [];
     if (command === "library_stats") return readyStats;
+    if (command === "ocr_status") return { enabled: true, derived_versions: 0, derived_passages: 0 };
     if (command === "capture_status") {
       return { paused: false, excluded_apps: [], capture_root: "/tmp/loom-captures", policy_error: null };
     }

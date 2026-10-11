@@ -535,11 +535,8 @@ function App() {
   const [storageInspection, setStorageInspection] = useState<StorageInspection | null>(null);
   const [query, setQuery] = useState("");
   const [hits, setHits] = useState<SearchHit[]>([]);
-  const [ocrStatus, setOcrStatus] = useState<OcrStatus>({
-    enabled: true,
-    derived_versions: 0,
-    derived_passages: 0,
-  });
+  const [ocrStatus, setOcrStatus] = useState<OcrStatus | null>(null);
+  const [ocrStatusError, setOcrStatusError] = useState<string | null>(null);
   const [searched, setSearched] = useState(false);
   const [busy, setBusy] = useState<"index" | "bookmarks" | "search" | "scope" | "ocr" | "evidence" | null>(null);
   const [sourceRoots, setSourceRoots] = useState<SourceRootInfo[]>([]);
@@ -567,6 +564,23 @@ function App() {
   const evidenceRequestRef = useRef(0);
   const historyRequestRef = useRef(0);
   const relationshipRequestRef = useRef(0);
+  const searchRequestRef = useRef(0);
+  const ocrStatusRequestRef = useRef(0);
+
+  const invalidateRetrievedEvidence = useCallback(() => {
+    searchRequestRef.current += 1;
+    evidenceRequestRef.current += 1;
+    historyRequestRef.current += 1;
+    relationshipRequestRef.current += 1;
+    focusResultsAfterSearchRef.current = false;
+    evidenceTriggerRef.current = null;
+    setHits([]);
+    setSearched(false);
+    setEvidenceState(null);
+    setSourceHistoryState(null);
+    setRelationshipState(null);
+    setBusy((current) => (current === "search" || current === "evidence" ? null : current));
+  }, []);
 
   const refreshStats = useCallback(async () => {
     try {
@@ -592,6 +606,25 @@ function App() {
       setCapturePolicyError(status.policy_error ?? null);
     } catch {
       // Keep the controls at their safe defaults if the desktop bridge is still starting.
+    }
+  }, []);
+
+  const refreshOcrStatus = useCallback(async () => {
+    const requestId = ++ocrStatusRequestRef.current;
+    setOcrStatusError(null);
+    try {
+      const status = await invoke<OcrStatus>("ocr_status");
+      if (ocrStatusRequestRef.current === requestId) {
+        setOcrStatus(status);
+        setOcrStatusError(null);
+      }
+      return status;
+    } catch (caught) {
+      if (ocrStatusRequestRef.current === requestId) {
+        setOcrStatus(null);
+        setOcrStatusError(errorMessage(caught));
+      }
+      return null;
     }
   }, []);
 
@@ -626,8 +659,8 @@ function App() {
   };
 
   const refreshLibrary = useCallback(async () => {
-    await Promise.all([refreshStats(), refreshSourceRoots(), refreshCaptureStatus()]);
-  }, [refreshCaptureStatus, refreshSourceRoots, refreshStats]);
+    await Promise.all([refreshStats(), refreshSourceRoots(), refreshCaptureStatus(), refreshOcrStatus()]);
+  }, [refreshCaptureStatus, refreshOcrStatus, refreshSourceRoots, refreshStats]);
 
   useEffect(() => {
     let active = true;
@@ -638,10 +671,12 @@ function App() {
           setNotice(`${failures.length} saved folder${failures.length === 1 ? " needs" : "s need"} attention.`);
           setError(failures.map((item) => `${item.source}: ${item.reason}`).join("\n"));
         }
-        return refreshLibrary();
       })
       .catch((caught: unknown) => {
         if (active) setError(errorMessage(caught));
+      })
+      .then(() => {
+        if (active) return refreshLibrary();
       });
     return () => {
       active = false;
@@ -737,9 +772,13 @@ function App() {
   const purgeCaptures = async () => {
     setError(null);
     setCaptureBusy("purge");
+    // A purge can delete some captures before failing. Remove cached evidence immediately,
+    // then fence anything that completed while the backend was working.
+    invalidateRetrievedEvidence();
     setNotice("Purging captured pixels and their indexed evidence…");
     try {
       const report = await invoke<CapturePurgeReport>("purge_captures");
+      invalidateRetrievedEvidence();
       setNotice(`Removed committed capture PNGs and ${report.artifacts_deleted} indexed capture record${report.artifacts_deleted === 1 ? "" : "s"}; originals and evidence rows are gone.`);
       await refreshLibrary();
     } catch (caught) {
@@ -817,9 +856,11 @@ function App() {
   const revokeSource = async (root: SourceRootInfo) => {
     setError(null);
     setBusy("scope");
+    invalidateRetrievedEvidence();
     setNotice(`Revoking ${compactPath(root.locator)}…`);
     try {
       await invoke("revoke_source_root", { locator: root.locator });
+      invalidateRetrievedEvidence();
       await refreshLibrary();
       setNotice("Folder revoked. Its indexed evidence is hidden until you explicitly re-select it.");
     } catch (caught) {
@@ -833,9 +874,11 @@ function App() {
   const purgeSourceData = async (root: SourceRootInfo) => {
     setError(null);
     setBusy("scope");
+    invalidateRetrievedEvidence();
     setNotice(`Deleting indexed evidence for ${compactPath(root.locator)}…`);
     try {
       const report = await invoke<DeletionReport>("purge_root", { locator: root.locator });
+      invalidateRetrievedEvidence();
       setNotice(`Deleted ${report.artifacts_deleted} artifact${report.artifacts_deleted === 1 ? "" : "s"} and its evidence rows. Original source files remain user-owned.`);
       await refreshLibrary();
       if (storageInspection) await inspectStorage();
@@ -848,15 +891,21 @@ function App() {
   };
 
   const toggleOcr = async () => {
+    if (!ocrStatus) return;
     setError(null);
     setBusy("ocr");
+    // A pending library refresh must not replace the policy selected by this action.
+    ocrStatusRequestRef.current += 1;
     const next = !ocrStatus.enabled;
+    if (!next) invalidateRetrievedEvidence();
     setNotice(next ? "Enabling local image OCR…" : "Disabling OCR and purging derived records…");
     try {
       await invoke("set_ocr_enabled", { enabled: next });
-      const status = await invoke<OcrStatus>("ocr_status");
-      setOcrStatus(status);
-      setNotice(next ? "Local image OCR is enabled." : "OCR is disabled; derived OCR records were purged.");
+      if (!next) invalidateRetrievedEvidence();
+      const status = await refreshOcrStatus();
+      setNotice(status
+        ? (next ? "Local image OCR is enabled." : "OCR is disabled; derived OCR records were purged.")
+        : "OCR policy changed; its current status is unavailable. Retry OCR status.");
       await refreshStats();
     } catch (caught) {
       setError(errorMessage(caught));
@@ -869,12 +918,16 @@ function App() {
   const purgeOcr = async () => {
     setError(null);
     setBusy("ocr");
+    ocrStatusRequestRef.current += 1;
+    invalidateRetrievedEvidence();
     setNotice("Purging derived OCR records…");
     try {
       await invoke("purge_ocr_records");
-      const status = await invoke<OcrStatus>("ocr_status");
-      setOcrStatus(status);
-      setNotice("Derived OCR records purged; original images remain untouched.");
+      invalidateRetrievedEvidence();
+      const status = await refreshOcrStatus();
+      setNotice(status
+        ? "Derived OCR records purged; original images remain untouched."
+        : "Derived OCR records purged; OCR status is unavailable. Retry OCR status.");
       await refreshStats();
     } catch (caught) {
       setError(errorMessage(caught));
@@ -886,7 +939,8 @@ function App() {
 
   const runSearch = async (event: FormEvent) => {
     event.preventDefault();
-    if (!query.trim()) return;
+    if (busy !== null || captureBusy === "purge" || !query.trim()) return;
+    const requestId = ++searchRequestRef.current;
 
     setError(null);
     setBusy("search");
@@ -903,6 +957,7 @@ function App() {
       const results = await invoke<SearchHit[]>("search", {
         request: { text: query, limit: 30 },
       });
+      if (searchRequestRef.current !== requestId) return;
       setHits(results);
       setEvidenceState(null);
       setNotice(
@@ -911,11 +966,12 @@ function App() {
           : "No evidence met this lexical query.",
       );
     } catch (caught) {
+      if (searchRequestRef.current !== requestId) return;
       setHits([]);
       setError(errorMessage(caught));
       setNotice("Search stopped safely.");
     } finally {
-      setBusy(null);
+      if (searchRequestRef.current === requestId) setBusy(null);
     }
   };
 
@@ -1086,11 +1142,18 @@ function App() {
           <section className="ocr-controls" aria-labelledby="ocr-heading">
             <div className="section-label" id="ocr-heading">Image OCR</div>
             <div className="ocr-control-row">
-              <span>{ocrStatus.enabled ? "enabled" : "disabled"}</span>
-              <button type="button" className="scope-action" onClick={toggleOcr} disabled={busy !== null}>
-                {ocrStatus.enabled ? "Disable & purge" : "Enable"}
-              </button>
+              <span>{ocrStatus ? (ocrStatus.enabled ? "enabled" : "disabled") : ocrStatusError ? "unavailable" : "checking"}</span>
+              {ocrStatusError ? (
+                <button type="button" className="scope-action" onClick={refreshOcrStatus} disabled={busy !== null}>
+                  Retry OCR status
+                </button>
+              ) : (
+                <button type="button" className="scope-action" onClick={toggleOcr} disabled={busy !== null || !ocrStatus}>
+                  {ocrStatus ? (ocrStatus.enabled ? "Disable & purge" : "Enable") : "Checking OCR…"}
+                </button>
+              )}
             </div>
+            {ocrStatusError && <p className="scope-note" role="alert">OCR status unavailable: {ocrStatusError}</p>}
             <p className="scope-note">Runs on-device through macOS Vision. Disabling removes derived text and keeps original images.</p>
             <button type="button" className="scope-action" onClick={purgeOcr} disabled={busy !== null}>
               Purge derived OCR now
@@ -1273,7 +1336,7 @@ function App() {
           <span className="keyboard-hints" aria-hidden="true">
             <kbd aria-hidden="true">⌘K</kbd><kbd aria-hidden="true">↵</kbd>
           </span>
-          <button type="submit" disabled={busy !== null || !query.trim()}>
+          <button type="submit" disabled={busy !== null || captureBusy === "purge" || !query.trim()}>
             {busy === "search" ? "Searching" : "Search"}
           </button>
         </form>

@@ -1,4 +1,4 @@
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { invoke } from "@tauri-apps/api/core";
 
@@ -132,6 +132,40 @@ const relationshipView = {
   },
 };
 
+const enabledOcrStatus = { enabled: true, derived_versions: 1, derived_passages: 2 };
+const selectedRoot = {
+  locator: "/Users/test/notes",
+  kind: "directory",
+  enabled: true,
+  read_only: true,
+  status: "available",
+};
+
+function mockPrivacyLibrary() {
+  invokeMock.mockImplementation(async (command) => {
+    if (command === "reconcile_approved_roots") return {};
+    if (command === "list_source_roots") return [selectedRoot];
+    if (command === "library_stats") return readyStats;
+    if (command === "capture_status") return { paused: false, excluded_apps: [], capture_root: "/tmp/loom-captures", policy_error: null };
+    if (command === "ocr_status") return enabledOcrStatus;
+    if (command === "search") return [hit];
+    if (command === "resolve_evidence") return { ...hit, passage_text: "Verified sensitive passage", extractor_id: "loom.text", extractor_version: "0.1.0", extraction_metadata: {} };
+    if (command === "revoke_source_root") return { ...selectedRoot, enabled: false, status: "revoked" };
+    if (command === "purge_root") return { selector: "root", artifacts_deleted: 1, versions_deleted: 1, passages_deleted: 1, relationships_deleted: 0, bookmark_records_deleted: 0, files_deleted: 0, bytes_deleted: 0, paths: [] };
+    if (command === "purge_captures") return { artifacts_deleted: 1, versions_deleted: 1, passages_deleted: 2 };
+    if (command === "set_ocr_enabled" || command === "purge_ocr_records") return { versions_deleted: 1, passages_deleted: 2 };
+    throw new Error(`unexpected command: ${command}`);
+  });
+}
+
+async function searchAndViewEvidence() {
+  fireEvent.change(screen.getByRole("textbox", { name: "Search your local sources" }), { target: { value: "retry anomalies" } });
+  fireEvent.submit(screen.getByRole("search"));
+  fireEvent.click(await screen.findByRole("button", { name: "View evidence" }));
+  await screen.findByText("Verified sensitive passage");
+  await waitFor(() => expect(screen.getByRole("button", { name: "View evidence" })).toBeEnabled());
+}
+
 describe("desktop truth path", () => {
   afterEach(() => {
     cleanup();
@@ -141,11 +175,240 @@ describe("desktop truth path", () => {
     invokeMock.mockReset();
   });
 
+  it("loads the persisted disabled OCR policy before offering to enable it", async () => {
+    mockPrivacyLibrary();
+    const baseline = invokeMock.getMockImplementation();
+    let enabled = false;
+    invokeMock.mockImplementation(async (command, args) => {
+      if (command === "ocr_status") return { enabled, derived_versions: 0, derived_passages: 0 };
+      if (command === "set_ocr_enabled") {
+        enabled = (args as { enabled: boolean }).enabled;
+        return { versions_deleted: 0, passages_deleted: 0 };
+      }
+      return baseline?.(command, args);
+    });
+
+    render(<App />);
+    const enable = await screen.findByRole("button", { name: "Enable" });
+    expect(screen.getByText("disabled")).toBeInTheDocument();
+    fireEvent.click(enable);
+    expect(await screen.findByRole("button", { name: "Disable & purge" })).toBeInTheDocument();
+    expect(screen.getByText("enabled")).toBeInTheDocument();
+  });
+
+  it("keeps an unreadable OCR policy visible and does not assume it is enabled", async () => {
+    mockPrivacyLibrary();
+    const baseline = invokeMock.getMockImplementation();
+    invokeMock.mockImplementation(async (command, args) => {
+      if (command === "ocr_status") throw new Error("persisted OCR policy is invalid");
+      return baseline?.(command, args);
+    });
+
+    render(<App />);
+    expect(await screen.findByText(/OCR status unavailable.*persisted OCR policy is invalid/)).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Disable & purge" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Retry OCR status" })).toBeEnabled();
+  });
+
+  it("loads saved OCR policy even when startup folder reconciliation fails", async () => {
+    mockPrivacyLibrary();
+    const baseline = invokeMock.getMockImplementation();
+    invokeMock.mockImplementation(async (command, args) => {
+      if (command === "reconcile_approved_roots") throw new Error("saved folder access denied");
+      if (command === "ocr_status") return { enabled: false, derived_versions: 0, derived_passages: 0 };
+      return baseline?.(command, args);
+    });
+    render(<App />);
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("saved folder access denied");
+    expect(await screen.findByRole("button", { name: "Enable" })).toBeInTheDocument();
+    expect(screen.getByText("disabled")).toBeInTheDocument();
+  });
+
+  it("refreshes OCR policy when the library changes outside the OCR controls", async () => {
+    mockPrivacyLibrary();
+    const baseline = invokeMock.getMockImplementation();
+    let enabled = true;
+    invokeMock.mockImplementation(async (command, args) => {
+      if (command === "ocr_status") return { enabled, derived_versions: 0, derived_passages: 0 };
+      if (command === "index_selected_folder") {
+        enabled = false;
+        return { run_id: "index-fixture", discovered: 1, attempted: 1, indexed: 1, unchanged: 0, skipped: 0, failed: 0, cancelled: 0, bytes_read: 82, failures: [] };
+      }
+      return baseline?.(command, args);
+    });
+
+    render(<App />);
+    await screen.findByRole("button", { name: "Disable & purge" });
+    fireEvent.click(screen.getByRole("button", { name: "Add a folder" }));
+    expect(await screen.findByRole("button", { name: "Enable" })).toBeInTheDocument();
+    expect(screen.getByText("disabled")).toBeInTheDocument();
+  });
+
+  it.each([
+    "Revoke /Users/test/notes",
+    "Delete indexed data for /Users/test/notes",
+    "Purge captures",
+    "Disable & purge",
+    "Purge derived OCR now",
+  ])("removes cached excerpts and verified evidence when activating %s", async (action) => {
+    mockPrivacyLibrary();
+    render(<App />);
+    await searchAndViewEvidence();
+    fireEvent.click(screen.getByRole("button", { name: action }));
+
+    await waitFor(() => {
+      expect(screen.queryByText("retry anomalies")).not.toBeInTheDocument();
+      expect(screen.queryByText("Verified sensitive passage")).not.toBeInTheDocument();
+      expect(screen.queryByRole("region", { name: hit.title })).not.toBeInTheDocument();
+    });
+  });
+
+  it("does not restore a pending verified passage after capture purge", async () => {
+    mockPrivacyLibrary();
+    const baseline = invokeMock.getMockImplementation();
+    let finishEvidence: (value: unknown) => void = () => {};
+    invokeMock.mockImplementation(async (command, args) => {
+      if (command === "resolve_evidence") return new Promise((resolve) => { finishEvidence = resolve; });
+      return baseline?.(command, args);
+    });
+    render(<App />);
+    fireEvent.change(screen.getByRole("textbox", { name: "Search your local sources" }), { target: { value: "retry anomalies" } });
+    fireEvent.submit(screen.getByRole("search"));
+    fireEvent.click(await screen.findByRole("button", { name: "View evidence" }));
+    fireEvent.click(screen.getByRole("button", { name: "Purge captures" }));
+    await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent("Removed committed capture PNGs"));
+
+    await act(async () => finishEvidence({ ...hit, passage_text: "Verified sensitive passage", extractor_id: "loom.text", extractor_version: "0.1.0", extraction_metadata: {} }));
+    expect(screen.queryByText("Verified sensitive passage")).not.toBeInTheDocument();
+    expect(screen.queryByText("retry anomalies")).not.toBeInTheDocument();
+  });
+
+  it("ignores a search completing after capture purge and keeps the next search usable", async () => {
+    mockPrivacyLibrary();
+    const baseline = invokeMock.getMockImplementation();
+    let finishSearch: (value: typeof hit[]) => void = () => {};
+    let searchCalls = 0;
+    const freshHit = { ...hit, passage_id: "77777777-7777-4777-8777-777777777777", title: "fresh.md", excerpt: { segments: [{ text: "Fresh allowed evidence", highlighted: false }] } };
+    invokeMock.mockImplementation(async (command, args) => {
+      if (command === "search") {
+        searchCalls += 1;
+        return searchCalls === 1 ? new Promise<typeof hit[]>((resolve) => { finishSearch = resolve; }) : [freshHit];
+      }
+      return baseline?.(command, args);
+    });
+    render(<App />);
+    fireEvent.change(screen.getByRole("textbox", { name: "Search your local sources" }), { target: { value: "retry anomalies" } });
+    fireEvent.submit(screen.getByRole("search"));
+    fireEvent.click(screen.getByRole("button", { name: "Purge captures" }));
+    await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent("Removed committed capture PNGs"));
+    expect(within(screen.getByRole("search")).getByRole("button", { name: "Search" })).toBeEnabled();
+    fireEvent.submit(screen.getByRole("search"));
+    expect(await screen.findByText("Fresh allowed evidence")).toBeInTheDocument();
+
+    await act(async () => finishSearch([hit]));
+    expect(screen.queryByText("retry anomalies")).not.toBeInTheDocument();
+    expect(screen.getByText("Fresh allowed evidence")).toBeInTheDocument();
+  });
+
+  it("clears cached evidence when capture purge fails after a partial deletion", async () => {
+    mockPrivacyLibrary();
+    const baseline = invokeMock.getMockImplementation();
+    invokeMock.mockImplementation(async (command, args) => {
+      if (command === "purge_captures") throw new Error("could not purge capture: permission denied");
+      return baseline?.(command, args);
+    });
+    render(<App />);
+    await searchAndViewEvidence();
+    fireEvent.click(screen.getByRole("button", { name: "Purge captures" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("could not purge capture: permission denied");
+    expect(screen.getByRole("status")).toHaveTextContent("Capture purge stopped safely.");
+    expect(screen.queryByText("Verified sensitive passage")).not.toBeInTheDocument();
+    expect(screen.queryByText("retry anomalies")).not.toBeInTheDocument();
+  });
+
+  it("keeps the selected OCR policy when an older refresh completes during the policy change", async () => {
+    mockPrivacyLibrary();
+    const baseline = invokeMock.getMockImplementation();
+    let statusReads = 0;
+    let finishPolicy: (value: unknown) => void = () => {};
+    let finishRefresh: (value: typeof enabledOcrStatus) => void = () => {};
+    let finishCapture: (value: unknown) => void = () => {};
+    invokeMock.mockImplementation(async (command, args) => {
+      if (command === "set_ocr_enabled") return new Promise((resolve) => { finishPolicy = resolve; });
+      if (command === "capture_intentional") return new Promise((resolve) => { finishCapture = resolve; });
+      if (command === "ocr_status") {
+        statusReads += 1;
+        if (statusReads === 2) return new Promise((resolve) => { finishRefresh = resolve; });
+        return { ...enabledOcrStatus, enabled: statusReads === 1 };
+      }
+      return baseline?.(command, args);
+    });
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "Disable & purge" }));
+    fireEvent.click(screen.getByRole("button", { name: "Capture region" }));
+    await act(async () => finishCapture({
+      status: "captured", source_uri: "/tmp/loom-captures/fixture.png", content_hash: "blake3:capture", byte_size: 120, duplicate: false,
+      context: { mode: "region", captured_at: "2026-08-24T20:00:00Z", display_scale_milli: 1000, bounds: { x: 0, y: 0, width: 1200, height: 600 }, app_name: null, window_title: null, source: "macOS screencapture" },
+    }));
+    await act(async () => finishPolicy({ versions_deleted: 1, passages_deleted: 2 }));
+    await act(async () => finishRefresh(enabledOcrStatus));
+
+    expect(await screen.findByRole("button", { name: "Enable" })).toBeInTheDocument();
+    expect(screen.getByText("disabled")).toBeInTheDocument();
+  });
+
+  it.each(["Disable & purge", "Purge derived OCR now"])("offers a status retry after %s succeeds but its status read fails", async (action) => {
+    mockPrivacyLibrary();
+    const baseline = invokeMock.getMockImplementation();
+    let changed = false;
+    let unavailable = true;
+    invokeMock.mockImplementation(async (command, args) => {
+      if (command === "set_ocr_enabled" || command === "purge_ocr_records") {
+        changed = true;
+        return { versions_deleted: 1, passages_deleted: 2 };
+      }
+      if (command === "ocr_status" && changed) {
+        if (unavailable) throw new Error("OCR status read denied");
+        return { enabled: false, derived_versions: 0, derived_passages: 0 };
+      }
+      return baseline?.(command, args);
+    });
+    render(<App />);
+    await screen.findByRole("button", { name: "Disable & purge" });
+    fireEvent.click(screen.getByRole("button", { name: action }));
+
+    expect(await screen.findByRole("button", { name: "Retry OCR status" })).toBeEnabled();
+    expect(screen.getByText(/OCR status unavailable.*OCR status read denied/)).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Disable & purge" })).not.toBeInTheDocument();
+    unavailable = false;
+    fireEvent.click(screen.getByRole("button", { name: "Retry OCR status" }));
+    expect(await screen.findByRole("button", { name: "Enable" })).toBeInTheDocument();
+  });
+
+  it("retains the known OCR policy when changing it is denied", async () => {
+    mockPrivacyLibrary();
+    const baseline = invokeMock.getMockImplementation();
+    invokeMock.mockImplementation(async (command, args) => {
+      if (command === "set_ocr_enabled") throw new Error("OCR policy write denied");
+      return baseline?.(command, args);
+    });
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "Disable & purge" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("OCR policy write denied");
+    expect(screen.getByRole("status")).toHaveTextContent("OCR policy change stopped safely.");
+    expect(screen.getByRole("button", { name: "Disable & purge" })).toBeEnabled();
+    expect(screen.getByText("enabled")).toBeInTheDocument();
+  });
+
   it("exposes an accessible empty state and keyboard-search form", async () => {
     invokeMock.mockImplementation(async (command) => {
       if (command === "reconcile_approved_roots") return {};
       if (command === "list_source_roots") return [];
       if (command === "library_stats") return emptyStats;
+      if (command === "ocr_status") return enabledOcrStatus;
       throw new Error(`unexpected command: ${command}`);
     });
 
@@ -182,6 +445,7 @@ describe("desktop truth path", () => {
           failures: [],
         };
       }
+      if (command === "ocr_status") return enabledOcrStatus;
       throw new Error(`unexpected command: ${command}`);
     });
 
@@ -201,6 +465,7 @@ describe("desktop truth path", () => {
       if (command === "reconcile_approved_roots") return {};
       if (command === "list_source_roots") return [];
       if (command === "library_stats") return emptyStats;
+      if (command === "ocr_status") return enabledOcrStatus;
       throw new Error(`unexpected command: ${command}`);
     });
 
@@ -221,6 +486,7 @@ describe("desktop truth path", () => {
       if (command === "library_stats") return readyStats;
       if (command === "search") return [hit];
       if (command === "open_artifact") return undefined;
+      if (command === "ocr_status") return enabledOcrStatus;
       throw new Error(`unexpected command: ${command}`);
     });
 
@@ -258,6 +524,7 @@ describe("desktop truth path", () => {
       if (command === "list_source_roots") return [];
       if (command === "library_stats") return readyStats;
       if (command === "search") return [pdfHit];
+      if (command === "ocr_status") return enabledOcrStatus;
       throw new Error(`unexpected command: ${command}`);
     });
 
@@ -293,6 +560,7 @@ describe("desktop truth path", () => {
       if (command === "library_stats") return readyStats;
       if (command === "search") return [pdfHit];
       if (command === "resolve_evidence") return evidenceView;
+      if (command === "ocr_status") return enabledOcrStatus;
       throw new Error(`unexpected command: ${command}`);
     });
 
@@ -341,6 +609,7 @@ describe("desktop truth path", () => {
       if (command === "search") return [hit];
       if (command === "resolve_evidence") return evidenceView;
       if (command === "list_relationships") return [relationshipView];
+      if (command === "ocr_status") return enabledOcrStatus;
       throw new Error(`unexpected command: ${command}`);
     });
 
@@ -386,6 +655,7 @@ describe("desktop truth path", () => {
       };
       if (command === "resolve_evidence") return (args as { request: typeof targetReference }).request.artifact_id === hit.artifact_id ? view : { ...view, ...targetReference, title: target.title, source_uri: target.source_uri };
       if (command === "open_artifact") return undefined;
+      if (command === "ocr_status") return enabledOcrStatus;
       throw new Error(`unexpected command: ${command}`);
     });
     render(<App />);
@@ -429,6 +699,7 @@ describe("desktop truth path", () => {
         if ((args as { request: typeof reference }).request.artifact_id !== hit.artifact_id) throw new Error("related source changed; re-index before viewing");
         return { ...hit, passage_text: "original evidence", extractor_id: "loom.text", extractor_version: "0.1.0", extraction_metadata: {} };
       }
+      if (command === "ocr_status") return enabledOcrStatus;
       throw new Error(`unexpected command: ${command}`);
     });
     render(<App />);
@@ -455,6 +726,7 @@ describe("desktop truth path", () => {
         versions: [{ version_id: relationshipView.target.version_id, content_hash: relationshipView.target.content_hash, byte_size: 42, extractor_id: "loom.bookmarks", extractor_version: "0.1.0", created_at: "2026-10-02", is_current: true, evidence: null }],
         truncated: false,
       };
+      if (command === "ocr_status") return enabledOcrStatus;
       throw new Error(`unexpected command: ${command}`);
     });
     render(<App />);
@@ -481,6 +753,7 @@ describe("desktop truth path", () => {
       if (command === "list_relationships") return [relationshipView];
       if (command === "artifact_version_history") return (args as { artifactId: string }).artifactId === hit.artifact_id
         ? { artifact: relationshipView.source, versions: [], truncated: false } : oldHistory;
+      if (command === "ocr_status") return enabledOcrStatus;
       throw new Error(`unexpected command: ${command}`);
     });
     render(<App />);
@@ -516,6 +789,7 @@ describe("desktop truth path", () => {
         title: (args as { request: typeof reference }).request.version_id === hit.version_id ? hit.title : "new-version.md",
         passage_text: "verified evidence", extractor_id: "loom.text", extractor_version: "0.1.0", extraction_metadata: {},
       };
+      if (command === "ocr_status") return enabledOcrStatus;
       throw new Error(`unexpected command: ${command}`);
     });
     render(<App />);
@@ -540,6 +814,7 @@ describe("desktop truth path", () => {
       if (command === "library_stats") return readyStats;
       if (command === "search") return [hit];
       if (command === "resolve_evidence") return pending;
+      if (command === "ocr_status") return enabledOcrStatus;
       throw new Error(`unexpected command: ${command}`);
     });
     render(<App />);
@@ -567,6 +842,7 @@ describe("desktop truth path", () => {
         extractor_version: "0.1.0",
         extraction_metadata: { provider_id: "macos.vision" },
       };
+      if (command === "ocr_status") return enabledOcrStatus;
       throw new Error(`unexpected command: ${command}`);
     });
 
@@ -600,6 +876,7 @@ describe("desktop truth path", () => {
         extractor_version: "0.1.0",
         extraction_metadata: { provider_id: "macos.vision", confidence_state: "low_confidence" },
       };
+      if (command === "ocr_status") return enabledOcrStatus;
       throw new Error(`unexpected command: ${command}`);
     });
 
@@ -618,6 +895,7 @@ describe("desktop truth path", () => {
       if (command === "library_stats") return readyStats;
       if (command === "search") return [hit];
       if (command === "resolve_evidence") throw new Error("artifact is stale or unavailable: 11111111");
+      if (command === "ocr_status") return enabledOcrStatus;
       throw new Error(`unexpected command: ${command}`);
     });
 
@@ -642,6 +920,7 @@ describe("desktop truth path", () => {
       if (command === "list_source_roots") return [];
       if (command === "library_stats") return emptyStats;
       if (command === "search") return pendingSearch;
+      if (command === "ocr_status") return enabledOcrStatus;
       throw new Error(`unexpected command: ${command}`);
     });
 
@@ -671,6 +950,7 @@ describe("desktop truth path", () => {
           failures: [{ source: "/Users/test/notes/oversized.md", reason: "source exceeds limit" }],
         };
       }
+      if (command === "ocr_status") return enabledOcrStatus;
       throw new Error(`unexpected command: ${command}`);
     });
 
@@ -701,6 +981,7 @@ describe("desktop truth path", () => {
           failures: [{ source: "/Users/test/blank.png", reason: "image extraction failed: no-readable-text: provider returned no text regions" }],
         };
       }
+      if (command === "ocr_status") return enabledOcrStatus;
       throw new Error(`unexpected command: ${command}`);
     });
 
@@ -721,6 +1002,7 @@ describe("desktop truth path", () => {
       if (command === "library_stats") return readyStats;
       if (command === "index_selected_folder") return pendingIndex;
       if (command === "cancel_indexing") return true;
+      if (command === "ocr_status") return enabledOcrStatus;
       throw new Error(`unexpected command: ${command}`);
     });
 
@@ -754,6 +1036,7 @@ describe("desktop truth path", () => {
       if (command === "list_source_roots") return [];
       if (command === "library_stats") return emptyStats;
       if (command === "search") return [];
+      if (command === "ocr_status") return enabledOcrStatus;
       throw new Error(`unexpected command: ${command}`);
     });
 
@@ -780,6 +1063,7 @@ describe("desktop truth path", () => {
       if (command === "list_source_roots") return roots;
       if (command === "library_stats") return emptyStats;
       if (command === "revoke_source_root") return { ...roots[0], enabled: false, status: "revoked" };
+      if (command === "ocr_status") return enabledOcrStatus;
       throw new Error(`unexpected command: ${command}`);
     });
 
@@ -794,12 +1078,16 @@ describe("desktop truth path", () => {
   });
 
   it("exposes a local OCR disable and purge control", async () => {
+    let enabled = true;
     invokeMock.mockImplementation(async (command) => {
       if (command === "reconcile_approved_roots") return {};
       if (command === "list_source_roots") return [];
       if (command === "library_stats") return emptyStats;
-      if (command === "set_ocr_enabled") return { versions_deleted: 1, passages_deleted: 2 };
-      if (command === "ocr_status") return { enabled: false, derived_versions: 0, derived_passages: 0 };
+      if (command === "set_ocr_enabled") {
+        enabled = false;
+        return { versions_deleted: 1, passages_deleted: 2 };
+      }
+      if (command === "ocr_status") return { enabled, derived_versions: 0, derived_passages: 0 };
       throw new Error(`unexpected command: ${command}`);
     });
 
@@ -840,6 +1128,7 @@ describe("desktop truth path", () => {
         bytes_deleted: 64,
         paths: ["/tmp/loom/cache/query.cache"],
       };
+      if (command === "ocr_status") return enabledOcrStatus;
       throw new Error(`unexpected command: ${command}`);
     });
 
@@ -886,6 +1175,7 @@ describe("desktop truth path", () => {
         },
       };
       if (command === "purge_captures") return { artifacts_deleted: artifactsDeleted, versions_deleted: artifactsDeleted, passages_deleted: artifactsDeleted * 2 };
+      if (command === "ocr_status") return enabledOcrStatus;
       throw new Error(`unexpected command: ${command}`);
     });
 
@@ -912,6 +1202,7 @@ describe("desktop truth path", () => {
       if (command === "library_stats") return emptyStats;
       if (command === "capture_status") return { paused: false, excluded_apps: [], capture_root: "/tmp/loom-capture-fixture", policy_error: null };
       if (command === "capture_intentional") throw new Error(reason);
+      if (command === "ocr_status") return enabledOcrStatus;
       throw new Error(`unexpected command: ${command}`);
     });
     render(<App />);
@@ -934,6 +1225,7 @@ describe("desktop truth path", () => {
         policy_error: "policy is malformed",
       };
       if (command === "set_capture_paused") throw new Error("capture stays paused because the saved policy was rejected");
+      if (command === "ocr_status") return enabledOcrStatus;
       throw new Error(`unexpected command: ${command}`);
     });
 
