@@ -59,6 +59,194 @@ fn storage_inspection_accounts_for_sources_and_known_disposable_files() {
             "missing storage category {category}"
         );
     }
+    let wire = serde_json::to_value(&inspection).unwrap();
+    for entry in wire["entries"].as_array().unwrap() {
+        if matches!(
+            entry["category"].as_str().unwrap(),
+            "database"
+                | "sqlite_sidecar"
+                | "cache"
+                | "model_cache"
+                | "thumbnails"
+                | "ocr_scratch"
+                | "temporary_export"
+                | "log"
+        ) {
+            assert_eq!(entry["exists"], true, "managed path was inspected");
+        }
+    }
+}
+
+#[test]
+fn storage_source_history_keeps_version_sizes_and_original_projection() {
+    // Synthetic text generated at runtime; LOOM retains observations, not original file copies.
+    let sources = tempdir().unwrap();
+    let database = tempdir().unwrap();
+    let source = sources.path().join("history.md");
+    let original_prefix = "originalstoragehistory source marker ";
+    let original = format!(
+        "{original_prefix}{}",
+        "x".repeat(192 - original_prefix.len())
+    );
+    let revision_prefix = "revisedstoragehistory source marker ";
+    let revision = format!(
+        "{revision_prefix}{}",
+        "y".repeat(60 - revision_prefix.len())
+    );
+    fs::write(&source, &original).unwrap();
+    let library = Library::open(database.path().join("library.sqlite3")).unwrap();
+    library.index_path(&source).unwrap();
+    let before = search(&library, "originalstoragehistory").pop().unwrap();
+    let original_observation = library.inspect_source(&source).unwrap();
+
+    fs::write(&source, &revision).unwrap();
+    library.index_path(&source).unwrap();
+    assert_eq!(library.stats().unwrap().versions, 2);
+    fs::write(&source, &original).unwrap();
+    library.index_path(&source).unwrap();
+    let after = search(&library, "originalstoragehistory").pop().unwrap();
+    assert_eq!(after.artifact_id, before.artifact_id);
+    assert_eq!(after.version_id, before.version_id);
+    assert_eq!(after.passage_id, before.passage_id);
+    assert_eq!(
+        library.inspect_source(&source).unwrap(),
+        original_observation
+    );
+    assert_eq!(library.stats().unwrap().versions, 2);
+    let canonical_before = library.export_portable().unwrap().tables;
+
+    let inspection = library.inspect_storage().unwrap();
+    assert_eq!(inspection.source_bytes, 252);
+    let sources = inspection
+        .entries
+        .iter()
+        .filter(|entry| entry.category == "source")
+        .collect::<Vec<_>>();
+    assert_eq!(sources.len(), 1);
+    assert_eq!(sources[0].bytes, 252);
+    assert_eq!(sources[0].files, 1);
+    assert_eq!(fs::metadata(&source).unwrap().len(), 192);
+    assert_eq!(fs::read_to_string(&source).unwrap(), original);
+    assert_eq!(library.export_portable().unwrap().tables, canonical_before);
+    let wire = serde_json::to_value(sources[0]).unwrap();
+    assert!(
+        wire["exists"].is_null(),
+        "history does not measure source availability"
+    );
+}
+
+#[test]
+fn storage_source_availability_is_unmeasured_for_existing_missing_and_revoked_locators() {
+    let mut availability = Vec::new();
+    for scenario in ["existing", "missing", "revoked"] {
+        let sources = tempdir().unwrap();
+        let database = tempdir().unwrap();
+        let source = sources.path().join("selected.md");
+        let original = "syntheticstorageavailability source marker";
+        fs::write(&source, original).unwrap();
+        let locator = source
+            .canonicalize()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        let library = Library::open(database.path().join("library.sqlite3")).unwrap();
+        library.index_path(&source).unwrap();
+        match scenario {
+            "missing" => fs::remove_file(&source).unwrap(),
+            "revoked" => {
+                library.revoke_source_root(&locator).unwrap();
+                assert!(search(&library, "syntheticstorageavailability").is_empty());
+            }
+            _ => {}
+        }
+        let before = library.export_portable().unwrap().tables;
+        let inspection = library.inspect_storage().unwrap();
+        assert_eq!(inspection.source_bytes, original.len() as u64);
+        assert_eq!(library.export_portable().unwrap().tables, before);
+        if scenario != "missing" {
+            assert_eq!(fs::read_to_string(&source).unwrap(), original);
+        }
+        let source_entries = inspection
+            .entries
+            .iter()
+            .filter(|entry| entry.category == "source")
+            .collect::<Vec<_>>();
+        assert_eq!(source_entries.len(), 1);
+        assert_eq!(
+            source_entries[0].source_uri.as_deref(),
+            Some(locator.as_str())
+        );
+        let wire = serde_json::to_value(source_entries[0]).unwrap();
+        availability.push((scenario, wire["exists"].clone()));
+    }
+    assert!(
+        availability.iter().all(|(_, exists)| exists.is_null()),
+        "source availability was invented: {availability:?}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn storage_source_symlink_replacement_does_not_probe_or_admit_the_target() {
+    let sources = tempdir().unwrap();
+    let database = tempdir().unwrap();
+    let source = sources.path().join("selected.md");
+    let outside = sources.path().join("unselected.md");
+    let original = "selectedstoragesource marker";
+    let outside_bytes = "unselectedstoragetarget marker";
+    fs::write(&source, original).unwrap();
+    fs::write(&outside, outside_bytes).unwrap();
+    let library = Library::open(database.path().join("library.sqlite3")).unwrap();
+    library.index_path(&source).unwrap();
+    fs::remove_file(&source).unwrap();
+    std::os::unix::fs::symlink(&outside, &source).unwrap();
+    let before = library.export_portable().unwrap().tables;
+
+    let inspection = library.inspect_storage().unwrap();
+    assert_eq!(inspection.source_bytes, original.len() as u64);
+    assert_eq!(library.export_portable().unwrap().tables, before);
+    assert_eq!(fs::read_to_string(&outside).unwrap(), outside_bytes);
+    assert!(search(&library, "unselectedstoragetarget").is_empty());
+    let source_entry = inspection
+        .entries
+        .iter()
+        .find(|entry| entry.category == "source")
+        .unwrap();
+    let wire = serde_json::to_value(source_entry).unwrap();
+    assert!(
+        wire["exists"].is_null(),
+        "symlink target availability was claimed"
+    );
+}
+
+#[test]
+fn storage_url_and_in_memory_estimates_do_not_claim_filesystem_availability() {
+    let directory = tempdir().unwrap();
+    let export = directory.path().join("bookmarks.html");
+    let html = "<!DOCTYPE NETSCAPE-Bookmark-file-1>\n\
+                <TITLE>Bookmarks</TITLE><H1>Bookmarks</H1>\n\
+                <DL><p><DT><A HREF=\"https://example.invalid/storage\">Synthetic storage bookmark</A></DL><p>";
+    fs::write(&export, html).unwrap();
+    let library = Library::open_in_memory().unwrap();
+    assert_eq!(library.import_bookmarks(&export).unwrap().remote_fetches, 0);
+    let before = library.export_portable().unwrap().tables;
+    let inspection = library.inspect_storage().unwrap();
+    assert!(inspection.source_bytes > 0);
+    assert!(inspection
+        .entries
+        .iter()
+        .any(|entry| entry.source_uri.as_deref() == Some("https://example.invalid/storage")));
+    assert_eq!(library.export_portable().unwrap().tables, before);
+    assert_eq!(fs::read_to_string(&export).unwrap(), html);
+    let wire = serde_json::to_value(inspection).unwrap();
+    assert!(
+        wire["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|entry| entry["exists"].is_null()),
+        "logical and URL entries do not measure filesystem presence"
+    );
 }
 
 #[test]

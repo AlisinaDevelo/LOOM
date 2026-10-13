@@ -202,11 +202,11 @@ pub struct LibraryStats {
     pub indexed_bytes: u64,
 }
 
-/// A bounded estimate for one class of bytes retained under LOOM's application data directory.
+/// One logical byte estimate or measured class of known managed local files.
 ///
-/// The estimate is intentionally explicit about its category and source. Canonical source files
-/// remain user-owned and are never removed by storage cleanup; only paths inside LOOM's known
-/// disposable directories are eligible for cleanup.
+/// Source entries sum recorded version sizes without inspecting the user-owned originals.
+/// Logical estimates can overlap the measured database file size. Only paths inside LOOM's known
+/// disposable directories are eligible for storage cleanup.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StorageEntry {
     pub category: String,
@@ -214,7 +214,9 @@ pub struct StorageEntry {
     pub source_uri: Option<String>,
     pub bytes: u64,
     pub files: u64,
-    pub exists: bool,
+    /// None means path availability was not measured (source and logical-record estimates).
+    /// Some reports managed-path presence observed through no-follow filesystem metadata.
+    pub exists: Option<bool>,
 }
 
 /// Read-only accounting for canonical records, derived indexes, SQLite sidecars, and disposable
@@ -224,10 +226,12 @@ pub struct StorageInspection {
     pub database_path: Option<String>,
     pub generated_at: String,
     pub entries: Vec<StorageEntry>,
+    /// Combined logical estimates and managed file lengths, not physical disk usage.
     pub total_bytes: u64,
     pub canonical_bytes: u64,
     pub derived_bytes: u64,
     pub disposable_bytes: u64,
+    /// Sum of all recorded source-version sizes, including historical observations.
     pub source_bytes: u64,
 }
 
