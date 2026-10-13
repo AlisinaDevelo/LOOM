@@ -2662,9 +2662,11 @@ impl Library {
 
     /// Accounts for canonical source records, SQLite sidecars, and known disposable files.
     ///
-    /// The report is an estimate rather than a forensic disk-usage claim: canonical source bytes
-    /// come from the recorded version size, while database and disposable entries use filesystem
-    /// sizes. Symlinks are never followed, and unknown sibling directories are not inspected.
+    /// Source bytes sum all recorded version sizes, including history; originals and URL locators
+    /// are not inspected. Their availability, and logical-record path availability, is unmeasured.
+    /// Managed filesystem entries report no-follow metadata presence. Logical estimates overlap
+    /// database file lengths, so the combined total is not physical disk usage. Unknown sibling
+    /// directories are not inspected.
     pub fn inspect_storage(&self) -> Result<StorageInspection> {
         let generated_at = Utc::now().to_rfc3339();
         let database_path = self.database_path.clone();
@@ -2697,7 +2699,7 @@ impl Library {
                     source_uri: Some(source_uri),
                     bytes,
                     files,
-                    exists: true,
+                    exists: None,
                 });
             }
 
@@ -2716,7 +2718,7 @@ impl Library {
                     source_uri: None,
                     bytes: canonical_bytes,
                     files: 1,
-                    exists: true,
+                    exists: None,
                 });
             }
 
@@ -2738,7 +2740,7 @@ impl Library {
                     source_uri: None,
                     bytes: derived_bytes,
                     files: 1,
-                    exists: true,
+                    exists: None,
                 });
             }
         }
@@ -2753,7 +2755,7 @@ impl Library {
                     source_uri: None,
                     bytes: database_bytes,
                     files: 1,
-                    exists: true,
+                    exists: Some(true),
                 });
             }
             for suffix in ["-wal", "-shm", "-journal"] {
@@ -2766,35 +2768,35 @@ impl Library {
                         source_uri: None,
                         bytes,
                         files: 1,
-                        exists: true,
+                        exists: Some(true),
                     });
                 }
             }
             if let Some(root) = path.parent() {
                 for (directory, category) in DISPOSABLE_DIRECTORIES {
                     let directory_path = root.join(directory);
-                    let (bytes, files) = directory_size(&directory_path)?;
-                    if bytes > 0 || directory_path.exists() {
+                    let (bytes, files, exists) = directory_size(&directory_path)?;
+                    if bytes > 0 || exists {
                         entries.push(StorageEntry {
                             category: (*category).into(),
                             path: directory_path.to_string_lossy().into_owned(),
                             source_uri: None,
                             bytes,
                             files,
-                            exists: directory_path.exists(),
+                            exists: Some(exists),
                         });
                     }
                 }
                 let captures = root.join("captures");
-                let (bytes, files) = directory_size(&captures)?;
-                if bytes > 0 || captures.exists() {
+                let (bytes, files, exists) = directory_size(&captures)?;
+                if bytes > 0 || exists {
                     entries.push(StorageEntry {
                         category: "capture".into(),
                         path: captures.to_string_lossy().into_owned(),
                         source_uri: None,
                         bytes,
                         files,
-                        exists: captures.exists(),
+                        exists: Some(exists),
                     });
                 }
             }
@@ -6016,14 +6018,14 @@ fn regular_file_size(path: &Path) -> Result<u64> {
     Ok(metadata.len())
 }
 
-fn directory_size(path: &Path) -> Result<(u64, u64)> {
+fn directory_size(path: &Path) -> Result<(u64, u64, bool)> {
     let metadata = match fs::symlink_metadata(path) {
         Ok(metadata) => metadata,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok((0, 0)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok((0, 0, false)),
         Err(error) => return Err(io_error(path, error)),
     };
     if metadata.file_type().is_symlink() || !metadata.is_dir() {
-        return Ok((0, 0));
+        return Ok((0, 0, true));
     }
     let mut bytes = 0_u64;
     let mut files = 0_u64;
@@ -6036,7 +6038,7 @@ fn directory_size(path: &Path) -> Result<(u64, u64)> {
             continue;
         }
         if child_metadata.is_dir() {
-            let (child_bytes, child_files) = directory_size(&child)?;
+            let (child_bytes, child_files, _) = directory_size(&child)?;
             bytes = bytes.saturating_add(child_bytes);
             files = files.saturating_add(child_files);
         } else if child_metadata.is_file() {
@@ -6044,7 +6046,7 @@ fn directory_size(path: &Path) -> Result<(u64, u64)> {
             files = files.saturating_add(1);
         }
     }
-    Ok((bytes, files))
+    Ok((bytes, files, true))
 }
 
 fn remove_regular_file(path: &Path, report: &mut DeletionReport) -> Result<()> {

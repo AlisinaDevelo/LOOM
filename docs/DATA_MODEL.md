@@ -223,8 +223,23 @@ deletes when explicitly applied.
 
 `storage_inspection` returns bounded `StorageEntry` records for source/version bytes, canonical
 and derived SQLite estimates, database sidecars, and the fixed disposable directories. It reports
-paths, approximate bytes, file counts, and whether the path exists; symlinks and unknown sibling
-directories are not followed. `purge_disposable_storage` removes regular files only from those
+paths, approximate bytes, counts, and measured or unmeasured path availability. `source_bytes`
+and each source entry sum all recorded version sizes, including history, with the logical artifact
+count in `files`. A 192-byte original, 60-byte revision, and return to the original reuse two
+versions and report 252 recorded bytes; the current original remains 192 bytes. These estimates
+do not imply retained original copies or measure current source files. Inspection does not stat/read
+source or URL locators, refresh consent, or widen selected scopes.
+
+`StorageEntry.exists` is now nullable: `None` serializes as explicit JSON `null` for source and
+logical canonical/derived estimates, including in-memory entries. CLI/Tauri consumers must accept
+that unmeasured state rather than infer presence or absence. `Some(bool)` remains a JSON boolean
+for known managed filesystem paths whose presence was observed with no-follow metadata; it does
+not promise that a path is readable or an appropriate file type. Unknown sibling directories and
+symlinks are not followed. This report change requires no canonical/portable schema migration.
+`total_bytes` combines logical estimates and measured managed file lengths, with SQLite payload
+estimates overlapping the database file; it is a combined accounting estimate, not disk usage.
+
+`purge_disposable_storage` removes regular files only from those
 known disposable directories and checkpoints the SQLite sidecars. It does not delete selected
 source files or managed captures, and it never manually unlinks a live SQLite WAL, SHM, or
 rollback-journal file.
