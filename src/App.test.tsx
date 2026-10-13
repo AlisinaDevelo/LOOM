@@ -1172,6 +1172,59 @@ describe("desktop truth path", () => {
     expect(await screen.findByRole("status")).toHaveTextContent("Removed 3 disposable files");
   });
 
+  it("keeps recorded source history distinct from measured files during storage cleanup", async () => {
+    const databasePath = "/synthetic/loom/library.sqlite3";
+    let inspection = {
+      database_path: databasePath,
+      generated_at: "2026-10-11T00:00:00Z",
+      entries: [
+        { category: "source", path: "/synthetic/notes/isolation.md", source_uri: "/synthetic/notes/isolation.md", bytes: 252, files: 1, exists: null },
+        { category: "source", path: "/synthetic/notes/field-notes.md", source_uri: "/synthetic/notes/field-notes.md", bytes: 161, files: 1, exists: null },
+        { category: "source", path: "/synthetic/notes/capture-contract.txt", source_uri: "/synthetic/notes/capture-contract.txt", bytes: 180, files: 1, exists: null },
+        { category: "canonical_records", path: databasePath, source_uri: null, bytes: 300, files: 1, exists: null },
+        { category: "derived_records", path: databasePath, source_uri: null, bytes: 960, files: 1, exists: null },
+        { category: "database", path: databasePath, source_uri: null, bytes: 4096, files: 1, exists: true },
+        { category: "cache", path: "/synthetic/loom/cache", source_uri: null, bytes: 64, files: 1, exists: true },
+      ],
+      total_bytes: 6013,
+      canonical_bytes: 893,
+      derived_bytes: 960,
+      disposable_bytes: 64,
+      // Three current originals total 533 bytes; the retained 60-byte older version is also recorded.
+      source_bytes: 593,
+    };
+    invokeMock.mockImplementation(async (command) => {
+      if (command === "reconcile_approved_roots") return {};
+      if (command === "list_source_roots") return [{ ...selectedRoot, locator: "/synthetic/notes" }];
+      if (command === "library_stats") return { ...readyStats, artifacts: 3, versions: 4, passages: 4, indexed_bytes: 593 };
+      if (command === "capture_status") return { paused: true, excluded_apps: [], capture_root: "/synthetic/loom/captures", policy_error: null };
+      if (command === "ocr_status") return enabledOcrStatus;
+      if (command === "storage_inspection") return inspection;
+      if (command === "purge_disposable_storage") {
+        inspection = { ...inspection, total_bytes: 5949, disposable_bytes: 0,
+          entries: inspection.entries.map((entry) => entry.category === "cache" ? { ...entry, bytes: 0, files: 0 } : entry) };
+        return { selector: "disposable-storage", artifacts_deleted: 0, versions_deleted: 0, passages_deleted: 0,
+          relationships_deleted: 0, bookmark_records_deleted: 0, files_deleted: 1, bytes_deleted: 64,
+          paths: ["/synthetic/loom/cache/query.cache"] };
+      }
+      throw new Error(`unexpected command: ${command}`);
+    });
+    render(<App />);
+    fireEvent.click(screen.getByRole("button", { name: "Inspect local storage" }));
+    const summary = await screen.findByLabelText("Storage summary");
+    expect(within(summary).getByText("Source versions").closest("div")).toHaveTextContent("593 B");
+    expect(within(summary).getByText("Combined estimate").closest("div")).toHaveTextContent("5.9 KB");
+    expect(summary).toHaveAccessibleDescription(/history.*older originals.*not retained or measured.*logical rows overlap database file size.*not disk usage/i);
+    expect(within(summary).queryByText("533 B")).not.toBeInTheDocument();
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Clear disposable files" }));
+    await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent("Removed 1 disposable file"));
+    expect(within(summary).getByText("Source versions").closest("div")).toHaveTextContent("593 B");
+    await waitFor(() => expect(within(summary).getByText("Combined estimate").closest("div")).toHaveTextContent("5.8 KB"));
+    expect(within(summary).getByText("Disposable").closest("div")).toHaveTextContent("0 B");
+  });
+
   it.each([0, 1])("keeps capture purge truthful for %i indexed records", async (artifactsDeleted) => {
     const captureStatus = { paused: false, excluded_apps: [], capture_root: "/Users/test/Library/Application Support/LOOM/captures", policy_error: null };
     invokeMock.mockImplementation(async (command, args) => {
